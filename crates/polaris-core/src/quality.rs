@@ -104,6 +104,11 @@ fn declares_blocked(answer: &str) -> bool {
 /// The extra unattended-profile line that `lean` adds.
 pub const LEAN_LINE: &str = "- Check your work with throwaway commands or scripts; do not add test files unless the task asks for them.";
 
+/// Whether `content` is a message the harness wrote, not the user.
+pub fn is_harness(content: &str) -> bool {
+    content.starts_with(MARK)
+}
+
 pub fn loop_request() -> String {
     format!("{MARK}{LOOP}")
 }

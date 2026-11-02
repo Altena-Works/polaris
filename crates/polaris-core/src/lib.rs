@@ -36,6 +36,7 @@ pub mod desktop_run;
 pub mod desktop_store;
 pub mod desktop_workflow;
 mod dir_watch;
+pub mod effort_plan;
 #[cfg(unix)]
 pub mod environment;
 mod error_region;

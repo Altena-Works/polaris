@@ -247,7 +247,13 @@ impl Shape {
             model: text("model"),
             instructions: text("instructions"),
             tools: text("tools"),
-            reasoning: text("reasoning"),
+            // Effort is a per-request setting, not part of the conversation;
+            // under the effort experiment a continuation crosses it.
+            reasoning: if crate::effort_varies() {
+                String::new()
+            } else {
+                text("reasoning")
+            },
             cache_key: text("prompt_cache_key"),
         }
     }

@@ -973,6 +973,19 @@ pub(crate) async fn run_loop(
             crate::turn_intent::ClarificationState::from_history(&session.messages);
         classify_opening(provider, session, &audit, events.as_ref()).await;
     }
+    // The root's per-request effort (experiment, off by default). The turn's
+    // own effort, settled above, is the base; the guard restores it on exit.
+    let effort_plan = (caller == "root")
+        .then(|| {
+            session
+                .effort_plan
+                .clone()
+                .or_else(crate::effort_plan::lower_from_env)
+        })
+        .flatten();
+    let effort_restore = effort_plan
+        .as_ref()
+        .map(|_| crate::effort_plan::Restore::new(provider));
     let mut workflow_turn = session
         .workflow
         .as_ref()
@@ -1757,6 +1770,14 @@ pub(crate) async fn run_loop(
                 result: &serde_json::to_string(&counts).map_err(std::io::Error::other)?,
                 caller,
             })?;
+        }
+        if let (Some(lower), Some(restore)) = (&effort_plan, &effort_restore) {
+            let lowered = crate::effort_plan::lowered(&session.messages);
+            let model = provider.model();
+            provider.set_effort(
+                crate::effort_plan::effort_for(lowered, restore.base(), lower, model.as_deref())
+                    .as_deref(),
+            );
         }
         if let Some(tx) = events.as_ref() {
             let _ = tx.send(crate::events::AgentEvent::ModelRequestStarted {

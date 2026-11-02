@@ -231,6 +231,7 @@ UPDATE_FILEMAP=1 cargo test -p polaris-core --test filemap
 - `desktop_run.rs` — Owned real-core worker for the trusted desktop engine (macOS only).
 - `desktop_workflow.rs` — Durable workflow checkpoint port. The single desktop owner writes state;
 - `dir_watch.rs` — `bash`/`write`/`edit` 呼び出しの前後でファイルシステムを比較し、新規
+- `effort_plan.rs` — The reasoning effort of the root's next request, picked from the turn so
 - `environment.rs` — Host environment setup. Source admission uses the same protected,
 - `error_region.rs` — Which part of a long tool result is worth quoting back.
 - `events.rs` — ターン実行中にツール呼び出し・subagent活動をTUIへリアルタイム通知する

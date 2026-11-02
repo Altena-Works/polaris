@@ -9069,3 +9069,116 @@ async fn the_data_gate_asks_an_edited_turn_once_which_input_keys_its_code_never_
     let (_, none) = gated_turn_in(write_then(&["done"]), gates, Some(r#"{"x": 1}"#)).await;
     assert_eq!(none, 2);
 }
+
+/// Answers from a script and records the effort each request was sent at.
+struct EffortScripted {
+    replies: Mutex<Vec<CompletionResponse>>,
+    effort: Mutex<Option<String>>,
+    sent: Mutex<Vec<Option<String>>>,
+}
+
+#[async_trait::async_trait]
+impl Provider for EffortScripted {
+    async fn complete(
+        &self,
+        _req: CompletionRequest,
+    ) -> Result<CompletionResponse, polaris_provider::ProviderError> {
+        let effort = self.effort.lock().expect("lock").clone();
+        self.sent.lock().expect("lock").push(effort);
+        let mut r = self.replies.lock().expect("lock");
+        Ok(if r.is_empty() {
+            CompletionResponse::default()
+        } else {
+            r.remove(0)
+        })
+    }
+    fn set_effort(&self, effort: Option<&str>) {
+        *self.effort.lock().expect("lock") = effort.map(str::to_owned);
+    }
+    fn effort(&self) -> Option<String> {
+        self.effort.lock().expect("lock").clone()
+    }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn the_effort_plan_lowers_only_continued_reading_and_restores_the_turn_effort() {
+    let root = tempfile::tempdir().expect("temp directory");
+    let helper_dir = tempfile::tempdir().expect("temp directory");
+    let helper = write_helper(helper_dir.path());
+    let sandbox = polaris_sandbox::SandboxPolicy::new(
+        polaris_sandbox::SandboxMode::WorkspaceWrite,
+        &[root.path().to_path_buf()],
+    )
+    .expect("policy");
+    let target = sandbox.writable_roots()[0].join("a.txt");
+    std::fs::write(&target, "old").expect("seed file");
+    let call = |id: &str, name: &str, arguments: serde_json::Value| CompletionResponse {
+        tool_calls: vec![ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments,
+        }],
+        ..Default::default()
+    };
+    let path = target.display().to_string();
+    let replies = vec![
+        call("r1", "read", serde_json::json!({"path": path})),
+        call("r2", "read", serde_json::json!({"path": path})),
+        CompletionResponse {
+            text: "done".into(),
+            ..Default::default()
+        },
+    ];
+    let p = EffortScripted {
+        replies: Mutex::new(replies),
+        effort: Mutex::new(Some("xhigh".into())),
+        sent: Mutex::new(Vec::new()),
+    };
+    let dir = tempfile::tempdir().expect("temp directory");
+    let mut session = Session::new();
+    session.quality = Some(crate::quality::Gates::default());
+    session.effort_plan = Some("high".into());
+    session.push_user("change a.txt");
+    let audit = shared_audit(&dir.path().join("audit.jsonl"));
+    let mut stop = StopTracker::new(20);
+    let always_on = crate::prompt::assemble_always_on("", "", &[]);
+    let mut gate = crate::approval::Gate::new(crate::approval::ApprovalPolicy::Never);
+    let mut approver = AlwaysAllow { asked: 0 };
+    let mut ctx = ToolContext {
+        sandbox: &sandbox,
+        helper: &helper,
+        gate: &mut gate,
+        approver: &mut approver,
+    };
+    run(
+        &p,
+        &mut session,
+        audit,
+        &mut stop,
+        &always_on,
+        &[],
+        &[],
+        unused_provider_pool(),
+        crate::spawn::DEFAULT_CONCURRENCY,
+        crate::spawn::DEFAULT_WRITE_CONCURRENCY,
+        None,
+        &mut ctx,
+    )
+    .await
+    .expect("run");
+    assert_eq!(
+        *p.sent.lock().expect("lock"),
+        [
+            Some("xhigh".into()),
+            Some("xhigh".into()),
+            Some("high".into())
+        ],
+        "plan and the first read's follow-up at full effort, the second read's lower"
+    );
+    assert_eq!(
+        p.effort().as_deref(),
+        Some("xhigh"),
+        "the turn's effort is restored"
+    );
+}

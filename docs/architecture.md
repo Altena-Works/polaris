@@ -76,15 +76,15 @@ crate 14件、依存 47件。名前の`polaris-`は省いた。開発用の依�
 呼び出し側 30件。
 
 - `crates/polaris-cli/src/agents_wrap.rs:38`
-- `crates/polaris-core/src/agent.rs:1735`
-- `crates/polaris-core/src/agent.rs:1769`
-- `crates/polaris-core/src/agent.rs:1772`
+- `crates/polaris-core/src/agent.rs:1748`
+- `crates/polaris-core/src/agent.rs:1790`
+- `crates/polaris-core/src/agent.rs:1793`
 - `crates/polaris-core/src/agent/skill_catalog.rs:45`
 - `crates/polaris-core/src/audit/arbitration.rs:76`
 - `crates/polaris-core/src/audit/arbitration.rs:77`
 - `crates/polaris-core/src/audit/arbitration.rs:80`
-- `crates/polaris-core/src/audit/arbitration.rs:194`
 - `crates/polaris-core/src/audit/arbitration.rs:197`
+- `crates/polaris-core/src/audit/arbitration.rs:200`
 - `crates/polaris-core/src/compaction.rs:241`
 - `crates/polaris-core/src/decision_policy.rs:60`
 - `crates/polaris-core/src/local_execution.rs:162`
@@ -138,7 +138,7 @@ crate 14件、依存 47件。名前の`polaris-`は省いた。開発用の依�
 - `crates/polaris-provider/src/decision/system_one.rs:217`
 - `crates/polaris-provider/src/decision/system_one.rs:218`
 - `crates/polaris-provider/src/lib.rs:105`
-- `crates/polaris-provider/src/lib.rs:607`
+- `crates/polaris-provider/src/lib.rs:625`
 - `crates/polaris-provider/src/local.rs:6`
 - `crates/polaris-provider/src/local.rs:254`
 - `crates/polaris-provider/src/local.rs:465`
@@ -159,11 +159,11 @@ processが動く。
 
 呼び出し側 44件。
 
-- `crates/polaris-cli/src/main.rs:2623`
-- `crates/polaris-cli/src/main.rs:2676`
-- `crates/polaris-cli/src/main.rs:2679`
-- `crates/polaris-cli/src/main.rs:4119`
-- `crates/polaris-cli/src/main.rs:4129`
+- `crates/polaris-cli/src/main.rs:2618`
+- `crates/polaris-cli/src/main.rs:2671`
+- `crates/polaris-cli/src/main.rs:2674`
+- `crates/polaris-cli/src/main.rs:4142`
+- `crates/polaris-cli/src/main.rs:4152`
 - `crates/polaris-core/src/desktop_execution.rs:5`
 - `crates/polaris-core/src/environment/native.rs:246`
 - `crates/polaris-core/src/execution_owner.rs:442`
@@ -265,4 +265,4 @@ processが動く。
 - `crates/polaris-core/src/sync/repository.rs:50`
 - `crates/polaris-core/src/sync/repository/c10.rs:1551`
 - `crates/polaris-desktop-service/src/workspace_view.rs:470`
-- `crates/polaris-tui/src/lib.rs:11926`
+- `crates/polaris-tui/src/lib.rs:12078`

@@ -2326,13 +2326,10 @@ fn codex_tier_default(tier: polaris_skills::Tier) -> Option<&'static str> {
     })
 }
 
-/// Efforts in ascending order, as `--effort` accepts them.
-const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
-
-/// The effort a model is never run below. A smaller model thinking hard costs
-/// less than a larger one thinking little, so the lightest model is not used
-/// at `low` or `medium` however light the job: its floor is `high`.
-fn effort_floor(model: &str) -> Option<&'static str> {
+/// The effort a weight runs at when nothing names one. Only luna has it: a
+/// smaller model thinking hard costs less than a larger one thinking little.
+/// The lowest effort each model may run at is `effort_plan::floor`.
+fn unset_effort(model: &str) -> Option<&'static str> {
     (model == "gpt-6-luna").then_some("high")
 }
 
@@ -2340,14 +2337,12 @@ fn effort_floor(model: &str) -> Option<&'static str> {
 /// was actually replaced, so the caller can say so; filling in a missing one
 /// is not a replacement.
 fn raised_to_floor(model: &str, effort: Option<&str>) -> (Option<String>, bool) {
-    let Some(floor) = effort_floor(model) else {
-        return (effort.map(str::to_owned), false);
-    };
-    let rank = |name: &str| EFFORTS.iter().position(|known| *known == name);
     match effort {
-        None => (Some(floor.to_owned()), false),
-        Some(given) if rank(given) < rank(floor) => (Some(floor.to_owned()), true),
-        Some(given) => (Some(given.to_owned()), false),
+        None => (unset_effort(model).map(str::to_owned), false),
+        Some(given) => {
+            let (effort, raised) = polaris_core::effort_plan::at_least_floor(model, given);
+            (Some(effort), raised)
+        }
     }
 }
 

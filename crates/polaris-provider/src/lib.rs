@@ -283,6 +283,13 @@ fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
 /// A stable routing hint for the provider's prompt cache, sent as
 /// `prompt_cache_key`.
 ///
+/// Whether the root changes its reasoning effort between requests of one
+/// turn (`POLARIS_EFFORT_PLAN`, an experiment). The effort then stays out of
+/// the cache key and out of what a continuation must match.
+pub fn effort_varies() -> bool {
+    std::env::var_os("POLARIS_EFFORT_PLAN").is_some_and(|value| !value.is_empty())
+}
+
 /// The provider caches by prefix, but on a load-balanced backend it has
 /// to find the shard holding that prefix before it can reuse it. Without
 /// a key, consecutive turns of one conversation can land on different
@@ -299,6 +306,13 @@ fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
 /// that moved with it would point at a fresh shard each time, which is
 /// the failure this exists to fix.
 pub fn cache_key(model: &str, effort: Option<&str>, req: &CompletionRequest) -> String {
+    // Under the per-request effort experiment one conversation alternates
+    // efforts, and a key per effort split it across shards (measured: 25%
+    // cached against 92%). The prefix itself is the same at every effort.
+    cache_key_for(model, (!effort_varies()).then_some(effort).flatten(), req)
+}
+
+fn cache_key_for(model: &str, effort: Option<&str>, req: &CompletionRequest) -> String {
     const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 
     let mut hash = fnv1a(FNV_OFFSET_BASIS, model.as_bytes());

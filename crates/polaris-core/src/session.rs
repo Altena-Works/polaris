@@ -159,6 +159,9 @@ pub struct Session {
     /// Where the data/code check looks; `None` uses the trusted prompt project root.
     #[doc(hidden)]
     pub quality_dir: Option<std::path::PathBuf>,
+    /// The lower effort of `effort_plan`; `None` uses `POLARIS_EFFORT_PLAN`.
+    #[doc(hidden)]
+    pub effort_plan: Option<String>,
     /// Stops only root-triggered automatic `files.md` regeneration. Manual
     /// `spawn` remains available, and the default preserves legacy behavior.
     pub disable_files_md_auto_regenerate: bool,

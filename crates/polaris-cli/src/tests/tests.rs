@@ -1981,7 +1981,7 @@ fn efforts_built(
 }
 
 #[test]
-fn the_lightest_model_is_never_run_below_high() {
+fn each_model_runs_within_its_effort_range() {
     use polaris_core::config::{TierConfig, TierSettings};
     let luna = |built: &[(String, Option<String>)]| built[0].1.clone();
     // A missing effort, a low session effort and a low explicit setting are
@@ -1992,7 +1992,7 @@ fn the_lightest_model_is_never_run_below_high() {
     );
     assert_eq!(
         luna(&efforts_built(&TierConfig::default(), Some("low"))).as_deref(),
-        Some("high")
+        Some("medium")
     );
     assert_eq!(
         luna(&efforts_built(&TierConfig::default(), Some("xhigh"))).as_deref(),
@@ -2007,20 +2007,29 @@ fn the_lightest_model_is_never_run_below_high() {
     };
     assert_eq!(
         luna(&efforts_built(&explicit_low, Some("xhigh"))).as_deref(),
-        Some("high")
+        Some("medium")
     );
-    // Every other weight keeps what the session said, low included.
+    // luna, terra and sol run from medium; astra, judged to need it, from high.
     let built = efforts_built(&TierConfig::default(), Some("low"));
     assert_eq!(
         built[1],
-        ("gpt-6.1-terra".to_owned(), Some("low".to_owned()))
+        ("gpt-6.1-terra".to_owned(), Some("medium".to_owned()))
     );
-    assert_eq!(built[2], ("gpt-6.1-sol".to_owned(), Some("low".to_owned())));
-    assert_eq!(built[3], ("gpt-6-astra".to_owned(), Some("low".to_owned())));
-    // A weight a user moved off luna is not held to luna's floor.
+    assert_eq!(
+        built[2],
+        ("gpt-6.1-sol".to_owned(), Some("medium".to_owned()))
+    );
+    assert_eq!(
+        built[3],
+        ("gpt-6-astra".to_owned(), Some("high".to_owned()))
+    );
+    // Only luna fills an unset effort; the others keep the account default.
+    let unset = efforts_built(&TierConfig::default(), None);
+    assert_eq!(unset[1], ("gpt-6.1-terra".to_owned(), None));
+    // A weight a user moved to a model without a range keeps what it names.
     let moved = TierConfig {
         dwarf: TierSettings {
-            model: Some("gpt-6.1-terra".into()),
+            model: Some("other-model".into()),
             effort: Some("low".into()),
         },
         ..TierConfig::default()
