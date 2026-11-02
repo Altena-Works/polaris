@@ -66,7 +66,12 @@ impl EffectTracker {
         }
     }
 
-    fn observe_tool(&mut self, name: &str, detail: &str, restorable_path: impl Fn(&Path) -> bool) {
+    pub(crate) fn observe_tool(
+        &mut self,
+        name: &str,
+        detail: &str,
+        restorable_path: impl Fn(&Path) -> bool,
+    ) {
         if self.unknown.is_some() {
             return;
         }

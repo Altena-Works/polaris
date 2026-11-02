@@ -3581,6 +3581,20 @@ async fn run_native_turn(args: Args, tool_memory_embedding: Option<(String, Stri
             if args.tool_memory.retention().is_some() {
                 eprintln!("Tool memory session: {session_id}");
             }
+            // Before the activity lease below: the file snapshot takes the
+            // mutation lease, as the TUI's does before its input.
+            #[cfg(unix)]
+            let headless_rewind = match polaris_tui::HeadlessRewind::begin(
+                &session, &cwd, &state_dir, &sandbox,
+            ) {
+                Ok(rewind) => rewind,
+                Err(error) => {
+                    eprintln!(
+                        "Note: no file snapshot for this input ({error}); a later --resume cannot verify the files."
+                    );
+                    None
+                }
+            };
             #[cfg(unix)]
             let (_management_effects, _project_activity) = {
                 let owner =
@@ -3920,6 +3934,20 @@ async fn run_native_turn(args: Args, tool_memory_embedding: Option<(String, Stri
             if let Err(error) = cli_admission.finish(outcome.is_ok()) {
                 eprintln!("Cannot save the terminal state of CLI input: {error}");
                 return ExitCode::FAILURE;
+            }
+            // The post-turn snapshot needs the mutation lease the activity
+            // lease excludes, as in the TUI.
+            #[cfg(target_os = "macos")]
+            drop(_environment_turn);
+            #[cfg(unix)]
+            drop(_project_activity);
+            #[cfg(unix)]
+            if let Some(rewind) = headless_rewind
+                && let Err(error) = rewind.finish(&session, &sandbox, outcome.is_ok())
+            {
+                eprintln!(
+                    "Note: cannot record this turn's file state ({error}); a later --resume cannot verify the files."
+                );
             }
             // Child MCP read snapshots are in-memory, root-bound evidence.
             // Do not let a one-shot CLI root retain them while shutdown,

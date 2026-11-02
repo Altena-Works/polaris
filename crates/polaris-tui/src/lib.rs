@@ -2111,6 +2111,99 @@ fn finish_rewind_for_session(
     }
 }
 
+/// A one-shot (`-p`) turn's save boundary: the same pre/post file snapshots
+/// the interactive loop records, so the next `--resume` can check the files
+/// against the conversation's new head. Effects are judged as the TUI judges
+/// them, from the turn's own tool calls; a subagent's calls are not in the
+/// conversation, so a turn that spawns one counts as unknown.
+#[cfg(unix)]
+pub struct HeadlessRewind {
+    owner: polaris_core::rewind_workspace::WorkspaceOwner,
+    effects: polaris_core::management_effect::ManagementEffectStoreV1,
+    boundary: polaris_core::conversation_state::RewindBoundaryV1,
+    /// Where this turn's messages start.
+    from: usize,
+}
+
+#[cfg(unix)]
+impl HeadlessRewind {
+    /// `None` when the session is not saved; it then has no head to bind.
+    pub fn begin(
+        session: &polaris_core::session::Session,
+        cwd: &Path,
+        state_dir: &Path,
+        policy: &SandboxPolicy,
+    ) -> std::io::Result<Option<Self>> {
+        if session.persistence.is_none() {
+            return Ok(None);
+        }
+        let owner = open_rewind_workspace(cwd, state_dir).map_err(std::io::Error::other)?;
+        let effects = {
+            let lease = owner.try_mutation().map_err(std::io::Error::other)?;
+            polaris_core::management_effect::ManagementEffectStoreV1::open_at_state_dir(
+                owner.project_root(),
+                state_dir,
+                &lease,
+            )
+            .map_err(std::io::Error::other)?
+        };
+        let pre = capture_rewind_before_input(&owner, &effects, policy)?.to_string();
+        let Some(boundary) = begin_rewind_for_session(session, Some(&pre), cwd, state_dir, false)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            owner,
+            effects,
+            boundary,
+            from: session.messages.len(),
+        }))
+    }
+
+    /// Call after the last write to the conversation for this turn.
+    pub fn finish(
+        self,
+        session: &polaris_core::session::Session,
+        policy: &SandboxPolicy,
+        completed: bool,
+    ) -> std::io::Result<()> {
+        let persistence = session
+            .persistence
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("Rewind boundary storage source was lost"))?;
+        if !completed {
+            persistence.abandon_rewind_boundary(
+                &self.boundary.boundary_id,
+                "Interrupted turns cannot be rewound (save boundary incomplete)".into(),
+            )?;
+            return Ok(());
+        }
+        let mut tracker = rewind_ui::EffectTracker::default();
+        let mut unknown = None;
+        for call in session.messages[self.from.min(session.messages.len())..]
+            .iter()
+            .flat_map(|message| &message.tool_calls)
+        {
+            if call.name == "spawn" {
+                unknown = Some("A subagent's effects are not recorded in a one-shot run".into());
+            }
+            tracker.observe_tool(&call.name, &call.arguments.to_string(), |path| {
+                self.owner.is_restorable_path(path).unwrap_or(false)
+            });
+        }
+        finish_rewind_for_session(
+            &self.owner,
+            persistence,
+            &self.effects,
+            policy,
+            &self.boundary,
+            unknown.or_else(|| tracker.unknown_reason()),
+            || true,
+        )
+        .map(drop)
+    }
+}
+
 /// Collapses a leading `$HOME` to `~`, for the footer only (see
 /// `render::HeaderInfo::cwd_short`'s docs on why the header's own
 /// `directory:` row doesn't use this). Returns the path unabbreviated —
