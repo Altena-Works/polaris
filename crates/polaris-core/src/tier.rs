@@ -38,6 +38,16 @@ pub async fn decide_all(
     decider: Option<&dyn TierDecider>,
     tasks: &[(&AgentType, &str)],
 ) -> Vec<Tier> {
+    decide_all_with_difficulty(decider, tasks).await.0
+}
+
+/// `decide_all`, plus the wave's difficulty: the heaviest answer before
+/// each type's ceiling and floor are applied. `None` when no decider
+/// answered, so a caller can tell a judged wave from a defaulted one.
+pub async fn decide_all_with_difficulty(
+    decider: Option<&dyn TierDecider>,
+    tasks: &[(&AgentType, &str)],
+) -> (Vec<Tier>, Option<Tier>) {
     // Without a routing answer the weight falls to the documented default,
     // held down by the type's ceiling — never to the ceiling itself.
     //
@@ -59,13 +69,13 @@ pub async fn decide_all(
             .collect::<Vec<_>>()
     };
     let Some(decider) = decider else {
-        return unrouted();
+        return (unrouted(), None);
     };
     let answered = decider.decide(tasks).await;
     // A decider that returns the wrong number of answers has told us
     // nothing we can line up with the tasks, so none of it is used.
     if answered.len() != tasks.len() {
-        return unrouted();
+        return (unrouted(), None);
     }
     // One call is one piece of work. Pricing its parts separately is
     // micro-management: splitting a feature across files and running one
@@ -75,10 +85,33 @@ pub async fn decide_all(
     // takes its heaviest answer — still held down for each task by its own
     // declared ceiling, which no decision may raise.
     let heaviest = answered.iter().copied().max().unwrap_or(Tier::DEFAULT);
-    tasks
+    let tiers = tasks
         .iter()
         .map(|(agent, _)| bounded(agent, heaviest))
-        .collect()
+        .collect();
+    (tiers, (!tasks.is_empty()).then_some(heaviest))
+}
+
+/// Whether a judged wave also sets its children's reasoning effort
+/// (`POLARIS_SPAWN_EFFORT`, an experiment, off by default).
+pub fn spawn_effort_enabled() -> bool {
+    std::env::var("POLARIS_SPAWN_EFFORT").is_ok_and(|value| !value.is_empty() && value != "off")
+}
+
+/// The effort a judged difficulty runs at: the lighter the work, the less
+/// the child thinks. The provider for each weight caps it at the session's
+/// effort and raises it to the model's floor (`polaris-cli`).
+pub fn effort_for(difficulty: Tier) -> &'static str {
+    match difficulty {
+        Tier::Dwarf => "medium",
+        Tier::Subgiant => "high",
+        Tier::Giant | Tier::Supergiant => "xhigh",
+    }
+}
+
+/// The routing key of a weight held at one effort.
+pub fn effort_key(tier: Tier, effort: &str) -> String {
+    format!("{}@{effort}", tier.name())
 }
 
 /// Answers `resolve_tier` with one fixed weight, whatever is asked. The
@@ -88,6 +121,9 @@ pub async fn decide_all(
 pub(crate) struct PinnedTier {
     inner: Arc<dyn polaris_provider::Provider>,
     tier: Tier,
+    /// The effort the whole child runs at, when the wave was judged and the
+    /// experiment is on; the weight's own instance otherwise.
+    effort: Option<&'static str>,
 }
 
 impl PinnedTier {
@@ -98,13 +134,15 @@ impl PinnedTier {
         inner: Arc<dyn polaris_provider::Provider>,
         declared: Tier,
         decided: Tier,
+        effort: Option<&'static str>,
     ) -> Arc<dyn polaris_provider::Provider> {
-        if decided == declared {
+        if decided == declared && effort.is_none() {
             return inner;
         }
         Arc::new(Self {
             inner,
             tier: decided,
+            effort,
         })
     }
 }
@@ -152,6 +190,13 @@ impl polaris_provider::Provider for PinnedTier {
         &self,
         _asked: &str,
     ) -> Result<Option<Arc<dyn polaris_provider::Provider>>, polaris_provider::ProviderError> {
+        // An effort the weight has no instance for (the session's own, or
+        // one the model may not run below) falls back to the weight itself.
+        if let Some(effort) = self.effort
+            && let Some(held) = self.inner.resolve_tier(&effort_key(self.tier, effort))?
+        {
+            return Ok(Some(held));
+        }
         self.inner.resolve_tier(self.tier.name())
     }
 

@@ -161,6 +161,7 @@ pub(super) async fn prepare(
                     &config.tiers,
                     &model,
                     initial_effort_name,
+                    polaris_core::tier::spawn_effort_enabled(),
                     |_| None,
                     |named| {
                         OpenAiProvider::new(base.clone(), key.clone(), named.to_owned())
@@ -247,6 +248,7 @@ pub(super) async fn prepare(
                     &config.tiers,
                     &model,
                     initial_effort_name,
+                    polaris_core::tier::spawn_effort_enabled(),
                     crate::codex_tier_default,
                     |named| {
                         polaris_provider::codex::CodexProvider::new(

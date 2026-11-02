@@ -1931,7 +1931,7 @@ fn models_built(
     defaults: impl Fn(polaris_skills::Tier) -> Option<&'static str>,
 ) -> Vec<String> {
     let built = std::cell::RefCell::new(Vec::new());
-    tier_providers(tiers, "parent", None, defaults, |named| {
+    tier_providers(tiers, "parent", None, false, defaults, |named| {
         built.borrow_mut().push(named.to_owned());
         Ok(std::sync::Arc::new(Unused) as Shared)
     })
@@ -1953,6 +1953,9 @@ impl polaris_provider::Provider for Efforts {
     fn set_effort(&self, effort: Option<&str>) {
         *self.0.lock().unwrap() = effort.map(str::to_owned);
     }
+    fn effort(&self) -> Option<String> {
+        self.0.lock().unwrap().clone()
+    }
 }
 
 /// (model, effort) per built weight, light to heavy.
@@ -1965,6 +1968,7 @@ fn efforts_built(
         tiers,
         "parent",
         session_effort,
+        false,
         codex_tier_default,
         |named| {
             let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -2060,4 +2064,63 @@ fn the_hosted_backend_prices_every_weight_and_a_tier_setting_overrides_it() {
         models_built(&own, codex_tier_default),
         ["gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-sol", "gpt-6-astra"]
     );
+}
+
+#[test]
+fn a_judged_effort_gets_its_own_instance_only_below_the_weights_own() {
+    let built = tier_providers(
+        &polaris_core::config::TierConfig::default(),
+        "parent",
+        Some("xhigh"),
+        true,
+        codex_tier_default,
+        |_| {
+            Ok(
+                std::sync::Arc::new(Efforts(std::sync::Arc::new(std::sync::Mutex::new(None))))
+                    as Shared,
+            )
+        },
+    )
+    .expect("providers");
+    let effort = |key: &str| built.get(key).map(|provider| provider.effort());
+    let mut keys: Vec<_> = built.keys().cloned().collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "dwarf",
+            "dwarf@high",
+            "dwarf@medium",
+            "giant",
+            "giant@high",
+            "giant@medium",
+            "subgiant",
+            "subgiant@high",
+            "subgiant@medium",
+            "supergiant",
+            "supergiant@high",
+            "supergiant@medium",
+        ],
+        "medium and high below the session's xhigh; xhigh is the weight itself"
+    );
+    // luna now runs at medium.
+    assert_eq!(effort("dwarf@medium"), Some(Some("medium".into())));
+    assert_eq!(effort("subgiant@medium"), Some(Some("medium".into())));
+    assert_eq!(effort("giant@high"), Some(Some("high".into())));
+    assert_eq!(effort("giant"), Some(Some("xhigh".into())));
+    let off = tier_providers(
+        &polaris_core::config::TierConfig::default(),
+        "parent",
+        Some("xhigh"),
+        false,
+        codex_tier_default,
+        |_| {
+            Ok(
+                std::sync::Arc::new(Efforts(std::sync::Arc::new(std::sync::Mutex::new(None))))
+                    as Shared,
+            )
+        },
+    )
+    .expect("providers");
+    assert_eq!(off.len(), 4, "off, only the four weights are built");
 }

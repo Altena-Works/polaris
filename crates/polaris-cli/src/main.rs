@@ -2326,6 +2326,9 @@ fn codex_tier_default(tier: polaris_skills::Tier) -> Option<&'static str> {
     })
 }
 
+/// Efforts in ascending order, as `--effort` accepts them.
+const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
 /// The effort a weight runs at when nothing names one. Only luna has it: a
 /// smaller model thinking hard costs less than a larger one thinking little.
 /// The lowest effort each model may run at is `effort_plan::floor`.
@@ -2359,6 +2362,7 @@ fn tier_providers(
     tiers: &polaris_core::config::TierConfig,
     parent_model: &str,
     session_effort: Option<&str>,
+    spawn_effort: bool,
     defaults: impl Fn(polaris_skills::Tier) -> Option<&'static str>,
     mut build: impl FnMut(&str) -> Result<std::sync::Arc<dyn polaris_provider::Provider>, String>,
 ) -> Result<std::collections::HashMap<String, std::sync::Arc<dyn polaris_provider::Provider>>, String>
@@ -2394,6 +2398,32 @@ fn tier_providers(
             provider.set_effort(Some(effort));
         }
         held.insert(tier.name().to_owned(), provider);
+        // Under the spawn-effort experiment a judged wave asks for this weight
+        // at the effort its difficulty maps to. One more instance per effort
+        // below the weight's own, each fixed for the children that hold it;
+        // an effort at or above it, or raised back to it by the model's
+        // floor, resolves to the weight itself.
+        if spawn_effort {
+            let rank = |name: &str| EFFORTS.iter().position(|known| *known == name);
+            for difficulty in polaris_skills::Tier::ALL {
+                let asked = polaris_core::tier::effort_for(difficulty);
+                let key = polaris_core::tier::effort_key(tier, asked);
+                let (lowered, _) = raised_to_floor(model, Some(asked));
+                let lowered = lowered.unwrap_or_else(|| asked.to_owned());
+                let below = match effort.as_deref() {
+                    Some(own) => rank(&lowered) < rank(own),
+                    None => false,
+                };
+                if !below || held.contains_key(&key) {
+                    continue;
+                }
+                let provider = build(model).map_err(|error| {
+                    format!("Cannot create the provider for [tier.{tier}] at {lowered}: {error}")
+                })?;
+                provider.set_effort(Some(&lowered));
+                held.insert(key, provider);
+            }
+        }
     }
     Ok(held)
 }

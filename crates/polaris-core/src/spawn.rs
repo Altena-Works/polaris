@@ -532,7 +532,7 @@ async fn run_one_inner(
     if agent.continuation {
         session.child_memory = memory.clone();
         if let Some(prior) = memory.lock().await.get(&remembered) {
-            session.messages = prior.clone();
+            session.messages = prior.messages.clone();
         }
     }
     if let Some(inherited) = workflow {
@@ -606,7 +606,14 @@ async fn run_one_inner(
                 held.remove(&oldest);
             }
         }
-        held.insert(remembered, session.messages.clone());
+        let weight = held.get(&remembered).and_then(|prior| prior.weight);
+        held.insert(
+            remembered,
+            Remembered {
+                messages: session.messages.clone(),
+                weight,
+            },
+        );
     }
     match result {
         Ok(mut outcome) => {
@@ -838,8 +845,17 @@ pub const CHILD_WRITE_CONCURRENCY: usize = 1;
 /// everything again, which costs the reading twice and gives the second
 /// reader less than the first had — the whole reason to send a small
 /// adjustment back to whoever just did the work.
-pub type ChildMemory =
-    Arc<Mutex<std::collections::HashMap<String, Vec<polaris_provider::Message>>>>;
+pub type ChildMemory = Arc<Mutex<std::collections::HashMap<String, Remembered>>>;
+
+/// One resumable conversation, and the weight and effort it ran at. A
+/// follow-up continues on the same model and effort whatever its own wave
+/// is judged: switching either mid-conversation loses the cache of all of it,
+/// and a lighter model thinking harder is not the same worker.
+#[derive(Clone, Debug, Default)]
+pub struct Remembered {
+    pub messages: Vec<polaris_provider::Message>,
+    pub weight: Option<(polaris_skills::Tier, Option<&'static str>)>,
+}
 
 /// How many resumable conversations one run keeps. A feature at a time,
 /// with room for the ones already finished.
@@ -1470,11 +1486,17 @@ pub(crate) async fn run_wave_with_gate_controlled(
         .iter()
         .map(|(_, agent, task)| (*agent, *task))
         .collect();
+    let (chosen_tiers, difficulty) = crate::tier::decide_all_with_difficulty(decider, &asked).await;
+    // One effort for the whole wave, from its judged difficulty; none when
+    // nothing judged it or the experiment is off.
+    let wave_effort = difficulty
+        .filter(|_| crate::tier::spawn_effort_enabled())
+        .map(crate::tier::effort_for);
     let decided: std::collections::HashMap<usize, (polaris_skills::Tier, polaris_skills::Tier)> =
         known
             .iter()
             .map(|(index, _, _)| *index)
-            .zip(crate::tier::decide_all(decider, &asked).await)
+            .zip(chosen_tiers)
             .zip(known.iter().map(|(_, agent, _)| agent.tier))
             .map(|((index, chosen), declared)| (index, (declared, chosen)))
             .collect();
@@ -1491,7 +1513,12 @@ pub(crate) async fn run_wave_with_gate_controlled(
                 detail: &agent.name,
                 sandbox: None,
                 target: None,
-                result: &format!("declared={} decided={}", declared.name(), chosen.name()),
+                result: &format!(
+                    "declared={} decided={} effort={}",
+                    declared.name(),
+                    chosen.name(),
+                    wave_effort.unwrap_or("session")
+                ),
                 caller: "root",
             });
             if let Err(error) = recorded {
@@ -1521,9 +1548,23 @@ pub(crate) async fn run_wave_with_gate_controlled(
             } else {
                 None
             };
+            // A follow-up to a remembered conversation keeps the weight and
+            // effort it first ran at, whatever this wave was judged.
+            let resumed = agent_types
+                .iter()
+                .find(|agent| agent.name == task.agent_type && agent.continuation)
+                .map(|agent| memory_key(agent, task));
+            let held = match &resumed {
+                Some(key) => memory.lock().await.get(key).and_then(|prior| prior.weight),
+                None => None,
+            };
+            let (weight, effort) = match (held, weight) {
+                (Some((tier, effort)), Some((declared, _))) => (Some((declared, tier)), effort),
+                (_, weight) => (weight, wave_effort),
+            };
             let provider = match weight {
                 Some((declared, chosen)) => {
-                    crate::tier::PinnedTier::wrap(provider, declared, chosen)
+                    crate::tier::PinnedTier::wrap(provider, declared, chosen, effort)
                 }
                 None => provider,
             };
@@ -1602,6 +1643,11 @@ pub(crate) async fn run_wave_with_gate_controlled(
             )
             .await;
             drop(first_lease_guard);
+            if let (Some(key), Some((_, chosen))) = (&resumed, weight)
+                && let Some(entry) = memory.lock().await.get_mut(key)
+            {
+                entry.weight.get_or_insert((chosen, effort));
+            }
             let mut outcome = if first_aborted {
                 first_outcome
             } else if let (Some(port), Some(reference)) = (control, control_attempt.as_ref()) {
@@ -2428,6 +2474,111 @@ mod tests {
         .await;
         assert_eq!(bound.calls.load(Ordering::SeqCst), 2, "the role won");
         assert_eq!(lighter.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_follow_up_keeps_the_weight_its_conversation_first_ran_at() {
+        use polaris_provider::ProviderError;
+        use polaris_provider::role::RoleProvider;
+        use polaris_skills::Tier;
+        use std::collections::HashMap;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Named(AtomicUsize);
+        #[async_trait::async_trait]
+        impl Provider for Named {
+            async fn complete(
+                &self,
+                _: CompletionRequest,
+            ) -> Result<CompletionResponse, ProviderError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(CompletionResponse {
+                    text: "not the schema".into(),
+                    ..Default::default()
+                })
+            }
+        }
+        struct Says(Tier);
+        #[async_trait::async_trait]
+        impl crate::tier::TierDecider for Says {
+            async fn decide(&self, tasks: &[(&AgentType, &str)]) -> Vec<Tier> {
+                vec![self.0; tasks.len()]
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let types = [polaris_skills::builtin::agent_types()
+            .into_iter()
+            .find(|agent| agent.name == "implementer")
+            .expect("implementer is shipped")];
+        let task = SpawnTask {
+            agent_type: "implementer".into(),
+            task: "change it".into(),
+            write_root: Some(dir.path().display().to_string()),
+        };
+        let light = Arc::new(Named(AtomicUsize::new(0)));
+        let middle = Arc::new(Named(AtomicUsize::new(0)));
+        let weighted: Arc<dyn Provider> = Arc::new(RoleProvider::tiers_only(
+            Arc::new(Named(AtomicUsize::new(0))),
+            HashMap::from([
+                ("dwarf".into(), light.clone() as Arc<dyn Provider>),
+                ("subgiant".into(), middle.clone() as Arc<dyn Provider>),
+            ]),
+        ));
+        let wave = |memory: ChildMemory, said: Tier| {
+            let weighted = weighted.clone();
+            let types = &types;
+            let task = task.clone();
+            let dir = dir.path().to_path_buf();
+            async move {
+                run_wave_with_gate(
+                    vec![task],
+                    types,
+                    weighted,
+                    audit_in(&dir),
+                    &full_access(),
+                    Path::new("/bin/true"),
+                    1,
+                    1,
+                    None,
+                    None,
+                    &Gate::new(ApprovalPolicy::Never),
+                    Some(&Says(said)),
+                    1,
+                    memory,
+                )
+                .await
+            }
+        };
+        let key = memory_key(&types[0], &task);
+
+        // A first run takes its wave's judgement and remembers it.
+        let memory = ChildMemory::default();
+        memory
+            .lock()
+            .await
+            .insert(key.clone(), Remembered::default());
+        wave(memory.clone(), Tier::Dwarf).await;
+        assert!(
+            light.0.load(Ordering::SeqCst) > 0,
+            "judged dwarf, ran on dwarf"
+        );
+        assert_eq!(
+            memory
+                .lock()
+                .await
+                .get(&key)
+                .and_then(|held| held.weight)
+                .map(|w| w.0),
+            Some(Tier::Dwarf)
+        );
+
+        // The follow-up is judged heavier but stays on the same weight.
+        let before = light.0.load(Ordering::SeqCst);
+        wave(memory.clone(), Tier::Subgiant).await;
+        assert!(
+            light.0.load(Ordering::SeqCst) > before,
+            "the follow-up stayed on dwarf"
+        );
+        assert_eq!(middle.0.load(Ordering::SeqCst), 0, "not moved to subgiant");
     }
 
     fn audit_in(dir: &Path) -> Arc<Mutex<AuditLog>> {

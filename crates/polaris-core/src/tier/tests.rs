@@ -150,7 +150,7 @@ async fn a_pinned_weight_is_what_gets_asked_for_and_roles_still_come_first() {
     );
 
     // Declared medium, decided low: asking for anything returns low's.
-    let pinned = PinnedTier::wrap(router.clone(), Tier::Subgiant, Tier::Dwarf);
+    let pinned = PinnedTier::wrap(router.clone(), Tier::Subgiant, Tier::Dwarf, None);
     let resolved = pinned.resolve_tier("subgiant").unwrap().unwrap();
     assert_eq!(resolved.complete(request()).await.unwrap().text, "dwarf");
     assert_eq!(medium.1.load(Ordering::SeqCst), 0);
@@ -161,8 +161,50 @@ async fn a_pinned_weight_is_what_gets_asked_for_and_roles_still_come_first() {
 
     // Deciding what was already declared wraps nothing: there is no weight
     // to pin, and an extra layer would only be one more thing to forward.
-    let same = PinnedTier::wrap(router.clone(), Tier::Dwarf, Tier::Dwarf);
+    let same = PinnedTier::wrap(router.clone(), Tier::Dwarf, Tier::Dwarf, None);
     assert!(Arc::ptr_eq(&same, &router));
+
+    // A judged effort picks the weight's instance held at that effort, and
+    // falls back to the weight itself when there is none.
+    let low_high = named("dwarf@high");
+    let with_efforts: Arc<dyn Provider> = Arc::new(
+        polaris_provider::role::RoleProvider::new(named("parent"), HashMap::new()).with_tiers(
+            HashMap::from([
+                ("dwarf".into(), low.clone() as Arc<dyn Provider>),
+                ("dwarf@high".into(), low_high.clone() as Arc<dyn Provider>),
+            ]),
+        ),
+    );
+    let at_effort = PinnedTier::wrap(with_efforts.clone(), Tier::Dwarf, Tier::Dwarf, Some("high"));
+    let resolved = at_effort.resolve_tier("dwarf").unwrap().unwrap();
+    assert_eq!(
+        resolved.complete(request()).await.unwrap().text,
+        "dwarf@high"
+    );
+    let no_instance = PinnedTier::wrap(with_efforts, Tier::Dwarf, Tier::Dwarf, Some("medium"));
+    let resolved = no_instance.resolve_tier("dwarf").unwrap().unwrap();
+    assert_eq!(resolved.complete(request()).await.unwrap().text, "dwarf");
+}
+
+#[test]
+fn lighter_judged_work_runs_at_a_lower_effort() {
+    assert_eq!(effort_for(Tier::Dwarf), "medium");
+    assert_eq!(effort_for(Tier::Subgiant), "high");
+    assert_eq!(effort_for(Tier::Giant), "xhigh");
+    assert_eq!(effort_for(Tier::Supergiant), "xhigh");
+    assert_eq!(effort_key(Tier::Giant, "high"), "giant@high");
+}
+
+#[tokio::test]
+async fn only_a_judged_wave_has_a_difficulty() {
+    let light = typed("light", "dwarf");
+    let (tiers, difficulty) = decide_all_with_difficulty(None, &[(&light, "a")]).await;
+    assert_eq!((tiers, difficulty), (vec![Tier::Dwarf], None));
+    // The difficulty is the answer before the type's ceiling: a hard task for
+    // a dwarf-only type still runs on dwarf, but is judged hard.
+    let raised = Fixed(vec![Tier::Giant]);
+    let (tiers, difficulty) = decide_all_with_difficulty(Some(&raised), &[(&light, "a")]).await;
+    assert_eq!((tiers, difficulty), (vec![Tier::Dwarf], Some(Tier::Giant)));
 }
 
 fn request() -> polaris_provider::CompletionRequest {
