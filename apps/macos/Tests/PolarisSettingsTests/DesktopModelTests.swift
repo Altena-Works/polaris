@@ -551,9 +551,9 @@ final class DesktopModelTests: XCTestCase {
         let model = DesktopModel(arguments: ["--invalid"])
         XCTAssertNil(model.startupError)
         XCTAssertTrue(model.isStarting)
-        XCTAssertEqual(model.release?.version, "0.12.0")
-        XCTAssertEqual(model.release?.codename, "Alrescha")
-        XCTAssertEqual(model.release?.title, "v0.12.0 · Alrescha")
+        XCTAssertEqual(model.release?.version, "0.2.0")
+        XCTAssertEqual(model.release?.codename, "Aldebaran")
+        XCTAssertEqual(model.release?.title, "v0.2.0 · Aldebaran")
         XCTAssertEqual(model.assets.count, 3)
         for image in model.assets.values { XCTAssertTrue(image.isValid) }
     }

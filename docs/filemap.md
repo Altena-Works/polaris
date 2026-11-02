@@ -1792,7 +1792,7 @@ UPDATE_FILEMAP=1 cargo test -p polaris-core --test filemap
 
 ## `docs/releases`
 
-- `v1.0.0.md` — Polaris v1.0.0-rc — macOS TUI
+- `v0.3.0.md` — Polaris v0.3.0-rc “Castor” — macOS TUI
 
 ## `scripts/fixtures/tui-parity-ledger`
 

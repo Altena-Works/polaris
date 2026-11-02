@@ -8,7 +8,14 @@
 </p>
 
 <p align="center">
-  <strong>v1.0.0-rc · macOS TUI only · package not yet published</strong> · <a href="CHANGELOG.md">Changelog (Japanese)</a>
+  <img alt="Version v0.3.0-rc Castor" src="https://img.shields.io/badge/v0.3.0--rc-Castor-35505B?style=for-the-badge&labelColor=182D36">
+  <img alt="Platform macOS arm64" src="https://img.shields.io/badge/macOS-arm64-35505B?style=for-the-badge&labelColor=182D36&logo=apple&logoColor=white">
+  <img alt="Rust 1.96+" src="https://img.shields.io/badge/Rust-1.96%2B-35505B?style=for-the-badge&labelColor=182D36&logo=rust&logoColor=white">
+  <img alt="License MIT" src="https://img.shields.io/github/license/Altena-Works/polaris?style=for-the-badge&labelColor=182D36&color=35505B">
+</p>
+
+<p align="center">
+  <strong>macOS TUI only · package not yet published</strong> · <a href="CHANGELOG.md">Changelog (Japanese)</a>
 </p>
 
 <p align="center">
@@ -17,13 +24,13 @@
 
 Polaris is a Rust coding agent that selects the context needed for the current task. Its main interfaces are a CLI and TUI, with a separate macOS workspace app. It stores workflow state and assembles instructions and skills for the active phase.
 
-v1.0.0-rc targets the macOS arm64 TUI. GUI and other-platform sources remain in the repository. See the [system overview](docs/system-overview.md), [release scope](docs/releases/v1.0.0.md), and [command reference](docs/command-reference.md) (Japanese). No RC tag, release, or package has been published.
+v0.3.0-rc targets the macOS arm64 TUI. GUI and other-platform sources remain in the repository. See the [system overview](docs/system-overview.md), [release scope](docs/releases/v0.3.0.md), and [command reference](docs/command-reference.md) (Japanese). No RC tag, release, or package has been published.
 
 ## Using this development checkout
 
 Start from a project directory. Starting from your home directory currently fails helper preparation with `RuntimeDenied`; see [startup troubleshooting](docs/usage.md#起動時のトラブル).
 
-On macOS arm64, a local preview package can be assembled with a compiled Polaris CLI. Once obtained, install it with one command, `sudo installer -pkg polaris-cli-preview-1.0.0-rc-arm64.pkg -target /`, then launch the TUI with `polaris`. Rust is not needed on the user's machine. This package is currently unsigned and unpublished; a real-machine installation check is still pending. See the [macOS guide](apps/macos/README.md) for assembly and verification details.
+On macOS arm64, a local preview package can be assembled with a compiled Polaris CLI. Once obtained, install it with one command, `sudo installer -pkg polaris-cli-preview-0.3.0-rc-arm64.pkg -target /`, then launch the TUI with `polaris`. Rust is not needed on the user's machine. This package is currently unsigned and unpublished; a real-machine installation check is still pending. See the [macOS guide](apps/macos/README.md) for assembly and verification details.
 
 Building from source requires Rust 1.96.0. To use ChatGPT authentication:
 
@@ -53,9 +60,9 @@ The API-key `openai` provider currently uses Chat Completions and does not suppo
 
 The macOS CLI preview package contains no optional resources. The GUI installer has a manifest-verified download path for llama.cpp, the embedding runtime, and multilingual-e5-small/base under `~/.polaris`; Rust is optional. Qwen3.5-4B is a candidate for the SemIf classifier, but its pinned distribution artifacts and acceptance checks are incomplete, so it is not automatically downloaded. Signed distribution assets and real-device acceptance are still missing. See the [macOS guide](apps/macos/README.md) for the verified scope.
 
-## v0.12.0 comparison with stock Codex
+## v0.2.0 comparison with stock Codex
 
-These are historical v0.12.0 measurements, not results for v1.0.0-rc. The current-version comparison has not been run.
+These are historical v0.2.0 measurements, not results for v0.3.0-rc. The current-version comparison has not been run.
 
 Both tools requested `gpt-6-astra` with `medium` effort; Polaris had workflow enabled. These partial results cover 15 matched PRE02–08 trials with two turns each against Codex CLI 0.154.0. The additional PRE01 measurement was skipped.
 
@@ -77,7 +84,7 @@ Start with the [documentation index](docs/README.md). Detailed documents below a
 | [Usage guide](docs/usage.md) | Authentication, startup troubleshooting, configuration, envkit, and conversations. |
 | [Command reference](docs/command-reference.md) | CLI/TUI commands and their output. |
 | [System overview](docs/system-overview.md) | Execution, storage, isolation, and crate roles. |
-| [v1.0.0-rc](docs/releases/v1.0.0.md) | Distribution scope, candidate checksums, verification, and limits. |
+| [v0.3.0-rc](docs/releases/v0.3.0.md) | Distribution scope, candidate checksums, verification, and limits. |
 
 
 ## Development and verification
@@ -87,6 +94,10 @@ cargo test --locked --offline --workspace
 cargo clippy --locked --offline --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
+
+## Reference repository
+
+- [openai/codex](https://github.com/openai/codex): the baseline for comparing CLI and TUI behavior, and a reference for parts of the design.
 
 ## License
 

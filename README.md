@@ -8,7 +8,14 @@
 </p>
 
 <p align="center">
-  <strong>v1.0.0-rc · macOS TUI限定 · パッケージ未公開</strong> · <a href="CHANGELOG.md">変更履歴</a>
+  <img alt="Version v0.3.0-rc Castor" src="https://img.shields.io/badge/v0.3.0--rc-Castor-35505B?style=for-the-badge&labelColor=182D36">
+  <img alt="Platform macOS arm64" src="https://img.shields.io/badge/macOS-arm64-35505B?style=for-the-badge&labelColor=182D36&logo=apple&logoColor=white">
+  <img alt="Rust 1.96+" src="https://img.shields.io/badge/Rust-1.96%2B-35505B?style=for-the-badge&labelColor=182D36&logo=rust&logoColor=white">
+  <img alt="License MIT" src="https://img.shields.io/github/license/Altena-Works/polaris?style=for-the-badge&labelColor=182D36&color=35505B">
+</p>
+
+<p align="center">
+  <strong>macOS TUI限定 · パッケージ未公開</strong> · <a href="CHANGELOG.md">変更履歴</a>
 </p>
 
 <p align="center">
@@ -17,13 +24,13 @@
 
 Polarisは、作業に必要な文脈を選んでモデルへ渡すRust製のコーディングエージェントである。CLIとTUIを主な操作経路とし、macOS向けの作業画面も備える。workflowの段階を状態として保存し、その段階に必要な指示・skillを組み立てる。
 
-v1.0.0-rcはmacOS arm64のTUIを配布対象とする。GUI・他OSのソースは保持するが、この版の配布対象には含めない。会話・巻戻し・MCP・subagentの操作は[利用ガイド](docs/usage.md)と[コマンド参照](docs/command-reference.md)、構成と今回の提供範囲は[システム構成図](docs/system-overview.md)と[リリース資料](docs/releases/v1.0.0.md)を参照。RCパッケージは未公開である。
+v0.3.0-rcはmacOS arm64のTUIを配布対象とする。GUI・他OSのソースは保持するが、この版の配布対象には含めない。会話・巻戻し・MCP・subagentの操作は[利用ガイド](docs/usage.md)と[コマンド参照](docs/command-reference.md)、構成と今回の提供範囲は[システム構成図](docs/system-overview.md)と[リリース資料](docs/releases/v0.3.0.md)を参照。RCパッケージは未公開である。
 
 ## 暫定版の利用方法
 
 起動前に作業対象のプロジェクトへ移動する。ホームディレクトリからの起動は、現在`RuntimeDenied`で停止する。[起動時のトラブル](docs/usage.md#起動時のトラブル)を参照。
 
-macOS arm64では、ビルド済みCLIを同梱したローカル検証用パッケージを作成できる。パッケージを取得した後の導入は`sudo installer -pkg polaris-cli-preview-1.0.0-rc-arm64.pkg -target /`の1コマンドで、以後は`polaris`で起動する。利用者側にRustは不要。現時点では未署名・未公開であり、実機へのインストール受入も未完了。組立て方法と検証範囲は[macOSの説明](apps/macos/README.md)を参照。
+macOS arm64では、ビルド済みCLIを同梱したローカル検証用パッケージを作成できる。パッケージを取得した後の導入は`sudo installer -pkg polaris-cli-preview-0.3.0-rc-arm64.pkg -target /`の1コマンドで、以後は`polaris`で起動する。利用者側にRustは不要。現時点では未署名・未公開であり、実機へのインストール受入も未完了。組立て方法と検証範囲は[macOSの説明](apps/macos/README.md)を参照。
 
 このcheckoutをソースから実行する場合はRust 1.96.0を用意する。ChatGPT認証を使う例は次のとおり。
 
@@ -53,9 +60,9 @@ APIキー用の`openai`プロバイダはChat Completions形式のため、Respo
 
 macOSのCLI専用プレビューパッケージには追加資源を含めない。GUIインストーラには固定manifestからllama.cpp、埋め込み実行環境、multilingual-e5-small/baseを検証して`~/.polaris`へ取得する経路があり、Rustは任意選択である。Qwen系はSemIf用のQwen3.5-4Bを候補としているが、固定資源の登録と受入が未完了で、自動取得しない。署名済み配布資源と実機受入も未完了である。検証済み範囲は[macOSデスクトップ](apps/macos/README.md)に記載する。
 
-## v0.12.0での純正Codexとの比較
+## v0.2.0での純正Codexとの比較
 
-これはv0.12.0の過去の測定であり、v1.0.0-rcの実測結果ではない。現行版の再比較は未実施である。
+これはv0.2.0の過去の測定であり、v0.3.0-rcの実測結果ではない。現行版の再比較は未実施である。
 
 同じ`gpt-6-astra`／`medium`で、workflowを有効にしたPolarisとCodex CLI 0.154.0を比較した。下表はPRE02〜08で課題・反復がそろった15試行、各2ターンの部分結果である。PRE01の追加測定は省略した。
 
@@ -77,7 +84,7 @@ macOSのCLI専用プレビューパッケージには追加資源を含めない
 | [利用ガイド](docs/usage.md) | 認証、起動トラブル、設定、envkit、会話操作。 |
 | [コマンド参照](docs/command-reference.md) | CLI/TUIコマンドの役割と出力。 |
 | [システム構成図](docs/system-overview.md) | 実行、保存、隔離、各crateの役割。 |
-| [v1.0.0-rc](docs/releases/v1.0.0.md) | 配布範囲、候補checksum、検証結果と限界。 |
+| [v0.3.0-rc](docs/releases/v0.3.0.md) | 配布範囲、候補checksum、検証結果と限界。 |
 
 
 ## 開発と検証
@@ -87,6 +94,10 @@ cargo test --locked --offline --workspace
 cargo clippy --locked --offline --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
+
+## 参考にしているリポジトリ
+
+- [openai/codex](https://github.com/openai/codex)：CLI・TUIの操作と挙動を比べる基準であり、一部の設計の参考にしている。
 
 ## ライセンス
 
