@@ -73,12 +73,12 @@ crate 14件、依存 47件。名前の`polaris-`は省いた。開発用の依�
 
 実装: `crates/polaris-provider/src/lib.rs`、`crates/polaris-provider/src/openai.rs`、`crates/polaris-provider/src/codex.rs`、`crates/polaris-provider/src/role.rs`、`crates/polaris-provider/src/local_inference.rs`
 
-呼び出し側 30件。
+呼び出し側 31件。
 
 - `crates/polaris-cli/src/agents_wrap.rs:38`
-- `crates/polaris-core/src/agent.rs:1748`
-- `crates/polaris-core/src/agent.rs:1790`
-- `crates/polaris-core/src/agent.rs:1793`
+- `crates/polaris-core/src/agent.rs:1777`
+- `crates/polaris-core/src/agent.rs:1819`
+- `crates/polaris-core/src/agent.rs:1822`
 - `crates/polaris-core/src/agent/skill_catalog.rs:45`
 - `crates/polaris-core/src/audit/arbitration.rs:76`
 - `crates/polaris-core/src/audit/arbitration.rs:77`
@@ -98,6 +98,7 @@ crate 14件、依存 47件。名前の`polaris-`は省いた。開発用の依�
 - `crates/polaris-core/src/tier.rs:171`
 - `crates/polaris-core/src/tier.rs:178`
 - `crates/polaris-core/src/tier/chat.rs:59`
+- `crates/polaris-core/src/turn_memory.rs:613`
 - `crates/polaris-tui/src/mcp_commands/operations.rs:205`
 - `crates/polaris-tui/src/mcp_commands/operations.rs:212`
 - `crates/polaris-tui/src/mcp_commands/operations.rs:419`
@@ -162,8 +163,8 @@ processが動く。
 - `crates/polaris-cli/src/main.rs:2648`
 - `crates/polaris-cli/src/main.rs:2701`
 - `crates/polaris-cli/src/main.rs:2704`
-- `crates/polaris-cli/src/main.rs:4172`
-- `crates/polaris-cli/src/main.rs:4182`
+- `crates/polaris-cli/src/main.rs:4204`
+- `crates/polaris-cli/src/main.rs:4214`
 - `crates/polaris-core/src/desktop_execution.rs:5`
 - `crates/polaris-core/src/environment/native.rs:246`
 - `crates/polaris-core/src/execution_owner.rs:442`

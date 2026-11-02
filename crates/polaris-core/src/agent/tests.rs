@@ -9182,3 +9182,115 @@ async fn the_effort_plan_lowers_only_continued_reading_and_restores_the_turn_eff
         "the turn's effort is restored"
     );
 }
+
+/// Answers from a script and keeps every request it was sent.
+struct Recording {
+    replies: Mutex<Vec<CompletionResponse>>,
+    sent: Mutex<Vec<CompletionRequest>>,
+}
+
+#[async_trait::async_trait]
+impl Provider for Recording {
+    async fn complete(
+        &self,
+        req: CompletionRequest,
+    ) -> Result<CompletionResponse, polaris_provider::ProviderError> {
+        self.sent.lock().expect("lock").push(req);
+        let mut r = self.replies.lock().expect("lock");
+        Ok(if r.is_empty() {
+            CompletionResponse::default()
+        } else {
+            r.remove(0)
+        })
+    }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn turn_only_sends_this_turn_and_recalls_named_terms_without_extra_model_calls() {
+    let root = tempfile::tempdir().expect("temp directory");
+    let helper_dir = tempfile::tempdir().expect("temp directory");
+    let helper = write_helper(helper_dir.path());
+    let sandbox = polaris_sandbox::SandboxPolicy::new(
+        polaris_sandbox::SandboxMode::WorkspaceWrite,
+        &[root.path().to_path_buf()],
+    )
+    .expect("policy");
+    let answer = |text: &str| CompletionResponse {
+        text: text.into(),
+        ..Default::default()
+    };
+    let p = Recording {
+        replies: Mutex::new(vec![
+            answer(
+                "Branch `aurora-rc2` created; the long first answer stays out of later requests.",
+            ),
+            answer("Pushed aurora-rc2."),
+        ]),
+        sent: Mutex::new(Vec::new()),
+    };
+    let dir = tempfile::tempdir().expect("temp directory");
+    let mut session = Session::new();
+    session.quality = Some(crate::quality::Gates::default());
+    session.turn_memory = Some(Default::default());
+    let always_on = crate::prompt::assemble_always_on("", "", &[]);
+    for input in [
+        "Name the release branch `aurora-rc2`.",
+        "Push aurora-rc2 now.",
+    ] {
+        session.push_user(input);
+        let audit = shared_audit(&dir.path().join("audit.jsonl"));
+        let mut stop = StopTracker::new(20);
+        let mut gate = crate::approval::Gate::new(crate::approval::ApprovalPolicy::Never);
+        let mut approver = AlwaysAllow { asked: 0 };
+        let mut ctx = ToolContext {
+            sandbox: &sandbox,
+            helper: &helper,
+            gate: &mut gate,
+            approver: &mut approver,
+        };
+        run(
+            &p,
+            &mut session,
+            audit,
+            &mut stop,
+            &always_on,
+            &[],
+            &[],
+            unused_provider_pool(),
+            crate::spawn::DEFAULT_CONCURRENCY,
+            crate::spawn::DEFAULT_WRITE_CONCURRENCY,
+            None,
+            &mut ctx,
+        )
+        .await
+        .expect("run");
+    }
+    let sent = p.sent.lock().expect("lock");
+    assert_eq!(
+        sent.len(),
+        2,
+        "one request per turn: nothing summarises with the main model"
+    );
+    let second: Vec<&str> = sent[1]
+        .messages
+        .iter()
+        .map(|m| m.content.as_str())
+        .collect();
+    assert!(
+        !second.iter().any(|m| *m
+            == "Branch `aurora-rc2` created; the long first answer stays out of later requests."
+            || *m == "Name the release branch `aurora-rc2`."),
+        "the first turn is not sent: {second:?}"
+    );
+    assert!(
+        second
+            .iter()
+            .any(|m| m.starts_with("[harness] Memory of earlier turns")
+                && m.contains("T1: asked=Name the release branch `aurora-rc2`")),
+        "the first turn rides as one ledger line: {second:?}"
+    );
+    assert_eq!(second.last().copied(), Some("Push aurora-rc2 now."));
+    // The saved conversation keeps everything.
+    assert_eq!(session.messages.len(), 4);
+}

@@ -90,6 +90,7 @@ pub mod tier;
 pub mod tool_memory;
 pub mod translation;
 pub mod turn_intent;
+pub mod turn_memory;
 pub mod verification;
 #[cfg(windows)]
 mod windows_fs;

@@ -159,6 +159,10 @@ pub struct Session {
     /// Where the data/code check looks; `None` uses the trusted prompt project root.
     #[doc(hidden)]
     pub quality_dir: Option<std::path::PathBuf>,
+    /// The `turn-only` memory (experiment); made on the first root turn when
+    /// `POLARIS_TURN_ONLY` is set.
+    #[doc(hidden)]
+    pub turn_memory: Option<std::sync::Arc<tokio::sync::Mutex<crate::turn_memory::TurnMemory>>>,
     /// The lower effort of `effort_plan`; `None` uses `POLARIS_EFFORT_PLAN`.
     #[doc(hidden)]
     pub effort_plan: Option<String>,

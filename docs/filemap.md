@@ -285,6 +285,7 @@ UPDATE_FILEMAP=1 cargo test -p polaris-core --test filemap
 - `tool_memory.rs` — Opt-in recoverable tool-result retention; original output lives outside history.
 - `translation.rs` — Offline-only adapter for the pinned CAT-Translate 3.3B helper.
 - `turn_intent.rs` — What one user turn is, along several axes at once.
+- `turn_memory.rs` — `turn-only`: each user turn sees only itself and an external memory.
 - `windows_fs.rs` — Windows filesystem primitives remain private until owner integration.
 - `workflow.rs` — Explicit workflow focus, independent of tool permissions and completion evidence.
 - `workflow_artifact_store.rs` — Private immutable bodies for the durable workflow artifact graph.

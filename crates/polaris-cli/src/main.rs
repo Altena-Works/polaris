@@ -2884,6 +2884,13 @@ async fn run_native_turn(args: Args, tool_memory_embedding: Option<(String, Stri
     let tier_weights = prepared_providers.tier_weights.clone();
     // The weight that makes the AGENTS.md copies, taken before `tier_weights` is handed on.
     let wrap_maker = tier_weights.get("giant").cloned();
+    // `turn-only` (experiment): the lightest weight writes its ledger lines;
+    // the session's own model never does.
+    if polaris_core::turn_memory::enabled()
+        && let Some(writer) = tier_weights.get("dwarf")
+    {
+        polaris_core::turn_memory::install_writer(writer.clone());
+    }
     let provider = prepared_providers.provider.clone();
     let decision_meter = polaris_provider::decision::DecisionMeter::default();
     if config.decision.enabled
@@ -3151,6 +3158,31 @@ async fn run_native_turn(args: Args, tool_memory_embedding: Option<(String, Stri
     } else {
         None
     };
+    // `turn-only` (experiment): the local embedder for its index. Without
+    // one the index is BM25 alone, which is said once here.
+    #[cfg(target_os = "macos")]
+    if polaris_core::turn_memory::enabled() {
+        let built = managed_runtime_home().and_then(|home| {
+            let runtime = std::sync::Arc::new(
+                polaris_core::managed_runtime::ManagedRuntimeLease::acquire(&home)
+                    .map_err(|error| error.to_string())?,
+            );
+            polaris_core::strict_provider::managed_local_embedder(
+                &config.embedding,
+                data_root,
+                runtime,
+            )
+            .map_err(|error| error.to_string())
+        });
+        match built {
+            Ok(embedder) => {
+                polaris_core::turn_memory::install_embedder(std::sync::Arc::new(embedder))
+            }
+            Err(error) => {
+                eprintln!("Note: turn-only memory searches by words only ({error}); no vectors.")
+            }
+        }
+    }
     let mut colocated = vec![provider.clone()];
     colocated.extend(mcp_selection_provider.iter().cloned());
     decision_colocation.replace(

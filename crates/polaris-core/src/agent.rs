@@ -986,6 +986,28 @@ pub(crate) async fn run_loop(
     let effort_restore = effort_plan
         .as_ref()
         .map(|_| crate::effort_plan::Restore::new(provider));
+    // `turn-only` (experiment): finished turns go into the external memory,
+    // and this turn's requests carry only this turn plus what it recalls.
+    let turn_only =
+        if caller == "root" && (crate::turn_memory::enabled() || session.turn_memory.is_some()) {
+            let memory = session
+                .turn_memory
+                .get_or_insert_with(Default::default)
+                .clone();
+            let mut memory = memory.lock().await;
+            memory
+                .absorb(&session.messages, session.decider.as_deref())
+                .await;
+            let from = crate::turn_memory::turn_start(&session.messages);
+            let input = session
+                .messages
+                .get(from)
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+            Some((from, memory.recall(&input).await))
+        } else {
+            None
+        };
     let mut workflow_turn = session
         .workflow
         .as_ref()
@@ -1699,6 +1721,13 @@ pub(crate) async fn run_loop(
             {
                 request_messages.push(message);
             }
+        }
+        if let Some((from, recalled)) = &turn_only {
+            // Earlier turns stay saved but are not sent. Projections above
+            // insert at or after this turn's input, so cutting before it
+            // keeps them.
+            sending_messages.drain(..(*from).min(sending_messages.len()));
+            request_messages.extend(recalled.clone());
         }
         request_messages.extend_from_slice(&sending_messages);
         check_event_delivery(events.as_ref())?;
