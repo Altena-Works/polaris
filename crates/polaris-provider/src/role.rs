@@ -122,6 +122,10 @@ impl Provider for RoleProvider {
     fn set_effort(&self, effort: Option<&str>) {
         self.parent.set_effort(effort);
     }
+
+    fn effort(&self) -> Option<String> {
+        self.parent.effort()
+    }
 }
 
 #[cfg(test)]

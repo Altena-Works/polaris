@@ -456,6 +456,10 @@ impl Provider for OpenAiProvider {
     fn set_effort(&self, effort: Option<&str>) {
         *self.effort.write().expect("effort lock poisoned") = effort.map(str::to_string);
     }
+
+    fn effort(&self) -> Option<String> {
+        self.effort.read().expect("effort lock poisoned").clone()
+    }
 }
 
 #[cfg(test)]

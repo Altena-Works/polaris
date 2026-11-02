@@ -517,6 +517,10 @@ where
     fn set_effort(&self, effort: Option<&str>) {
         self.provider.set_effort(effort);
     }
+
+    fn effort(&self) -> Option<String> {
+        self.provider.effort()
+    }
 }
 
 impl<P> MeteredProvider<P>
@@ -769,6 +773,12 @@ pub trait Provider: Send + Sync {
     /// that for the rest of the session. `None` restores the default
     /// (plan-derived for `CodexProvider`; unset for `OpenAiProvider`).
     fn set_effort(&self, _effort: Option<&str>) {}
+
+    /// The effort the last `set_effort` asked for; `None` when none was set
+    /// and the provider uses its own default.
+    fn effort(&self) -> Option<String> {
+        None
+    }
 }
 
 // Forward every hook through pointer wrappers, including role resolution.
@@ -825,6 +835,9 @@ macro_rules! delegate_provider {
             }
             fn set_effort(&self, effort: Option<&str>) {
                 (**self).set_effort(effort);
+            }
+            fn effort(&self) -> Option<String> {
+                (**self).effort()
             }
         }
     };

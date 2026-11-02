@@ -166,6 +166,10 @@ impl polaris_provider::Provider for PinnedTier {
     fn set_effort(&self, effort: Option<&str>) {
         self.inner.set_effort(effort);
     }
+
+    fn effort(&self) -> Option<String> {
+        self.inner.effort()
+    }
 }
 
 #[cfg(test)]

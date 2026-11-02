@@ -877,6 +877,13 @@ impl Provider for CodexProvider {
     fn set_effort(&self, effort: Option<&str>) {
         *self.effort_override.write().expect("effort lock poisoned") = effort.map(str::to_string);
     }
+
+    fn effort(&self) -> Option<String> {
+        self.effort_override
+            .read()
+            .expect("effort lock poisoned")
+            .clone()
+    }
 }
 
 #[cfg(test)]

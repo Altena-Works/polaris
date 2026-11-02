@@ -176,6 +176,9 @@ impl Provider for Observed {
     fn set_effort(&self, effort: Option<&str>) {
         self.provider.set_effort(effort);
     }
+    fn effort(&self) -> Option<String> {
+        self.provider.effort()
+    }
     fn resolve_role(
         &self,
         role: &str,
