@@ -64,7 +64,7 @@ polaris
 
 ホームディレクトリで起動すると、既定の書込み範囲に実行用バイナリと保護用の保存先が入り、`Isolated execution preparation refused: RuntimeDenied`で停止する場合がある。プロジェクトへ移動して再起動する。ホームからの起動を自動調整する修正は未実装であり、サンドボックスを解除して回避しない。
 
-認証待ちでブラウザが表示されなければ、Enterまたは`o`で再度開くか、`c`でクエリ付きURL全文をコピーして通常のブラウザで開く。認可が終わるまでPolarisの画面は閉じない。Terminal.appのCmd＋単クリックはPolarisへ通知されず、現在の実装では開けない。Ctrl-clickまたは上記のキー操作を使う。
+認証待ちでブラウザが表示されなければ、Enterまたは`o`で再度開くか、`c`でクエリ付きURL全文をコピーして通常のブラウザで開く。認可が終わるまでpolarisの画面は閉じない。Terminal.appのCmd＋単クリックはpolarisへ通知されず、現在の実装では開けない。Ctrl-clickまたは上記のキー操作を使う。
 
 ## 固定profileによる環境構築
 
@@ -153,7 +153,7 @@ model = "REGISTERED_MODEL"
 credential_env = "POLARIS_SYSTEM_ONE_KEY"
 ```
 
-`endpoint`はPOST先の完全なURLで、`base_url`や外側の`model`・`helper`とは併用しない。認証値はconfigへ書かず、`credential_env`で指定した環境変数をPolarisの起動環境へ用意する。変数名は`POLARIS_SYSTEM_ONE_`で始まり、続く部分を含めて大文字英数字と`_`の128文字以内とする。この設定全体は利用者configだけから読み、project configから接続先・モデル・認証参照を書き換えることはできない。無効時、`local_only = true`、未到達のfallback先では認証値を参照しない。
+`endpoint`はPOST先の完全なURLで、`base_url`や外側の`model`・`helper`とは併用しない。認証値はconfigへ書かず、`credential_env`で指定した環境変数をpolarisの起動環境へ用意する。変数名は`POLARIS_SYSTEM_ONE_`で始まり、続く部分を含めて大文字英数字と`_`の128文字以内とする。この設定全体は利用者configだけから読み、project configから接続先・モデル・認証参照を書き換えることはできない。無効時、`local_only = true`、未到達のfallback先では認証値を参照しない。
 
 HTTPSを既定とし、HTTPは`allow_loopback_http = true`とliteral loopback IPを両方指定した場合だけ許可する。URLのuserinfo・query・fragment、redirect、通信層の自動再試行は拒否する。要求・応答は各1MiB、質問・選択肢は各256件、通信の上限は30秒である。これは通信層の上限であり、モデルのcontextや容量を測定した値ではない。接続先にはstateと質問が送られる。診断・監査に記録するURLはorigin（scheme・host・port）までで、pathと認証値は含めない。
 
@@ -255,7 +255,7 @@ POLARIS_PROVIDER=codex polaris -p "Cargo.toml は何行か"
 
 認証がない状態で`polaris`を対話端末から起動すると、ChatGPTまたはAPI keyを選ぶログイン専用画面が開く。全登録が解除済みの場合も同じ画面からログインできる。登録済みアカウントの認証待機中はEsc・Ctrl-Cで取り消せる。再認証が必要な登録は、表示された`polaris account reauth <登録ID>`で再認証する。非対話実行や明示`--account`の不正指定ではログイン画面を開かない。
 
-`polaris login`はブラウザを開き、`http://localhost:1455/auth/callback`で認可を受け取る。資格情報は`~/.polaris/auth.json`に0600で保管し、`~/.codex/`には読み書きしない。`polaris logout`はPolarisが保存した資格情報を削除する。`ls -l ~/.polaris/auth.json`で`-rw-------`であることを確認できる。
+`polaris login`はブラウザを開き、`http://localhost:1455/auth/callback`で認可を受け取る。資格情報は`~/.polaris/auth.json`に0600で保管し、`~/.codex/`には読み書きしない。`polaris logout`はpolarisが保存した資格情報を削除する。`ls -l ~/.polaris/auth.json`で`-rw-------`であることを確認できる。
 
 Subscriptionの認証待ち画面には、クエリを含む認証URLを表示する。URLへのCtrl-click・Enter・`o`で既定ブラウザへ開き、`c`でURL全文をコピーする。長いURLは↑↓でスクロールできる。自動起動に失敗しても認証待ちは続くため、手動で開いた後も画面を閉じずに認可を進める。ブラウザ認可待ちはEsc・Ctrl-Cで取り消せる。URLはこの画面だけに表示し、会話や監査ログには保存しない。CLIのログインでは端末へURLを表示する。
 
@@ -310,7 +310,7 @@ SwiftUIの作業画面は、選択したプロジェクトと会話を専用の�
 | `/diff`、`/review` | 変更点を表示し、またはレビュー指示を通常のモデルターンとして送る。 |
 | `/export` | 会話をMarkdownへ書き出す。ファイル名省略時はタイムスタンプ付きの名前を使う。 |
 | `/logout [登録ID]` | 追加確認なしで指定認証を解除し、結果を表示する。省略時は使用中の認証が対象。 |
-| `/quit`、`/exit` | Polarisを終了する。 |
+| `/quit`、`/exit` | polarisを終了する。 |
 
 `/resume`は作業ディレクトリ別に会話をグループ化し、現在のディレクトリを先頭に表示する。選んだ会話への送信は既存ファイルへ追記する。
 

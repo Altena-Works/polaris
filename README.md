@@ -3,7 +3,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/polaris-banner-white.svg">
-    <img src="docs/assets/polaris-banner-ink.svg" alt="Polaris — アスタリスクとワードマーク" width="800" height="200">
+    <img src="docs/assets/polaris-banner-ink.svg" alt="polaris — アスタリスクとワードマーク" width="800" height="200">
   </picture>
 </p>
 
@@ -22,7 +22,7 @@
   <strong>日本語</strong> · <a href="README.en.md" lang="en">English</a>
 </p>
 
-Polarisは、作業に必要な文脈を選んでモデルへ渡すRust製のコーディングエージェントである。CLIとTUIを主な操作経路とし、macOS向けの作業画面も備える。workflowの段階を状態として保存し、その段階に必要な指示・skillを組み立てる。
+polarisは、作業に必要な文脈を選んでモデルへ渡すRust製のコーディングエージェントである。CLIとTUIを主な操作経路とし、macOS向けの作業画面も備える。workflowの段階を状態として保存し、その段階に必要な指示・skillを組み立てる。
 
 v0.3.0-rcはmacOS arm64のTUIを配布対象とする。GUI・他OSのソースは保持するが、この版の配布対象には含めない。会話・巻戻し・MCP・subagentの操作は[利用ガイド](docs/usage.md)と[コマンド参照](docs/command-reference.md)、構成と今回の提供範囲は[システム構成図](docs/system-overview.md)と[リリース資料](docs/releases/v0.3.0.md)を参照。RCパッケージは未公開である。
 
@@ -64,15 +64,15 @@ macOSのCLI専用プレビューパッケージには追加資源を含めない
 
 これはv0.2.0の過去の測定であり、v0.3.0-rcの実測結果ではない。現行版の再比較は未実施である。
 
-同じ`gpt-6-astra`／`medium`で、workflowを有効にしたPolarisとCodex CLI 0.154.0を比較した。下表はPRE02〜08で課題・反復がそろった15試行、各2ターンの部分結果である。PRE01の追加測定は省略した。
+同じ`gpt-6-astra`／`medium`で、workflowを有効にしたpolarisとCodex CLI 0.154.0を比較した。下表はPRE02〜08で課題・反復がそろった15試行、各2ターンの部分結果である。PRE01の追加測定は省略した。
 
-| 指標 | Polaris | 純正Codex CLI 0.154.0 | Polarisの削減率 |
+| 指標 | polaris | 純正Codex CLI 0.154.0 | polarisの削減率 |
 | --- | ---: | ---: | ---: |
 | 総トークン | **95,139** | 467,901 | **79.7%** |
 | API換算費用 | **$2.37915** | $3.600914 | **33.9%** |
 | 品質検査 | 15/15合格 | 15/15合格 | — |
 
-総トークンはキャッシュ済み入力を含む入力と出力の合計。費用は測定仕様で固定したAPI単価による参考額で、Codexの実請求額ではない。この15組ではPolarisの所要時間は23.5%長かった。短い合成課題による逐次測定であり、一般の実装作業や長期対話へは外挿しない。[測定条件・品質評価・時間・制約](docs/preimplementation-evaluation.md#v0120とcodex-01540の途中結果)を参照。
+総トークンはキャッシュ済み入力を含む入力と出力の合計。費用は測定仕様で固定したAPI単価による参考額で、Codexの実請求額ではない。この15組ではpolarisの所要時間は23.5%長かった。短い合成課題による逐次測定であり、一般の実装作業や長期対話へは外挿しない。[測定条件・品質評価・時間・制約](docs/preimplementation-evaluation.md#v0120とcodex-01540の途中結果)を参照。
 
 ## 文書
 

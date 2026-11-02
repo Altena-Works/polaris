@@ -1,6 +1,6 @@
 # コンテキストの効率化とローカル記憶
 
-Polarisの使用量は、通常の応答に加え、履歴要約と子エージェントの応答を含む。応答にusageがない場合や要求が失敗した場合は、確認済みの合計と欠測件数を区別する。キャッシュ分は入力の内数であり、合計へ再加算しない。固定プロンプトの短縮率や通信量の削減率を、そのまま総消費量の削減率として扱わない。
+polarisの使用量は、通常の応答に加え、履歴要約と子エージェントの応答を含む。応答にusageがない場合や要求が失敗した場合は、確認済みの合計と欠測件数を区別する。キャッシュ分は入力の内数であり、合計へ再加算しない。固定プロンプトの短縮率や通信量の削減率を、そのまま総消費量の削減率として扱わない。
 
 ## strict10とsessions-v2
 
@@ -15,7 +15,7 @@ model_path = "/absolute/path/to/multilingual-e5-small"
 revision = "固定したモデルrevision"
 ```
 
-strict10は`runtime`、`model_path`、`revision`の3値が揃わなければ開始しない。macOS版のPolarisインストーラは、この3値と事前選定用e5-baseを固定manifestから取得し、`~/.polaris/managed-resources.toml`へ既定値として保存する。利用者の`~/.polaris/config.toml`とプロジェクト設定は、この自動設定を項目単位で上書きできる。helperは固定したローカル`multilingual-e5-small` snapshotだけを読み、`manifest.json`のrevision・全ファイル・SHA-256を確認する。実行中の取得、ネットワークアクセス、動的コード読込みは行わない。問い合わせには`query: `、本文には`passage: `のprefixを付け、512 tokenizer tokenを超える本文は切り詰めず拒否する。
+strict10は`runtime`、`model_path`、`revision`の3値が揃わなければ開始しない。macOS版のpolarisインストーラは、この3値と事前選定用e5-baseを固定manifestから取得し、`~/.polaris/managed-resources.toml`へ既定値として保存する。利用者の`~/.polaris/config.toml`とプロジェクト設定は、この自動設定を項目単位で上書きできる。helperは固定したローカル`multilingual-e5-small` snapshotだけを読み、`manifest.json`のrevision・全ファイル・SHA-256を確認する。実行中の取得、ネットワークアクセス、動的コード読込みは行わない。問い合わせには`query: `、本文には`passage: `のprefixを付け、512 tokenizer tokenを超える本文は切り詰めず拒否する。
 
 CLI/TUIでstrict10またはworkflowを有効にした会話は`~/.polaris/sessions-v2/<UUID>/`へ保存する。raw JSONLは追記後に同期し、状態markerと世代付きsnapshotは比較交換で公開する。索引公開と削除はSQLite tombstoneのトランザクションに含める。競合・破損・削除済み会話で停止しても、raw履歴を破棄しない。legacyのJSONL snapshotとは保存形式も回復範囲も異なる。
 
@@ -33,7 +33,7 @@ strict10は直近10実ユーザーターンのtool往復を含む原文を要求
 
 crateの依存と外部との接続点については[アーキテクチャ](architecture.md)に、MCPツールの選定を3段に改める設計については[ツールの事前選定](tool-preselection.md)に説明がある。この3段構成はまだ実行経路に入っていない。
 
-まず、処理の単位を定義する。Polarisは、利用者の入力1回を1つのrunとして扱う。runの中では、モデルがツールを呼ぶたびに要求を送り直す。以下では、この送り直し1回を反復と呼ぶ。
+まず、処理の単位を定義する。polarisは、利用者の入力1回を1つのrunとして扱う。runの中では、モデルがツールを呼ぶたびに要求を送り直す。以下では、この送り直し1回を反復と呼ぶ。
 
 この区分に沿って、ホストはrunの開始時に次の処理を1回だけ行う。
 
@@ -297,7 +297,7 @@ python3 scripts/run_algedi_benchmark.py \
 
 `POLARIS_AUTH_READ_ONLY=1`は既存認証を更新しない実行を指定する。未指定または`0`は通常の認証動作を維持する。これ以外の値は不正な設定として停止する。`SSL_CERT_FILE`はmanaged proxyが渡す追加の信頼ルートにだけ使う。指定したbundleが欠落または不正なら通信前に停止し、証明書またはホスト名の検証を無効化しない。
 
-brokerを使うbounded runnerは任意の実測用構成であり、通常のPolaris起動、既定のsandbox、既定の認証動作を変更しない。runnerは許可済みのバイナリ、fixture、実行modeだけをmanifestで固定し、それ以外のprogram、root、引数形は拒否する。brokerが利用できない場合に通常実行へ戻さない。
+brokerを使うbounded runnerは任意の実測用構成であり、通常のpolaris起動、既定のsandbox、既定の認証動作を変更しない。runnerは許可済みのバイナリ、fixture、実行modeだけをmanifestで固定し、それ以外のprogram、root、引数形は拒否する。brokerが利用できない場合に通常実行へ戻さない。
 
 GPT-6 mediumとretrievalを固定し、単一ファイル修正、複数ファイル修正、長いログの原因特定、承認決定の訂正、過去資料と現行資料の照合を比較する。比較元と候補の実行順を交代し、各3回で30試行。`--repeats 5`なら50試行、`--dry-run`なら推論せず実行予定だけを表示する。修正課題は限定したPython構文で計算結果を検査し、生成コードをホストで無制限に実行しない。
 

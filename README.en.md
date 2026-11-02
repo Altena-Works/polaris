@@ -3,7 +3,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/polaris-banner-white.svg">
-    <img src="docs/assets/polaris-banner-ink.svg" alt="Polaris — asterisk and wordmark" width="800" height="200">
+    <img src="docs/assets/polaris-banner-ink.svg" alt="polaris — asterisk and wordmark" width="800" height="200">
   </picture>
 </p>
 
@@ -22,7 +22,7 @@
   <a href="README.md" lang="ja">日本語</a> · <strong>English</strong>
 </p>
 
-Polaris is a Rust coding agent that selects the context needed for the current task. Its main interfaces are a CLI and TUI, with a separate macOS workspace app. It stores workflow state and assembles instructions and skills for the active phase.
+polaris is a Rust coding agent that selects the context needed for the current task. Its main interfaces are a CLI and TUI, with a separate macOS workspace app. It stores workflow state and assembles instructions and skills for the active phase.
 
 v0.3.0-rc targets the macOS arm64 TUI. GUI and other-platform sources remain in the repository. See the [system overview](docs/system-overview.md), [release scope](docs/releases/v0.3.0.md), and [command reference](docs/command-reference.md) (Japanese). No RC tag, release, or package has been published.
 
@@ -30,7 +30,7 @@ v0.3.0-rc targets the macOS arm64 TUI. GUI and other-platform sources remain in 
 
 Start from a project directory. Starting from your home directory currently fails helper preparation with `RuntimeDenied`; see [startup troubleshooting](docs/usage.md#起動時のトラブル).
 
-On macOS arm64, a local preview package can be assembled with a compiled Polaris CLI. Once obtained, install it with one command, `sudo installer -pkg polaris-cli-preview-0.3.0-rc-arm64.pkg -target /`, then launch the TUI with `polaris`. Rust is not needed on the user's machine. This package is currently unsigned and unpublished; a real-machine installation check is still pending. See the [macOS guide](apps/macos/README.md) for assembly and verification details.
+On macOS arm64, a local preview package can be assembled with a compiled polaris CLI. Once obtained, install it with one command, `sudo installer -pkg polaris-cli-preview-0.3.0-rc-arm64.pkg -target /`, then launch the TUI with `polaris`. Rust is not needed on the user's machine. This package is currently unsigned and unpublished; a real-machine installation check is still pending. See the [macOS guide](apps/macos/README.md) for assembly and verification details.
 
 Building from source requires Rust 1.96.0. To use ChatGPT authentication:
 
@@ -40,7 +40,7 @@ target/release/polaris login
 POLARIS_PROVIDER=codex target/release/polaris
 ```
 
-With no prompt argument, Polaris starts the interactive TUI; `-p` runs one prompt. Without an explicit provider, an available OpenAI-compatible API key selects `openai`; saved ChatGPT authentication selects `codex` when no API key is available. With neither, interactive startup shows the login screen. The example explicitly selects `codex`. Use `target/release/polaris` when testing from source to distinguish it from another installed version.
+With no prompt argument, polaris starts the interactive TUI; `-p` runs one prompt. Without an explicit provider, an available OpenAI-compatible API key selects `openai`; saved ChatGPT authentication selects `codex` when no API key is available. With neither, interactive startup shows the login screen. The example explicitly selects `codex`. Use `target/release/polaris` when testing from source to distinguish it from another installed version.
 
 Use `--phase` to choose the starting phase:
 
@@ -64,15 +64,15 @@ The macOS CLI preview package contains no optional resources. The GUI installer 
 
 These are historical v0.2.0 measurements, not results for v0.3.0-rc. The current-version comparison has not been run.
 
-Both tools requested `gpt-6-astra` with `medium` effort; Polaris had workflow enabled. These partial results cover 15 matched PRE02–08 trials with two turns each against Codex CLI 0.154.0. The additional PRE01 measurement was skipped.
+Both tools requested `gpt-6-astra` with `medium` effort; polaris had workflow enabled. These partial results cover 15 matched PRE02–08 trials with two turns each against Codex CLI 0.154.0. The additional PRE01 measurement was skipped.
 
-| Metric | Polaris | Stock Codex CLI 0.154.0 | Reduction |
+| Metric | polaris | Stock Codex CLI 0.154.0 | Reduction |
 | --- | ---: | ---: | ---: |
 | Total tokens | **95,139** | 467,901 | **79.7%** |
 | Hypothetical API cost | **$2.37915** | $3.600914 | **33.9%** |
 | Quality checks | 15/15 passed | 15/15 passed | — |
 
-Total tokens include input and output; cached input is already part of input. Cost uses API prices frozen in the measurement specification, not actual Codex billing. Polaris took 23.5% longer across these 15 trials. These short synthetic tasks were run sequentially and do not establish reductions for general coding work or long conversations. See the [method, quality checks, timing, and limitations](docs/preimplementation-evaluation.md#v0120とcodex-01540の途中結果).
+Total tokens include input and output; cached input is already part of input. Cost uses API prices frozen in the measurement specification, not actual Codex billing. polaris took 23.5% longer across these 15 trials. These short synthetic tasks were run sequentially and do not establish reductions for general coding work or long conversations. See the [method, quality checks, timing, and limitations](docs/preimplementation-evaluation.md#v0120とcodex-01540の途中結果).
 
 ## Documentation
 
