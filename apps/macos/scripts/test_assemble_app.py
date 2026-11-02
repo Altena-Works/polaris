@@ -22,7 +22,7 @@ class HelperAssemblyTests(unittest.TestCase):
         binary_directory = package / ".build/bin"
         resources = binary_directory / "PolarisDesktop_PolarisDesktop.bundle"
         resources.mkdir(parents=True)
-        (resources / "release.json").write_text('{"version": "0.12.0"}')
+        (resources / "release.json").write_text('{"version": "0.2.0"}')
         (binary_directory / "PolarisDesktop").write_bytes(b"compiled native executable")
         shutil.copytree(REPOSITORY / "skills", repository / "skills")
         shutil.copytree(REPOSITORY / "agents", repository / "agents")
@@ -72,7 +72,7 @@ class HelperAssemblyTests(unittest.TestCase):
             app = self.assemble_checkout(Path(directory))
             self.assert_bundled_catalogs(app)
             with (app / "Contents/Info.plist").open("rb") as stream:
-                self.assertEqual(plistlib.load(stream)["CFBundleShortVersionString"], "0.12.0")
+                self.assertEqual(plistlib.load(stream)["CFBundleShortVersionString"], "0.2.0")
             helper = app / "Contents/Helpers/polaris-execution-helper"
             self.assertEqual(helper.read_bytes(), b"compiled execution-helper")
             manifest = json.loads((app / "Contents/Resources/execution-helper.json").read_text())
