@@ -8,7 +8,13 @@
 </p>
 
 <p align="center">
-  <strong>v0.11.0 “Sadalmelik”</strong> · <a href="CHANGELOG.md">Changelog (Japanese)</a>
+  <img alt="Version v0.1.0 Hamal" src="https://img.shields.io/badge/v0.1.0-Hamal-35505B?style=for-the-badge&labelColor=182D36">
+  <img alt="Rust 1.96+" src="https://img.shields.io/badge/Rust-1.96%2B-35505B?style=for-the-badge&labelColor=182D36&logo=rust&logoColor=white">
+  <img alt="License MIT" src="https://img.shields.io/github/license/Altena-Works/polaris?style=for-the-badge&labelColor=182D36&color=35505B">
+</p>
+
+<p align="center">
+  <a href="CHANGELOG.md">Changelog (Japanese)</a>
 </p>
 
 <p align="center">
@@ -56,7 +62,7 @@ The API-key `openai` provider currently uses Chat Completions and does not suppo
 - **Retention and retrieval:** Large tool results can be stored and retrieved by selected lines or paragraphs. Enable this with `--tool-memory history|retrieval`.
 - **Conversation continuity:** Saved conversations preserve workflow state across resume and fork. Subagents run in one parallel wave with output validated against per-type schemas.
 
-v0.11.0 “Sadalmelik” adopts workflow by default and adds durable conversation state, resume, and fork. The recent-ten-turn `strict10` mode with summary retrieval and cache request pacing remain opt-in. Real-model evaluation of strict10 is incomplete, and Web search cannot be enabled in the current CLI; see the [validation report](docs/sadalmelik-validation.md) for requirements and limits, and the [changelog](CHANGELOG.md) for release history.
+v0.1.0 “Hamal” adopts workflow by default and adds durable conversation state, resume, and fork. The recent-ten-turn `strict10` mode with summary retrieval and cache request pacing remain opt-in. Real-model evaluation of strict10 is incomplete, and Web search cannot be enabled in the current CLI; see the [validation report](docs/sadalmelik-validation.md) for requirements and limits, and the [changelog](CHANGELOG.md) for release history.
 
 ## Documentation
 
@@ -68,11 +74,11 @@ The detailed documents below are in Japanese.
 | [Context efficiency](docs/context-efficiency.md) | Compaction, archival, retrieval, embeddings, and strict10. |
 | [Subagents](docs/subagents.md) | Parallel execution, schemas, and execution limits. |
 | [Preimplementation measurements](docs/preimplementation-evaluation.md) | Planning quality and the stock Codex comparison. |
-| [v0.11.0 validation](docs/sadalmelik-validation.md) | Control tests, real-model tests, and unverified behavior. |
+| [v0.1.0 validation](docs/sadalmelik-validation.md) | Control tests, real-model tests, and unverified behavior. |
 | [Testing](docs/testing.md) | Automated checks and manual TUI verification. |
 | [Earlier GPT-6 measurements](docs/gpt6-efficiency-results.md) | Synthetic tasks and measurement conditions at v0.9.0. |
 | [Large skill/plugin comparison](docs/skill-scaling-benchmark.md) | Conditions behind the earlier 547-token initial input. |
-| [Request pacing and caching](docs/gpt6-cache-pacing-results.md) | The v0.10.0 long-conversation cache experiment. |
+| [Request pacing and caching](docs/gpt6-cache-pacing-results.md) | The long-conversation cache experiment from v0.1.0 development. |
 | [Codex update investigation](docs/codex-update-efficiency.md) | Public changes and control of automatic model requests. |
 
 ## Development and verification
@@ -82,6 +88,10 @@ cargo test --locked --offline --workspace
 cargo clippy --locked --offline --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
+
+## Reference repository
+
+- [openai/codex](https://github.com/openai/codex): the baseline for comparing CLI and TUI behavior, and a reference for parts of the design.
 
 ## License
 

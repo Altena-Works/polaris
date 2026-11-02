@@ -8,7 +8,13 @@
 </p>
 
 <p align="center">
-  <strong>v0.11.0 “Sadalmelik”</strong> · <a href="CHANGELOG.md">変更履歴</a>
+  <img alt="Version v0.1.0 Hamal" src="https://img.shields.io/badge/v0.1.0-Hamal-35505B?style=for-the-badge&labelColor=182D36">
+  <img alt="Rust 1.96+" src="https://img.shields.io/badge/Rust-1.96%2B-35505B?style=for-the-badge&labelColor=182D36&logo=rust&logoColor=white">
+  <img alt="License MIT" src="https://img.shields.io/github/license/Altena-Works/polaris?style=for-the-badge&labelColor=182D36&color=35505B">
+</p>
+
+<p align="center">
+  <a href="CHANGELOG.md">変更履歴</a>
 </p>
 
 <p align="center">
@@ -56,7 +62,7 @@ APIキー用の`openai`プロバイダはChat Completions形式のため、Respo
 - **保存と再取得**：大きなツール結果を原文とともに保存し、必要な行や段落だけを取り出せる。ツール記憶は`--tool-memory history|retrieval`で有効化する。
 - **会話の継続**：workflowの段階と会話を保存し、再開・分岐で引き継ぐ。子エージェントは1波で並列実行し、型ごとの出力Schemaで検証する。
 
-v0.11.0 “Sadalmelik”ではworkflowを標準採用し、会話保存・再開・分岐を整えた。直近10ターンと要約検索を使う`strict10`と、キャッシュ用の要求間隔制御は任意設定である。strict10の実モデル評価は未完了で、Web検索は現行CLIでは有効化できない。利用条件と制限は[検証状況](docs/sadalmelik-validation.md)に記載する。各版の変更は[変更履歴](CHANGELOG.md)を参照。
+v0.1.0 “Hamal”ではworkflowを標準採用し、会話保存・再開・分岐を整えた。直近10ターンと要約検索を使う`strict10`と、キャッシュ用の要求間隔制御は任意設定である。strict10の実モデル評価は未完了で、Web検索は現行CLIでは有効化できない。利用条件と制限は[検証状況](docs/sadalmelik-validation.md)に記載する。各版の変更は[変更履歴](CHANGELOG.md)を参照。
 
 ## 文書
 
@@ -66,11 +72,11 @@ v0.11.0 “Sadalmelik”ではworkflowを標準採用し、会話保存・再開
 | [コンテキスト効率化](docs/context-efficiency.md) | 圧縮、原文保存、検索、埋め込み、strict10。 |
 | [subagent](docs/subagents.md) | 並列実行、出力Schema、実行制限。 |
 | [実装前段階の実測](docs/preimplementation-evaluation.md) | 企画から計画レビューまでの品質と純正Codex比較。 |
-| [v0.11.0の検証](docs/sadalmelik-validation.md) | 制御試験、実モデル試験、未検証の範囲。 |
+| [v0.1.0の検証](docs/sadalmelik-validation.md) | 制御試験、実モデル試験、未検証の範囲。 |
 | [テスト](docs/testing.md) | 自動検査とTUIの手動確認。 |
 | [過去のGPT-6実測](docs/gpt6-efficiency-results.md) | v0.9.0時点の合成課題と測定条件。 |
 | [skill/plugin大量時の比較](docs/skill-scaling-benchmark.md) | 以前の初回入力547トークンの測定条件。 |
-| [要求間隔とキャッシュ](docs/gpt6-cache-pacing-results.md) | v0.10.0の長期対話によるキャッシュ実験。 |
+| [要求間隔とキャッシュ](docs/gpt6-cache-pacing-results.md) | v0.1.0開発中の長期対話によるキャッシュ実験。 |
 | [Codex更新調査](docs/codex-update-efficiency.md) | 公開変更の確認と自動モデル要求の制御。 |
 
 ## 開発と検証
@@ -80,6 +86,10 @@ cargo test --locked --offline --workspace
 cargo clippy --locked --offline --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
+
+## 参考にしているリポジトリ
+
+- [openai/codex](https://github.com/openai/codex)：CLI・TUIの操作と挙動を比べる基準であり、一部の設計の参考にしている。
 
 ## ライセンス
 
