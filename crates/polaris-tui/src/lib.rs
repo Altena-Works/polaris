@@ -2115,7 +2115,9 @@ fn finish_rewind_for_session(
 /// the interactive loop records, so the next `--resume` can check the files
 /// against the conversation's new head. Effects are judged as the TUI judges
 /// them, from the turn's own tool calls; a subagent's calls are not in the
-/// conversation, so a turn that spawns one counts as unknown.
+/// conversation, so a turn that spawns one counts as unknown, and so does a
+/// turn whose earlier history changed (a compaction), since its own calls can
+/// no longer be found by position.
 #[cfg(unix)]
 pub struct HeadlessRewind {
     owner: polaris_core::rewind_workspace::WorkspaceOwner,
@@ -2123,6 +2125,58 @@ pub struct HeadlessRewind {
     boundary: polaris_core::conversation_state::RewindBoundaryV1,
     /// Where this turn's messages start.
     from: usize,
+    /// The history before this turn, to tell whether it changed meanwhile.
+    before: u64,
+}
+
+/// A fingerprint of `messages`: equal only when nothing in them changed.
+#[cfg(unix)]
+fn history_fingerprint(messages: &[polaris_provider::Message]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_vec(messages)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    messages.len().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// This turn's messages, from `from` on, or `None` when anything before them
+/// changed since `before` was taken: then they cannot be found by position,
+/// and the caller fails closed.
+#[cfg(unix)]
+fn own_messages(
+    messages: &[polaris_provider::Message],
+    from: usize,
+    before: u64,
+) -> Option<&[polaris_provider::Message]> {
+    (messages.len() >= from && history_fingerprint(&messages[..from]) == before)
+        .then(|| &messages[from..])
+}
+
+#[cfg(all(test, unix))]
+mod headless_rewind_tests {
+    use super::*;
+    use polaris_provider::Message;
+
+    #[test]
+    fn a_turn_is_read_only_while_the_history_before_it_is_unchanged() {
+        let mut messages = vec![
+            Message::user("old question"),
+            Message::assistant("old answer"),
+        ];
+        let before = history_fingerprint(&messages);
+        messages.push(Message::user("this turn"));
+        messages.push(Message::assistant("done"));
+        assert_eq!(
+            own_messages(&messages, 2, before).map(<[Message]>::len),
+            Some(2)
+        );
+        // A compaction rewrites what came before: the turn cannot be found.
+        messages.splice(..2, [Message::user("summary of earlier turns")]);
+        assert!(own_messages(&messages, 2, before).is_none());
+        assert!(own_messages(&messages[..1], 2, before).is_none());
+    }
 }
 
 #[cfg(unix)]
@@ -2157,6 +2211,7 @@ impl HeadlessRewind {
             effects,
             boundary,
             from: session.messages.len(),
+            before: history_fingerprint(&session.messages),
         }))
     }
 
@@ -2179,8 +2234,12 @@ impl HeadlessRewind {
             return Ok(());
         }
         let mut tracker = rewind_ui::EffectTracker::default();
-        let mut unknown = None;
-        for call in session.messages[self.from.min(session.messages.len())..]
+        let own = own_messages(&session.messages, self.from, self.before);
+        let mut unknown = own.is_none().then(|| {
+            "The conversation changed during this one-shot turn (for example, a compaction), so its effects cannot be read".to_owned()
+        });
+        for call in own
+            .unwrap_or_default()
             .iter()
             .flat_map(|message| &message.tool_calls)
         {
