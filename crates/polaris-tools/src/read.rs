@@ -338,6 +338,55 @@ fn read_directory(
     Ok(out)
 }
 
+/// How many bytes of small files a directory read may also show.
+pub const DIRECTORY_CONTENT_BYTES: u64 = 32 * 1024;
+
+/// The immediate regular files of `dir`, in name order, each in full while
+/// they fit `budget` bytes together; a file that does not fit is skipped and
+/// counted. Saves the round trip that follows a listing, without letting a
+/// large tree into the context: a bigger file still takes its own `read`.
+pub fn small_files(dir: &Path, budget: u64) -> String {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return String::new();
+    };
+    // `DirEntry::file_type` does not follow a symlink, so only real files count.
+    let mut files: Vec<_> = entries
+        .flatten()
+        .take(MAX_DIRECTORY_ENTRIES)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter_map(|entry| Some((entry.file_name(), entry.metadata().ok()?.len())))
+        .collect();
+    files.sort();
+    let (mut left, mut shown, mut skipped) = (budget, String::new(), 0usize);
+    for (name, len) in files {
+        if len == 0 {
+            continue;
+        }
+        if len > left {
+            skipped += 1;
+            continue;
+        }
+        // `read` repeats the denial checks for the child and numbers its lines.
+        match read(&dir.join(&name), 0, DEFAULT_LIMIT) {
+            Ok(text) => {
+                left -= len;
+                shown.push_str(&format!("\n== {} ==\n{text}", name.to_string_lossy()));
+            }
+            Err(ToolError::PathDenied(_)) => {}
+            Err(_) => skipped += 1,
+        }
+    }
+    if shown.is_empty() {
+        return String::new();
+    }
+    if skipped > 0 {
+        shown.push_str(&format!(
+            "({skipped} more files not shown; read them one by one.)\n"
+        ));
+    }
+    format!("\nSmall files in full:{shown}")
+}
+
 fn directory_incomplete_notice() -> String {
     format!(
         "(directory listing incomplete after scanning {MAX_DIRECTORY_ENTRIES} entries; read a narrower directory.)\n"
@@ -608,6 +657,23 @@ mod tests {
         std::os::unix::fs::symlink(target.path(), dir.path().join("alias")).unwrap();
 
         assert_eq!(read(dir.path(), 0, 100).unwrap(), "1\tsymlink\t\"alias\"\n");
+    }
+
+    #[test]
+    fn small_files_shows_what_fits_and_counts_the_rest() {
+        let dir = tempfile::tempdir().expect("can't create temp directory");
+        std::fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
+        std::fs::write(dir.path().join("big.txt"), "x".repeat(100)).unwrap();
+        std::fs::write(dir.path().join(".env"), "DUMMY_SECRET_SENTINEL").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub").join("inner.txt"), "inner").unwrap();
+
+        let out = small_files(dir.path(), 50);
+        assert!(out.contains("== a.txt ==\n1\talpha\n"), "{out}");
+        assert!(out.contains("1 more files not shown"), "{out}");
+        assert!(!out.contains("DUMMY_SECRET_SENTINEL"), "{out}");
+        assert!(!out.contains("inner"), "{out}");
+        assert_eq!(small_files(dir.path(), 0), "");
     }
 
     #[test]

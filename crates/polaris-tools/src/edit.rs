@@ -21,6 +21,16 @@ pub fn edit(
     crate::write::run_mutation(policy, helper, &mutation, path)
 }
 
+/// The edited lines and three on each side, read back from `path` after an
+/// edit replaced the one `old` in `before`, so the model need not read the
+/// file again to check the result. `None` when the place cannot be found.
+pub fn excerpt(before: &str, old: &str, new: &str, path: &Path) -> Option<String> {
+    let start = before[..before.find(old)?].matches('\n').count();
+    let span = new.matches('\n').count() + 1;
+    let text = crate::read::read(path, start.saturating_sub(3), (span + 6).min(60)).ok()?;
+    Some(format!("After the edit:\n{text}"))
+}
+
 #[cfg(test)]
 mod tests {
     use polaris_sandbox::{SandboxMode, SandboxPolicy};
@@ -96,6 +106,21 @@ mod tests {
             "new did not reach the child: {written}"
         );
         assert!(!msg.trim().is_empty(), "the result description is empty");
+    }
+
+    #[test]
+    fn the_excerpt_shows_the_replaced_lines_where_the_old_text_was() {
+        let before = (1..=20).map(|i| format!("line {i}\n")).collect::<String>();
+        let after = before.replace("line 10\n", "ten\nTEN\n");
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        std::fs::write(file.path(), &after).expect("write");
+
+        let out = crate::edit::excerpt(&before, "line 10\n", "ten\nTEN\n", file.path())
+            .expect("no excerpt");
+        assert!(out.starts_with("After the edit:\n7\tline 7\n"), "{out}");
+        assert!(out.contains("10\tten\n11\tTEN\n"), "{out}");
+        assert!(out.contains("15\tline 14\n(showed lines 7-15"), "{out}");
+        assert!(crate::edit::excerpt(&before, "absent", "x", file.path()).is_none());
     }
 
     #[test]

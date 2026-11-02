@@ -3118,6 +3118,13 @@ async fn dispatch(
     .await
 }
 
+/// `POLARIS_TOOL_ECONOMY`, a comma list: `edit` returns the edited lines with
+/// an edit, `dir` adds a directory's small files to its listing. Off unless
+/// named, until measured against runs without them.
+fn tool_economy(item: &str) -> bool {
+    std::env::var("POLARIS_TOOL_ECONOMY").is_ok_and(|v| v.split(',').any(|s| s.trim() == item))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_controlled(
     call: &polaris_provider::ToolCall,
@@ -3195,7 +3202,18 @@ async fn dispatch_controlled(
                     _ => Err("isolated read unavailable; no direct-read fallback".into()),
                 }
             } else {
-                polaris_tools::read::read(Path::new(path), offset, limit).map_err(|e| e.to_string())
+                let path = Path::new(path);
+                polaris_tools::read::read(path, offset, limit)
+                    .map(|mut text| {
+                        if offset == 0 && tool_economy("dir") && path.is_dir() {
+                            text.push_str(&polaris_tools::read::small_files(
+                                path,
+                                polaris_tools::read::DIRECTORY_CONTENT_BYTES,
+                            ));
+                        }
+                        text
+                    })
+                    .map_err(|e| e.to_string())
             }
         }
         "write" => 'write: {
@@ -3308,12 +3326,26 @@ async fn dispatch_controlled(
                 )
                 .await;
             }
+            // The same denial rule as the write diff above: never read what `read` refuses.
+            let before = (tool_economy("edit")
+                && ctx.sandbox.isolated_boundary().is_none()
+                && !polaris_tools::path_policy::is_denied(path))
+            .then(|| std::fs::read_to_string(path).ok())
+            .flatten();
             let result = polaris_tools::edit::edit(ctx.sandbox, ctx.helper, path, old, new)
                 .map_err(|e| e.to_string());
             if result.is_ok() {
                 pending_diff = Some(crate::events::compute_diff(old, new));
             }
-            result
+            result.map(|done| {
+                match before
+                    .as_deref()
+                    .and_then(|before| polaris_tools::edit::excerpt(before, old, new, path))
+                {
+                    Some(excerpt) => format!("{done}\n{excerpt}"),
+                    None => done,
+                }
+            })
         }
         "bash" => 'bash: {
             let command = match call.arguments["command"].as_str() {
