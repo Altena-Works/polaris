@@ -57,7 +57,9 @@ const FOLD_SYSTEM: &str = "Merge the older ledger lines into the running directi
 const MAX_CANDIDATES: usize = 24;
 /// Occurrences kept per term, newest last.
 const KEPT_OCCURRENCES: usize = 3;
-/// Inputs that approve the previous answer rather than restate it.
+/// Inputs that approve the previous answer rather than restate it. The whole
+/// input must be one of them (trailing punctuation aside), so "not ok" or
+/// "承認しない" is no approval.
 const APPROVALS: &[&str] = &[
     "これで進める",
     "これで進めて",
@@ -296,20 +298,21 @@ impl TurnMemory {
     }
 
     /// The check a decision must pass: it names something checkable, all of
-    /// it is in this turn's text, and the person said it, or approved the
-    /// previous answer that did. Nothing here asks a model.
+    /// it is in this turn's text, and either the person's own input carries
+    /// every name (one of them more than a number, which turns up by chance)
+    /// or the whole input is an approval of a previous answer that carried
+    /// every name. Nothing here asks a model.
     fn holds(&self, choice: &str, input: &str, text: &str) -> bool {
         let names = checkable(choice);
         if names.is_empty() || !names.iter().all(|name| text.contains(name.as_str())) {
             return false;
         }
-        let said = names.iter().any(|name| input.contains(name.as_str()));
-        let approval = input.trim().to_lowercase();
-        let approved = approval.chars().count() <= 20
-            && APPROVALS.iter().any(|word| approval.contains(word))
-            && names.iter().all(|name| {
-                self.last_answer.contains(name.as_str()) || input.contains(name.as_str())
-            });
+        let said = names.iter().any(|name| !is_number(name))
+            && names.iter().all(|name| input.contains(name.as_str()));
+        let approved = is_approval(input)
+            && names
+                .iter()
+                .all(|name| self.last_answer.contains(name.as_str()));
         said || approved
     }
 
@@ -478,6 +481,20 @@ impl TurnMemory {
             ))
         })
     }
+}
+
+fn is_number(name: &str) -> bool {
+    name.chars().all(|c| c.is_ascii_digit() || c == '.')
+}
+
+/// Whether the whole input is one approval word or phrase.
+fn is_approval(input: &str) -> bool {
+    let said = input
+        .trim()
+        .trim_end_matches(['。', '.', '!', '！', '、', ','])
+        .trim()
+        .to_lowercase();
+    APPROVALS.contains(&said.as_str())
 }
 
 /// `name=value` from a ledger line.
@@ -950,6 +967,35 @@ mod tests {
         );
         assert_eq!(memory.facts["retention"].text, "retention_days=45");
         assert_eq!(memory.facts["retention"].turn, 5);
+
+        // A negation or a condition is no approval, however it starts, even
+        // when the answer it follows named the whole decision.
+        memory.last_answer = "retention_days=30 にします".into();
+        for input in [
+            "承認しない",
+            "not ok",
+            "ok, but use 46",
+            "それではなく 30 にする",
+        ] {
+            memory.settle(
+                6,
+                "topic=retention; chose=retention_days=30",
+                input,
+                "USER: ...\nASSISTANT: retention_days=30",
+                5..6,
+            );
+            assert_eq!(memory.facts["retention"].turn, 5, "{input}");
+        }
+        // A number the person happened to type is not their decision.
+        memory.last_answer = "max_retries=3 にします".into();
+        memory.settle(
+            7,
+            "topic=retries; chose=max_retries=3",
+            "3つの案を比べて",
+            "USER: 3つの案を比べて\nASSISTANT: max_retries=3 にします",
+            6..7,
+        );
+        assert!(!memory.facts.contains_key("retries"));
     }
 
     #[tokio::test]
