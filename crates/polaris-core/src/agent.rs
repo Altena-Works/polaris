@@ -1001,26 +1001,36 @@ pub(crate) async fn run_loop(
         .map(|_| crate::effort_plan::Restore::new(provider));
     // `turn-only` (experiment): finished turns go into the external memory,
     // and this turn's requests carry only this turn plus what it recalls.
-    let turn_only =
-        if caller == "root" && (crate::turn_memory::enabled() || session.turn_memory.is_some()) {
-            let memory = session
-                .turn_memory
-                .get_or_insert_with(Default::default)
-                .clone();
-            let mut memory = memory.lock().await;
-            memory
-                .absorb(&session.messages, session.decider.as_deref())
-                .await;
-            let from = crate::turn_memory::turn_start(&session.messages);
-            let input = session
-                .messages
-                .get(from)
-                .map(|m| m.content.clone())
-                .unwrap_or_default();
-            Some((from, memory.recall(&input).await))
-        } else {
-            None
-        };
+    let turn_only = if caller == "root"
+        && (crate::turn_memory::enabled()
+            || session.turn_memory.is_some()
+            || session.turn_memory_factory.is_some())
+    {
+        // Made by the host's factory, so it has the writer and the embedder
+        // the host chose; bare only where no host attached one.
+        let make = session.turn_memory_factory.clone();
+        let memory = session
+            .turn_memory
+            .get_or_insert_with(|| {
+                Arc::new(Mutex::new(
+                    make.map_or_else(Default::default, |make| make()),
+                ))
+            })
+            .clone();
+        let mut memory = memory.lock().await;
+        memory
+            .absorb(&session.messages, session.decider.as_deref())
+            .await;
+        let from = crate::turn_memory::turn_start(&session.messages);
+        let input = session
+            .messages
+            .get(from)
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+        Some((from, memory.recall(&input).await))
+    } else {
+        None
+    };
     let mut workflow_turn = session
         .workflow
         .as_ref()

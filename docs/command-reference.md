@@ -75,7 +75,7 @@ profileは`node`・`nextjs`・`react`・`vue`・`svelte`・`astro`・`nuxt`・`a
 | `/fork` | 現在の履歴を別の会話IDへ複製する。 | `v2セッションへ分岐しました: <ID>`。 |
 | `/session`、`/session current` | 会話IDと現在・保存済みの設定を確認する。 | `会話: <ID> / 世代 <n>`、`現在provider: ... / model: ...`、保存provider/model/effort、履歴・remember・tool-memory等。 |
 | `/history [offset]` | 保存した原文履歴を読む。offsetはmessage単位の整数。 | `原文履歴 <開始>..<終了> / <総数> messages`とrole/turn/本文。1回最大20messages・64KiB。 |
-| `/clear` | 確認後、会話の現在の区間（epoch）を消去する。 | `T08 complete`。過去の証拠は保持されるため、全履歴ファイルの削除とは異なる。 |
+| `/clear` | 確認後、会話の現在の区間（epoch）を消去する。turn-onlyの記憶も捨てる。 | `T08 complete`。過去の証拠は保持されるため、全履歴ファイルの削除とは異なる。 |
 | `/review [追加指示]` | 現在の未コミット変更のレビューをモデルへ依頼する。 | 通常のモデル応答とツールの実行状況。追加指示をレビューpromptに含める。 |
 | `/export [path]` | 確認後、会話原文のeventをMarkdownへ新規保存する。 | `T17 完了: <path>`。省略時は`polaris-export-<時刻>.md`。既存ファイルは上書きせず、上限16MiB。 |
 | `/copy` | 確認後、最後の本文があるassistant返答をclipboardへコピーする。 | `T19 完了`。 |

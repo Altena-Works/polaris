@@ -2897,11 +2897,7 @@ async fn run_native_turn(args: Args, tool_memory_embedding: Option<(String, Stri
     let wrap_maker = tier_weights.get("giant").cloned();
     // `turn-only` (experiment): the lightest weight writes its ledger lines;
     // the session's own model never does.
-    if polaris_core::turn_memory::enabled()
-        && let Some(writer) = tier_weights.get("dwarf")
-    {
-        polaris_core::turn_memory::install_writer(writer.clone());
-    }
+    let turn_writer = tier_weights.get("dwarf").cloned();
     let provider = prepared_providers.provider.clone();
     let decision_meter = polaris_provider::decision::DecisionMeter::default();
     if config.decision.enabled
@@ -3171,6 +3167,10 @@ async fn run_native_turn(args: Args, tool_memory_embedding: Option<(String, Stri
     };
     // `turn-only` (experiment): the local embedder for its index. Without
     // one the index is BM25 alone, which is said once here.
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut turn_embedder: Option<
+        std::sync::Arc<dyn polaris_core::conversation_memory::StrictEmbedder>,
+    > = None;
     #[cfg(target_os = "macos")]
     if polaris_core::turn_memory::enabled() {
         let built = managed_runtime_home().and_then(|home| {
@@ -3186,14 +3186,17 @@ async fn run_native_turn(args: Args, tool_memory_embedding: Option<(String, Stri
             .map_err(|error| error.to_string())
         });
         match built {
-            Ok(embedder) => {
-                polaris_core::turn_memory::install_embedder(std::sync::Arc::new(embedder))
-            }
+            Ok(embedder) => turn_embedder = Some(std::sync::Arc::new(embedder)),
             Err(error) => {
                 eprintln!("Note: turn-only memory searches by words only ({error}); no vectors.")
             }
         }
     }
+    // One factory for the process: the interactive UI gives it to every
+    // session it builds, and the one-shot run to its only session.
+    let turn_memory_factory = polaris_core::turn_memory::enabled().then(|| {
+        polaris_core::turn_memory::factory(config.decision.local_only, turn_writer, turn_embedder)
+    });
     let mut colocated = vec![provider.clone()];
     colocated.extend(mcp_selection_provider.iter().cloned());
     decision_colocation.replace(
@@ -3372,6 +3375,7 @@ async fn run_native_turn(args: Args, tool_memory_embedding: Option<(String, Stri
                 polaris_tui::context_window_for(&provider_name, config.context_window);
             session.tier_decider = tier_decider.clone();
             session.decider = decider.clone();
+            session.turn_memory_factory = turn_memory_factory.clone();
             // The same independently constructed selector the MCP catalogue
             // uses; the skill catalogue has no reason to want a different
             // one.
@@ -4206,6 +4210,7 @@ async fn run_native_turn(args: Args, tool_memory_embedding: Option<(String, Stri
                     .map(|(history, _)| history.clone()),
                 summary_usage: configured_strict.as_ref().map(|(_, usage)| usage.clone()),
                 history_backend_factory: Some(history_backend_factory),
+                turn_memory_factory,
             })
             .await
         }

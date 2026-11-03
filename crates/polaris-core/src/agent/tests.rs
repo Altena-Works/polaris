@@ -6408,6 +6408,13 @@ fn counted(request: &CompletionRequest) -> usize {
 }
 
 async fn run_once(provider: &dyn Provider, session: &mut Session) {
+    try_once(provider, session).await.expect("the turn runs");
+}
+
+async fn try_once(
+    provider: &dyn Provider,
+    session: &mut Session,
+) -> Result<AgentOutcome, AgentError> {
     let dir = tempfile::tempdir().expect("temp directory");
     let always_on = crate::prompt::assemble_always_on("", "", &[]);
     let (sandbox, helper, mut gate, mut approver) = dummy_tool_parts();
@@ -6432,7 +6439,6 @@ async fn run_once(provider: &dyn Provider, session: &mut Session) {
         &mut ctx,
     )
     .await
-    .expect("the turn runs");
 }
 
 /// Runs one root turn over a history that the compaction decision counts as
@@ -9796,4 +9802,166 @@ async fn turn_only_sends_this_turn_and_recalls_named_terms_without_extra_model_c
     assert_eq!(second.last().copied(), Some("Push aurora-rc2 now."));
     // The saved conversation keeps everything.
     assert_eq!(session.messages.len(), 4);
+}
+
+/// The memory quoted in the last request, if that request carried one.
+fn quoted(sent: &[CompletionRequest]) -> Option<String> {
+    sent.last()?
+        .messages
+        .iter()
+        .find(|m| m.content.starts_with("[harness] Memory of earlier turns"))
+        .map(|m| m.content.clone())
+}
+
+#[tokio::test]
+async fn clearing_the_history_drops_the_memory_and_the_next_conversation_is_taken_in_again() {
+    let named = Named::new(None);
+    let mut session = Session::new();
+    session.quality = Some(crate::quality::Gates::default());
+    session.turn_memory_factory = Some(crate::turn_memory::factory(false, None, None));
+
+    // Before the clear, input that matches the first turn is quoted its text.
+    ask(
+        &*named,
+        &mut session,
+        "Name the release branch `aurora-rc2`.",
+    )
+    .await;
+    ask(&*named, &mut session, "Push aurora-rc2 now.").await;
+    let before = quoted(&named.taken()).expect("the first turn is quoted");
+    assert!(
+        before
+            .lines()
+            .any(|line| line.starts_with("- [c0 turn 1 @0] Name the release branch")),
+        "{before}"
+    );
+
+    // After it, the same words find nothing: that conversation is gone.
+    session.clear_history().expect("cleared");
+    ask(&*named, &mut session, "Push aurora-rc2 now.").await;
+    assert_eq!(quoted(&named.taken()), None);
+
+    // The conversation that follows is taken in from its first turn, and
+    // only it.
+    ask(
+        &*named,
+        &mut session,
+        "Name the staging branch `zephyr-rc9`.",
+    )
+    .await;
+    ask(&*named, &mut session, "Push aurora-rc2 and zephyr-rc9 now.").await;
+    let after = quoted(&named.taken()).expect("the new conversation is quoted");
+    assert!(
+        after.contains("Name the staging branch `zephyr-rc9`."),
+        "{after}"
+    );
+    assert!(!after.contains("release branch"), "{after}");
+}
+
+/// A writer that answers nothing, so a line falls back to the turn's own
+/// words, and waits forever on one call (counted from 1) as a writer does
+/// while the person presses Esc.
+struct Writer {
+    calls: std::sync::atomic::AtomicUsize,
+    hang_on: usize,
+    reached: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl Provider for Writer {
+    async fn complete(
+        &self,
+        _: CompletionRequest,
+    ) -> Result<CompletionResponse, polaris_provider::ProviderError> {
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        if call == self.hang_on {
+            self.reached.notify_one();
+            std::future::pending::<()>().await;
+        }
+        Err(polaris_provider::ProviderError::Http(
+            "the fixture writer has no answer".into(),
+        ))
+    }
+}
+
+/// A model that asks for a tool, then goes down.
+struct GoesDown(Mutex<usize>);
+
+#[async_trait::async_trait]
+impl Provider for GoesDown {
+    async fn complete(
+        &self,
+        _: CompletionRequest,
+    ) -> Result<CompletionResponse, polaris_provider::ProviderError> {
+        let mut asked = self.0.lock().expect("lock");
+        *asked += 1;
+        if *asked > 1 {
+            return Err(polaris_provider::ProviderError::Http(
+                "the model is down".into(),
+            ));
+        }
+        Ok(CompletionResponse {
+            tool_calls: vec![ToolCall {
+                id: "call-1".into(),
+                name: "lookup".into(),
+                arguments: serde_json::json!({}),
+            }],
+            ..Default::default()
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_failed_turn_rolled_back_does_not_shift_the_next_turns_intake() {
+    // Turn 3's line is the writer's third call, and the person presses Esc
+    // while it is being written.
+    let writer = Arc::new(Writer {
+        calls: Default::default(),
+        hang_on: 3,
+        reached: Default::default(),
+    });
+    let named = Named::new(None);
+    let mut session = Session::new();
+    session.quality = Some(crate::quality::Gates::default());
+    session.turn_memory_factory = Some(crate::turn_memory::factory(
+        false,
+        Some(writer.clone()),
+        None,
+    ));
+    ask(&*named, &mut session, "first question").await;
+    ask(&*named, &mut session, "second question").await;
+
+    // Turn 3 asks for a tool and then the model goes down. The host cuts the
+    // history back to just after the input, as the TUI does.
+    session.push_user("third question");
+    let checkpoint = session.messages.len();
+    let down = GoesDown(Mutex::new(0));
+    assert!(try_once(&down, &mut session).await.is_err());
+    assert!(
+        session.messages.len() > checkpoint,
+        "the turn added messages"
+    );
+    session.truncate_history(checkpoint);
+
+    // Turn 4 is cut short while the writer is still on turn 3.
+    session.push_user("fourth question");
+    tokio::select! {
+        _ = run_once(&*named, &mut session) => panic!("the writer was not waiting"),
+        _ = writer.reached.notified() => {}
+    }
+
+    // The turns after take in turns 3 and 4, each once and under its own
+    // number.
+    ask(&*named, &mut session, "fifth question").await;
+    ask(&*named, &mut session, "sixth question").await;
+    let quote = quoted(&named.taken()).expect("the earlier turns are quoted");
+    let lines: Vec<&str> = quote.lines().filter(|l| l.starts_with('T')).collect();
+    assert_eq!(lines.len(), 5, "{quote}");
+    for (n, ordinal) in ["first", "second", "third", "fourth", "fifth"]
+        .into_iter()
+        .enumerate()
+    {
+        let expected = format!("T{}: asked={ordinal} question;", n + 1);
+        assert!(lines[n].starts_with(&expected), "{quote}");
+    }
 }

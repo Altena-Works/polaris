@@ -27,6 +27,10 @@
 //! the chunks nearest to it. A small model writes the lines and the direction
 //! (the lightest weight, never the session's own model), each answer checked
 //! before use; without one the line is built from the turn's own words.
+//!
+//! The memory belongs to one conversation and goes with it (`/clear`). The
+//! writer and the embedder do not: the host chooses them once and a session
+//! makes every memory it starts through a [`Factory`].
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, OnceLock};
@@ -73,20 +77,29 @@ const APPROVALS: &[&str] = &[
     "lgtm",
 ];
 
-static EMBEDDER: OnceLock<Arc<dyn StrictEmbedder>> = OnceLock::new();
-static WRITER: OnceLock<Arc<dyn polaris_provider::Provider>> = OnceLock::new();
+/// How a session makes its memory. The host built it with the writer and the
+/// embedder already chosen, so a memory made after `/clear`, or by a session
+/// that replaced another (`/new`, `/resume`, rewind), has them too.
+pub type Factory = Arc<dyn Fn() -> TurnMemory + Send + Sync>;
 
-/// The small model that writes the ledger (the lightest weight). Without one
-/// the lines are built from the turn's own words.
-pub fn install_writer(writer: Arc<dyn polaris_provider::Provider>) {
-    let _ = WRITER.set(writer);
-}
-
-/// The local embedder the CLI built for this process, if it could. Without
-/// one the index is BM25 alone.
-// ponytail: one process-wide embedder; a per-session one when sessions need different models.
-pub fn install_embedder(embedder: Arc<dyn StrictEmbedder>) {
-    let _ = EMBEDDER.set(embedder);
+/// The factory for a host that chose `writer` (the lightest weight, which
+/// writes the ledger; without one the lines are built from the turn's own
+/// words) and `embedder` (the local one; without it the index is BM25 alone).
+///
+/// `local_only` is settled here, once: a writer is kept only if it is known
+/// to stay on this machine, the same test the decider and the MCP selector
+/// pass.
+pub fn factory(
+    local_only: bool,
+    writer: Option<Arc<dyn polaris_provider::Provider>>,
+    embedder: Option<Arc<dyn StrictEmbedder>>,
+) -> Factory {
+    let writer = crate::decision_policy::restrict_arbiter(local_only, writer);
+    Arc::new(move || TurnMemory {
+        writer: writer.clone(),
+        embedder: embedder.clone(),
+        ..Default::default()
+    })
 }
 
 pub fn enabled() -> bool {
@@ -125,6 +138,9 @@ struct Fact {
 }
 
 pub struct TurnMemory {
+    /// Writes the ledger lines; see [`factory`].
+    writer: Option<Arc<dyn polaris_provider::Provider>>,
+    embedder: Option<Arc<dyn StrictEmbedder>>,
     log: VecDeque<Chunk>,
     log_bytes: usize,
     log_limit: usize,
@@ -137,14 +153,18 @@ pub struct TurnMemory {
     /// By topic: a later decision on the same topic replaces the earlier one.
     facts: BTreeMap<String, Fact>,
     last_answer: String,
-    /// Messages already absorbed, so a turn is never read twice.
-    absorbed: usize,
+    /// The ordinal of the last turn taken in, so a turn is never read twice.
+    /// The conversation's turns are counted from its first message, so this
+    /// is not a position in the messages: a history cut back after a failed
+    /// turn moves positions and leaves the count where it was.
     turns: usize,
 }
 
 impl Default for TurnMemory {
     fn default() -> Self {
         Self {
+            writer: None,
+            embedder: None,
             log: VecDeque::new(),
             log_bytes: 0,
             log_limit: std::env::var("POLARIS_TURN_ONLY_LOG_BYTES")
@@ -158,7 +178,6 @@ impl Default for TurnMemory {
             direction: String::new(),
             facts: BTreeMap::new(),
             last_answer: String::new(),
-            absorbed: 0,
             turns: 0,
         }
     }
@@ -174,30 +193,30 @@ pub fn turn_start(messages: &[Message]) -> usize {
 }
 
 impl TurnMemory {
-    /// Takes in every finished turn not yet absorbed: the messages before the
-    /// current turn's start.
+    /// Takes in every finished turn not yet taken in: the turns before the
+    /// current turn's start, past the `turns` already taken in. A turn cut
+    /// short (the person pressed Esc while its line was being written) was
+    /// not counted, so the next call takes it in again under the same number.
     pub async fn absorb(&mut self, messages: &[Message], decider: Option<&dyn Decider>) {
         let end = turn_start(messages);
-        if end <= self.absorbed {
-            return;
-        }
         // One finished turn at a time: a resumed conversation may hold several.
-        let starts: Vec<usize> = (self.absorbed..end)
+        let mut bounds: Vec<usize> = (0..end)
             .filter(|&i| {
                 messages[i].role == Role::User && !crate::quality::is_harness(&messages[i].content)
             })
+            .skip(self.turns)
             .collect();
-        let mut bounds = starts.clone();
+        if bounds.is_empty() {
+            return;
+        }
         bounds.push(end);
         for pair in bounds.windows(2) {
             self.absorb_turn(&messages[pair[0]..pair[1]], decider).await;
         }
-        self.absorbed = end;
     }
 
     async fn absorb_turn(&mut self, finished: &[Message], decider: Option<&dyn Decider>) {
-        self.turns += 1;
-        let turn = self.turns;
+        let turn = self.turns + 1;
         let input = finished.first().map(|m| m.content.as_str()).unwrap_or("");
         let answer = finished
             .iter()
@@ -218,12 +237,12 @@ impl TurnMemory {
             self.push_chunk(turn, Some(self.log_end + offset), piece.to_owned())
                 .await;
         }
-        self.log_end += text.len() + 1;
         let cites = first..self.next_chunk;
 
         // Layer 3: the line, citing its chunks and the files it names.
         let source = format!("USER: {input}\nASSISTANT: {answer}");
-        let mut line = match write(LINE_SYSTEM, &source, LINE_TOKENS).await {
+        let mut line = match write(self.writer.as_deref(), LINE_SYSTEM, &source, LINE_TOKENS).await
+        {
             Some(line) => line,
             None => plain_line(input, answer),
         };
@@ -242,15 +261,27 @@ impl TurnMemory {
             line.push_str(&format!("; at={}", files.join("|")));
         }
 
+        // The turn is taken in from here. A call cut short before this point
+        // leaves `turns` as it was, and the next call takes the turn in again
+        // under the same number.
         self.settle(turn, &line, input, &text, cites);
         self.last_answer = answer.to_owned();
-
         self.ledger.push_back((turn, line));
+        self.log_end += text.len() + 1;
+        self.turns = turn;
+
         if self.ledger.len() > LEDGER_TURNS {
             let (old, evicted) = self.ledger.pop_front().unwrap_or_default();
             self.remember(old, &evicted, decider).await;
             let source = format!("DIRECTION: {}\nOLDER: {evicted}", self.direction);
-            self.direction = match write(FOLD_SYSTEM, &source, DIRECTION_TOKENS).await {
+            self.direction = match write(
+                self.writer.as_deref(),
+                FOLD_SYSTEM,
+                &source,
+                DIRECTION_TOKENS,
+            )
+            .await
+            {
                 Some(line) => line,
                 None => keep_tail(&format!("{}; {evicted}", self.direction), DIRECTION_TOKENS),
             };
@@ -317,7 +348,7 @@ impl TurnMemory {
     }
 
     async fn push_chunk(&mut self, turn: usize, offset: Option<usize>, text: String) {
-        let vector = match EMBEDDER.get() {
+        let vector = match &self.embedder {
             Some(embedder) => embedder.embed_passage(&text).await.ok(),
             None => None,
         };
@@ -386,7 +417,7 @@ impl TurnMemory {
             }
         };
         add(bm25(&self.log, input));
-        if let Some(embedder) = EMBEDDER.get()
+        if let Some(embedder) = &self.embedder
             && let Ok(queries) = embedder.embed_query(input).await
         {
             let mut scored: Vec<(f32, usize)> = self
@@ -624,9 +655,13 @@ fn bm25(chunks: &VecDeque<Chunk>, query: &str) -> Vec<usize> {
 /// One line from the small model, if it answers and the answer passes: a
 /// single line within `limit` tokens whose paths and identifiers all appear
 /// in `source` (it may shorten, never invent).
-async fn write(system: &str, source: &str, limit: usize) -> Option<String> {
-    let writer = WRITER.get()?;
-    let answer = writer
+async fn write(
+    writer: Option<&dyn polaris_provider::Provider>,
+    system: &str,
+    source: &str,
+    limit: usize,
+) -> Option<String> {
+    let answer = writer?
         .complete(polaris_provider::CompletionRequest {
             system: system.into(),
             messages: vec![Message::user(source)],
@@ -1169,5 +1204,152 @@ mod tests {
             Message::user("[harness] check again"),
         ];
         assert_eq!(turn_start(&messages), 2);
+    }
+
+    /// A writer that answers nothing, so a line falls back to the turn's own
+    /// words, and counts its calls. It claims a network boundary, and waits
+    /// forever on one call (counted from 1; 0 for none) as a writer does
+    /// while the person presses Esc.
+    struct Counting {
+        boundary: polaris_provider::NetworkBoundary,
+        calls: std::sync::atomic::AtomicUsize,
+        hang_on: usize,
+        reached: tokio::sync::Notify,
+    }
+
+    impl Counting {
+        fn new(boundary: polaris_provider::NetworkBoundary, hang_on: usize) -> Arc<Self> {
+            Arc::new(Self {
+                boundary,
+                calls: Default::default(),
+                hang_on,
+                reached: Default::default(),
+            })
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl polaris_provider::Provider for Counting {
+        fn network_boundary(&self) -> polaris_provider::NetworkBoundary {
+            self.boundary
+        }
+
+        async fn complete(
+            &self,
+            _: polaris_provider::CompletionRequest,
+        ) -> Result<polaris_provider::CompletionResponse, polaris_provider::ProviderError> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if call == self.hang_on {
+                self.reached.notify_one();
+                std::future::pending::<()>().await;
+            }
+            Err(polaris_provider::ProviderError::Http(
+                "the fixture writer has no answer".into(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn every_memory_a_factory_makes_has_the_writer_unless_local_only_forbids_it() {
+        use polaris_provider::NetworkBoundary::{LocalOnly, RemoteAllowed, Unknown};
+        // The setting, the writer's boundary, and whether the writer is asked.
+        for (local_only, boundary, writes) in [
+            (false, Unknown, true),
+            (true, LocalOnly, true),
+            (true, Unknown, false),
+            (true, RemoteAllowed, false),
+        ] {
+            let writer = Counting::new(boundary, 0);
+            let make = factory(local_only, Some(writer.clone()), None);
+            // Each memory the session starts, the first and the one after
+            // `/clear`, is made the same way.
+            for _ in 0..2 {
+                let before = writer.calls();
+                let mut memory = make();
+                memory.absorb(&turns("first", "answer", 1), None).await;
+                assert_eq!(
+                    writer.calls() - before,
+                    if writes { 2 } else { 0 },
+                    "{local_only} {boundary:?}"
+                );
+                assert_eq!(
+                    memory.ledger[0].1, "asked=first; answered=answer; src=c0",
+                    "the line is the turn's own words either way"
+                );
+            }
+        }
+    }
+
+    /// Embeds everything the same way, so a chunk with a vector is one that
+    /// went through it.
+    struct Unit(crate::conversation_memory::EmbeddingModel);
+
+    impl StrictEmbedder for Unit {
+        fn metadata(&self) -> &crate::conversation_memory::EmbeddingModel {
+            &self.0
+        }
+
+        fn embed_passage<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> crate::conversation_memory::StrictFuture<'a, Vec<f32>> {
+            Box::pin(async { Ok(vec![1.0, 0.0]) })
+        }
+
+        fn embed_query<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> crate::conversation_memory::StrictFuture<'a, Vec<Vec<f32>>> {
+            Box::pin(async { Ok(vec![vec![1.0, 0.0]]) })
+        }
+    }
+
+    #[tokio::test]
+    async fn the_embedder_belongs_to_the_memories_of_its_factory_alone() {
+        let embedder = Arc::new(Unit(crate::conversation_memory::EmbeddingModel {
+            model: "fixture".into(),
+            revision: "1".into(),
+            dimension: 2,
+        }));
+        let make = factory(false, None, Some(embedder));
+        let mut embedded = make();
+        embedded.absorb(&turns("first", "answer", 1), None).await;
+        assert!(!embedded.log.is_empty());
+        assert!(embedded.log.iter().all(|chunk| chunk.vector.is_some()));
+        // A memory made some other way indexes by words alone: nothing is
+        // shared across the process.
+        let mut bare = TurnMemory::default();
+        bare.absorb(&turns("first", "answer", 1), None).await;
+        assert!(!bare.log.is_empty());
+        assert!(bare.log.iter().all(|chunk| chunk.vector.is_none()));
+    }
+
+    #[tokio::test]
+    async fn a_turn_cut_short_is_taken_in_again_under_its_own_number() {
+        // The second turn's line is being written when the person presses
+        // Esc; the call is dropped there.
+        let writer = Counting::new(polaris_provider::NetworkBoundary::Unknown, 2);
+        let mut memory = factory(false, Some(writer.clone()), None)();
+        let messages = turns("first", "answer", 2);
+        tokio::select! {
+            _ = memory.absorb(&messages, None) => panic!("the second line was not waiting"),
+            _ = writer.reached.notified() => {}
+        }
+        assert_eq!(
+            memory.turns, 1,
+            "the turn that was cut short is not counted"
+        );
+        // The next call takes in the turn that was cut short and the one
+        // after it, each once.
+        memory.absorb(&messages, None).await;
+        assert_eq!(memory.turns, 3);
+        let numbers: Vec<usize> = memory.ledger.iter().map(|(turn, _)| *turn).collect();
+        assert_eq!(numbers, [1, 2, 3]);
+        assert!(memory.ledger[1].1.starts_with("asked=question 2;"));
+        assert!(memory.ledger[2].1.starts_with("asked=question 3;"));
     }
 }

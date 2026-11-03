@@ -4517,6 +4517,327 @@ fn clear_forgets_the_providers_count_of_the_cleared_conversation() {
     assert_eq!(session.reported_input, None);
 }
 
+/// The session's own model: it answers every turn.
+#[cfg(unix)]
+struct Replies;
+
+#[cfg(unix)]
+#[async_trait::async_trait]
+impl Provider for Replies {
+    async fn complete(
+        &self,
+        _: polaris_provider::CompletionRequest,
+    ) -> Result<polaris_provider::CompletionResponse, polaris_provider::ProviderError> {
+        Ok(polaris_provider::CompletionResponse {
+            text: "reply".into(),
+            ..Default::default()
+        })
+    }
+}
+
+/// The small model that writes ledger lines. It answers nothing, so a line is
+/// the turn's own words, and it counts how often it was asked.
+#[cfg(unix)]
+#[derive(Default)]
+struct CountedWriter(std::sync::atomic::AtomicUsize);
+
+#[cfg(unix)]
+impl CountedWriter {
+    fn asked(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[cfg(unix)]
+#[async_trait::async_trait]
+impl Provider for CountedWriter {
+    async fn complete(
+        &self,
+        _: polaris_provider::CompletionRequest,
+    ) -> Result<polaris_provider::CompletionResponse, polaris_provider::ProviderError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(polaris_provider::ProviderError::Http(
+            "the fixture writer has no answer".into(),
+        ))
+    }
+}
+
+#[cfg(unix)]
+struct NeverAsked;
+
+#[cfg(unix)]
+impl polaris_core::approval::Approver for NeverAsked {
+    fn ask(&mut self, _: &str) -> polaris_core::approval::Decision {
+        panic!("these turns use no tool")
+    }
+}
+
+/// Two root turns on `session`, run as the TUI runs them once
+/// `attach_process_services` has made the session ready.
+#[cfg(unix)]
+async fn two_turns(session: &mut Session, dir: &Path) {
+    let provider = Arc::new(Replies);
+    let sandbox = SandboxPolicy::new(polaris_sandbox::SandboxMode::ReadOnly, &[]).unwrap();
+    for input in ["first of the two", "second of the two"] {
+        session.push_user(input);
+        let mut gate = Gate::new(ApprovalPolicy::Never);
+        let mut approver = NeverAsked;
+        let mut context = ToolContext {
+            sandbox: &sandbox,
+            helper: Path::new("/unused-helper"),
+            gate: &mut gate,
+            approver: &mut approver,
+        };
+        agent::run(
+            provider.as_ref(),
+            session,
+            Arc::new(tokio::sync::Mutex::new(
+                AuditLog::open(&dir.join("audit.jsonl")).unwrap(),
+            )),
+            &mut StopTracker::new(6),
+            &polaris_core::prompt::assemble_always_on("", "", &[]),
+            &[],
+            &[],
+            provider.clone(),
+            1,
+            1,
+            None,
+            &mut context,
+        )
+        .await
+        .unwrap();
+    }
+}
+
+/// `RunArgs` for `build_rewound_session`, which reads the paths, the workflow
+/// and the memory settings; every other field is inert.
+#[cfg(unix)]
+fn run_args<'a>(dir: &Path, always_on: &'a AlwaysOn) -> RunArgs<'a> {
+    let provider: Arc<dyn Provider> = Arc::new(Replies);
+    RunArgs {
+        account_binding: None,
+        provider: provider.clone(),
+        mcp_selection_provider: None,
+        decider: None,
+        decision_configuration: Default::default(),
+        decision_colocation: polaris_core::decision_capacity::colocation::ColocationSources::new(
+            vec![provider],
+        ),
+        tier_decider: None,
+        answer_finalizer: None,
+        sidechat_auto: false,
+        tool_names: Vec::new(),
+        turn_authority: None,
+        provider_name: "test".into(),
+        model_name: "test".into(),
+        initial_effort_name: None,
+        cwd: dir.to_path_buf(),
+        state_dir: dir.to_path_buf(),
+        sessions_dir: dir.join("sessions"),
+        audit_path: dir.join("audit.jsonl"),
+        max_turns: 1,
+        remember: false,
+        tool_memory: None,
+        tool_memory_embedding: None,
+        context_window: None,
+        sandbox: SandboxPolicy::new(polaris_sandbox::SandboxMode::ReadOnly, &[]).unwrap(),
+        helper: PathBuf::from("/unused-helper"),
+        approval_policy: ApprovalPolicy::Never,
+        mcp_external: false,
+        always_on,
+        skills: &[],
+        agent_types: &[],
+        spawn_concurrency: 1,
+        spawn_write_concurrency: 1,
+        files_md_auto_regenerate: false,
+        approval_auto: Default::default(),
+        workflow_config: Default::default(),
+        initial_phase: None,
+        history_mode: polaris_core::conversation_state::HistoryMode::Legacy,
+        input_preparation: Default::default(),
+        continuation: None,
+        workflow_mode_overridden: false,
+        strict_history: None,
+        summary_usage: None,
+        history_backend_factory: None,
+        turn_memory_factory: None,
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_session_that_replaces_another_still_writes_through_the_attached_factory() {
+    use polaris_core::{
+        conversation_state::HistoryMode, session_manager::SessionId,
+        session_store::PersistedSession,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let sessions = root.join("sessions");
+    std::fs::create_dir(&sessions).unwrap();
+    let saved = || {
+        PersistedSession::create(
+            root,
+            &root.join("memory.sqlite3"),
+            "project",
+            HistoryMode::Legacy,
+            None,
+        )
+        .unwrap()
+    };
+    // The conversation being left, with a memory made for it by a writer that
+    // must not be heard from again.
+    let left = Arc::new(CountedWriter::default());
+    let old = |persistence: Option<PersistedSession>| {
+        let mut session = Session::default();
+        if let Some(persistence) = persistence {
+            session.attach(persistence).unwrap();
+        }
+        session.push_user("an earlier turn");
+        session.push_assistant("an earlier reply", vec![]);
+        session.turn_memory = Some(Arc::new(tokio::sync::Mutex::new(
+            polaris_core::turn_memory::factory(false, Some(left.clone()), None)(),
+        )));
+        session
+    };
+    let mut path = sessions.join("current.jsonl");
+    let mut meta = sessions.join("current.meta.json");
+    let mut started = 0;
+    let mut status = Status::Idle;
+    let mut rebuilt: Vec<(&str, Session)> = Vec::new();
+
+    let mut session = old(None);
+    call(
+        slash::Action::Clear,
+        &mut session,
+        &path,
+        &mut status,
+        &[],
+        root,
+        &mut Vec::new(),
+    );
+    rebuilt.push(("/clear", session));
+
+    let mut session = old(Some(saved()));
+    handle_new_session(
+        &sessions,
+        &mut session,
+        &mut path,
+        &mut meta,
+        &mut started,
+        &mut status,
+        &mut Vec::new(),
+    );
+    rebuilt.push(("/new", session));
+
+    let mut session = old(Some(saved()));
+    handle_fork(
+        &sessions,
+        "/tmp/project",
+        &mut session,
+        &mut path,
+        &mut meta,
+        &mut started,
+        &mut status,
+    );
+    rebuilt.push(("/fork", session));
+
+    let legacy = root.join("legacy");
+    std::fs::create_dir(&legacy).unwrap();
+    persist::write_meta_if_absent(
+        &legacy.join("saved.meta.json"),
+        &persist::SessionMeta {
+            cwd: "/tmp/current".to_string(),
+            started_at_millis: 500,
+        },
+    )
+    .unwrap();
+    persist::append_message(
+        &legacy.join("saved.jsonl"),
+        &Message::user("a resumed turn"),
+    )
+    .unwrap();
+    persist::append_message(
+        &legacy.join("saved.jsonl"),
+        &Message::assistant("a resumed reply"),
+    )
+    .unwrap();
+    let mut session = old(None);
+    handle_resume(
+        &RefCell::new(Terminal::new(TestBackend::new(60, 14)).unwrap()),
+        &mut ScriptedReader(VecDeque::from([KeyCode::Enter])),
+        &legacy,
+        &legacy,
+        "/tmp/current",
+        &polaris_core::workflow::WorkflowConfig::default(),
+        false,
+        &[],
+        None,
+        None,
+        None,
+        &mut session,
+        &mut path,
+        &mut meta,
+        &mut started,
+        &mut status,
+        &mut Vec::new(),
+    )
+    .await;
+    assert_eq!(session.messages[0].content, "a resumed turn");
+    rebuilt.push(("/resume", session));
+
+    let always_on = polaris_core::prompt::assemble_always_on("", "", &[]);
+    let (session, _) = build_rewound_session(
+        &old(Some(saved())),
+        saved(),
+        &run_args(root, &always_on),
+        &[],
+    )
+    .await
+    .unwrap();
+    rebuilt.push(("rewind", session));
+
+    let session = empty_sidechat_session(
+        &old(Some(saved())),
+        &SessionId::new("0f6c7a3e-5b1d-4c2a-9e8f-1a2b3c4d5e6f").unwrap(),
+    )
+    .unwrap();
+    rebuilt.push(("sidechat", session));
+
+    // The process-wide factory, as the TUI attaches it to every session.
+    let writer = Arc::new(CountedWriter::default());
+    let factory = Some(polaris_core::turn_memory::factory(
+        false,
+        Some(writer.clone()),
+        None,
+    ));
+    let setting = Arc::new(polaris_core::recipe::tool::SettingTool::new(
+        root.to_path_buf(),
+    ));
+    for (name, mut session) in rebuilt {
+        attach_process_services(
+            &mut session,
+            ProcessServices {
+                decider: &None,
+                tier_decider: &None,
+                light_model: &None,
+                approval_auto: Default::default(),
+                setting: &setting,
+                computer: &None,
+                turn_memory: &factory,
+            },
+        );
+        let before = writer.asked();
+        two_turns(&mut session, root).await;
+        assert!(writer.asked() > before, "{name}: the writer was not asked");
+    }
+    assert_eq!(
+        left.asked(),
+        0,
+        "the memory of the conversation left was used"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn new_and_resume_are_never_actually_dispatched_through_apply_slash_action() {

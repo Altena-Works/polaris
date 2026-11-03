@@ -104,6 +104,10 @@ pub(super) struct ProcessServices<'a> {
     pub(super) approval_auto: polaris_core::approval::AutoApproval,
     pub(super) setting: &'a Arc<polaris_core::recipe::tool::SettingTool>,
     pub(super) computer: &'a Option<Arc<polaris_core::computer::ComputerTool>>,
+    /// Makes the `turn-only` memory with the writer and embedder the process
+    /// chose. Every session the TUI builds gets it here, so a session that
+    /// replaces another (`/new`, `/resume`, rewind, sidechat) keeps them.
+    pub(super) turn_memory: &'a Option<polaris_core::turn_memory::Factory>,
 }
 
 pub(super) fn attach_process_services(session: &mut Session, services: ProcessServices<'_>) {
@@ -113,6 +117,7 @@ pub(super) fn attach_process_services(session: &mut Session, services: ProcessSe
     session.approval_auto = services.approval_auto;
     session.setting = Some(services.setting.clone());
     session.computer = services.computer.clone();
+    session.turn_memory_factory = services.turn_memory.clone();
 }
 
 pub(super) struct MemoryActivation {

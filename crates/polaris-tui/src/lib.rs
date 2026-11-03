@@ -738,6 +738,9 @@ pub struct RunArgs<'a> {
     pub strict_history: Option<Arc<polaris_core::conversation_memory::StrictHistory>>,
     pub summary_usage: Option<polaris_provider::UsageMeter>,
     pub history_backend_factory: Option<HistoryBackendFactory>,
+    /// `turn-only` (experiment): how a session makes its memory, with the
+    /// process's writer and embedder. Present only while `turn-only` is on.
+    pub turn_memory_factory: Option<polaris_core::turn_memory::Factory>,
 }
 
 /// A durable session selected by the CLI before entering the interactive UI.
@@ -3903,6 +3906,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                 approval_auto: args.approval_auto,
                 setting: &setting,
                 computer: &computer,
+                turn_memory: &args.turn_memory_factory,
             },
         );
         // A queued submission uses the same slash-command/prompt path as an
@@ -6543,6 +6547,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                 approval_auto: args.approval_auto,
                 setting: &setting,
                 computer: &computer,
+                turn_memory: &args.turn_memory_factory,
             },
         );
         // `mut`: mid-turn compaction (see `history_compacted_this_turn`
@@ -11659,8 +11664,9 @@ fn apply_slash_action(
             let cleared = if session.persistence.is_some() {
                 session.clear_history()
             } else {
-                session.truncate_history(0);
-                persist::clear_session(session_path)
+                session
+                    .clear_history()
+                    .and_then(|()| persist::clear_session(session_path))
             };
             match cleared {
                 Ok(()) => {

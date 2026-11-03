@@ -170,9 +170,16 @@ pub struct Session {
     #[doc(hidden)]
     pub quality_dir: Option<std::path::PathBuf>,
     /// The `turn-only` memory (experiment); made on the first root turn when
-    /// `POLARIS_TURN_ONLY` is set.
+    /// `POLARIS_TURN_ONLY` is set or a factory is attached. It describes this
+    /// history, so `clear_history` drops it and the next root turn makes a new
+    /// one.
     #[doc(hidden)]
     pub turn_memory: Option<std::sync::Arc<tokio::sync::Mutex<crate::turn_memory::TurnMemory>>>,
+    /// How the host makes that memory, writer and embedder included. A host
+    /// attaches it to every session it builds (`attach_process_services` in
+    /// the TUI); without one the memory is made bare.
+    #[doc(hidden)]
+    pub turn_memory_factory: Option<crate::turn_memory::Factory>,
     /// The lower effort of `effort_plan`; `None` uses `POLARIS_EFFORT_PLAN`.
     #[doc(hidden)]
     pub effort_plan: Option<String>,
@@ -1221,6 +1228,7 @@ impl Session {
         self.input_source = None;
         self.compaction_retry_tokens = None;
         self.reported_input = None;
+        self.turn_memory = None;
         Ok(())
     }
 
@@ -2132,5 +2140,29 @@ mod reported_input_tests {
         settled.reported_input = count(1);
         settled.recover_interrupted_tools().unwrap();
         assert_eq!(settled.reported_input, count(1));
+    }
+}
+
+#[cfg(test)]
+mod turn_memory_tests {
+    //! The turn-only memory describes the conversation it took in, so it goes
+    //! with that conversation and no sooner.
+    use super::*;
+
+    #[test]
+    fn clearing_the_history_drops_the_memory_but_cutting_it_back_does_not() {
+        let mut session = Session::new();
+        session.turn_memory_factory = Some(crate::turn_memory::factory(false, None, None));
+        session.push_user("question");
+        session.push_assistant("answer", vec![]);
+        session.turn_memory = Some(Default::default());
+        // A failed turn rolled back is still the same conversation.
+        session.truncate_history(1);
+        assert!(session.turn_memory.is_some());
+        session.clear_history().unwrap();
+        assert!(session.turn_memory.is_none());
+        // What a new memory is made from stays: it is the host's, not the
+        // conversation's.
+        assert!(session.turn_memory_factory.is_some());
     }
 }
