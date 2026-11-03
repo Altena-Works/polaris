@@ -73,6 +73,43 @@ fn render_footer_cursor_position(
     terminal.get_cursor_position().expect("cursor position")
 }
 
+/// Draws the footer with `live` into a `width` x `height` screen the way
+/// `draw_frame` hands it over, and returns that screen.
+fn render_footer_with_live(
+    input: &str,
+    status: &Status,
+    live: &FooterLive,
+    suggestions: &[&crate::slash::SlashCommand],
+    width: u16,
+    height: u16,
+) -> ratatui::buffer::Buffer {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|f| {
+            render_footer_with_mode(
+                f,
+                f.area(),
+                input,
+                input.len(),
+                status,
+                &test_header(),
+                suggestions,
+                0,
+                false,
+                live,
+            )
+        })
+        .expect("draw");
+    terminal.backend().buffer().clone()
+}
+
+fn row_text(buffer: &ratatui::buffer::Buffer, y: u16) -> String {
+    (0..buffer.area.width)
+        .map(|x| buffer[(x, y)].symbol())
+        .collect()
+}
+
 /// Regression test for the IME-preedit-shows-at-the-bottom bug: the
 /// terminal cursor must land exactly after the typed text in the
 /// input row, not stay wherever a prior raw write left it (which
@@ -97,7 +134,7 @@ fn the_cursor_lands_right_after_the_typed_input_text() {
         })
         .expect("draw");
     // "› " (width 2) + "hello" (width 5) = column 7. The input row
-    // would be row 2 (status(1) + suggestions(0) + pad-above(1)) if
+    // would be row 2 (status(1) + suggestions(0) + rule-above(1)) if
     // this 10-row area exactly matched the 5 rows this frame's content
     // needs — but it doesn't, so `Flex::End` shifts everything down by
     // the 5-row leftover, landing the input row at row 7.
@@ -261,42 +298,11 @@ fn the_suggestion_window_still_shows_the_first_page_when_selection_is_near_the_t
 }
 
 #[test]
-fn the_input_rows_gray_shading_spans_the_whole_row_not_just_the_typed_text() {
-    // Matches codex's own input-box styling — confirmed against a real
-    // screenshot — where the whole composer row is shaded, not just
-    // the cells the prompt/typed text happen to occupy.
-    let backend = TestBackend::new(60, 7);
-    let mut terminal = Terminal::new(backend).expect("terminal");
-    terminal
-        .draw(|f| render_footer(f, f.area(), "hi", 2, &Status::Idle, &test_header(), &[], 0))
-        .expect("draw");
-    let buffer = terminal.backend().buffer();
-    // Row 2 would be the input row (status(1) + suggestions(0) +
-    // pad-above(1)) if this 7-row area matched the 5 rows this
-    // frame's content needs exactly — it doesn't (2 rows leftover),
-    // and `Flex::End` shifts everything down by that leftover, so the
-    // input row is actually row 4.
-    // "› hi" ends well before column 50 on a 60-wide backend, but the
-    // shading should still reach all the way to the row's right edge.
-    assert_eq!(
-        buffer[(2, 4)].bg,
-        Color::DarkGray,
-        "the prompt/typed-text cells should be shaded"
-    );
-    assert_eq!(
-        buffer[(50, 4)].bg,
-        Color::DarkGray,
-        "empty space past the typed text should also be shaded, all the way to the row's edge"
-    );
-    assert_eq!(
-        buffer[(59, 4)].bg,
-        Color::DarkGray,
-        "the row's last column should be shaded too"
-    );
-}
-
-#[test]
-fn typing_does_not_shorten_the_composer_background_on_redraw() {
+fn the_composer_rows_carry_no_background_colour() {
+    // The old gray band depended on how a terminal renders `DarkGray` as a
+    // background, and a terminal that cleared the unused suffix of a redrawn
+    // row cut it short. The two rules and the input row between them leave
+    // the background alone, also after a redraw that grows the typed text.
     let backend = TestBackend::new(60, 7);
     let mut terminal = Terminal::new(backend).expect("terminal");
     terminal
@@ -319,52 +325,102 @@ fn typing_does_not_shorten_the_composer_background_on_redraw() {
         })
         .expect("typed draw");
     let buffer = terminal.backend().buffer();
+    // This 7-row area is 2 rows taller than the 5 rows of content, which
+    // `Flex::End` pushes down: status(row 2), rule(3), input(4), rule(5),
+    // footer(6).
     for y in 3..=5 {
         for x in 0..60 {
             assert_eq!(
                 buffer[(x, y)].bg,
-                Color::DarkGray,
-                "composer background changed at ({x}, {y})"
+                Color::Reset,
+                "composer background at ({x}, {y})"
             );
         }
     }
 }
 
 #[test]
-fn the_input_row_has_a_shaded_blank_row_above_and_below_it() {
-    // Widens the visual weight of the input box — a single text row of
-    // shading read as too thin. The blank rows carry no text, just
-    // the same DarkGray fill across the whole width.
-    let backend = TestBackend::new(60, 7);
-    let mut terminal = Terminal::new(backend).expect("terminal");
-    terminal
-        .draw(|f| render_footer(f, f.area(), "hi", 2, &Status::Idle, &test_header(), &[], 0))
-        .expect("draw");
-    let buffer = terminal.backend().buffer();
-    // With this 7-row area 2 rows taller than the 5 rows this frame's
-    // content needs, `Flex::End` shifts the whole block down by that
-    // leftover: status(row 2) + suggestions(0) + pad-above(row 3) +
-    // input(row 4) + pad-below(row 5) + footer(row 6).
-    for x in [0u16, 30, 59] {
-        assert_eq!(
-            buffer[(x, 3)].bg,
-            Color::DarkGray,
-            "the row above the input line should be shaded at column {x}"
-        );
-        assert_eq!(
-            buffer[(x, 5)].bg,
-            Color::DarkGray,
-            "the row below the input line should be shaded at column {x}"
-        );
+fn the_input_is_set_off_by_a_dim_rule_across_the_full_width_above_and_below() {
+    let buffer = render_footer_with_live("hi", &Status::Idle, &FooterLive::default(), &[], 60, 7);
+    // Rules on rows 3 and 5, the input between them, the footer on row 6
+    // (see the layout note in the test above).
+    let separator_x = (0..60)
+        .find(|&x| buffer[(x, 6)].symbol() == "\u{b7}")
+        .expect("the footer's separator");
+    let footer_dim = &buffer[(separator_x, 6)];
+    assert!(footer_dim.modifier.contains(Modifier::DIM));
+    for y in [3, 5] {
+        for x in 0..60 {
+            let cell = &buffer[(x, y)];
+            assert_eq!(cell.symbol(), "\u{2500}", "rule glyph at ({x}, {y})");
+            assert_eq!(
+                (cell.fg, cell.modifier),
+                (footer_dim.fg, footer_dim.modifier),
+                "the rule is the footer's dim gray at ({x}, {y})"
+            );
+        }
     }
-    // Both pad rows carry no visible text.
-    let row_text = |y: u16| -> String {
-        (0..buffer.area.width)
-            .map(|x| buffer[(x, y)].symbol())
-            .collect()
+    assert!(row_text(&buffer, 4).starts_with("\u{203a} hi"));
+    assert!(!row_text(&buffer, 4).contains('\u{2500}'));
+}
+
+#[test]
+fn the_caret_stays_right_after_the_typed_text_when_the_subagent_line_is_shown() {
+    let live = FooterLive {
+        subagents: SubagentSummary {
+            running: 1,
+            ..Default::default()
+        },
+        ..Default::default()
     };
-    assert_eq!(row_text(3).trim(), "");
-    assert_eq!(row_text(5).trim(), "");
+    let mut terminal = Terminal::new(TestBackend::new(80, 10)).expect("terminal");
+    terminal
+        .draw(|f| {
+            render_footer_with_mode(
+                f,
+                f.area(),
+                "hello",
+                5,
+                &Status::Idle,
+                &test_header(),
+                &[],
+                0,
+                false,
+                &live,
+            )
+        })
+        .expect("draw");
+    // Six rows of content in ten: status(4), rule(5), input(6), rule(7),
+    // footer(8), subagents(9). "› " plus "hello" ends at column 7.
+    terminal.backend_mut().assert_cursor_position((7, 6));
+    let area = terminal.backend().buffer().area;
+    assert_eq!(
+        composer_geometry(area, 0, true, "hello", 5).map(|(_, position)| position),
+        Some(Position::new(7, 6)),
+        "the caret the chat draw replays is the one the footer set"
+    );
+}
+
+#[test]
+fn a_user_message_keeps_its_gray_shading_across_the_whole_history_row() {
+    let mut session = Session::default();
+    session.push_user("hello");
+    session.push_assistant("hi there", Vec::new());
+    let lines = history_lines_for(&session.messages);
+    let mut buf =
+        ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 40, lines.len() as u16));
+    let area = buf.area;
+    render_history_into(&mut buf, area, &lines);
+    let row_of = |needle: &str| {
+        (0..buf.area.height)
+            .find(|&y| row_text(&buf, y).contains(needle))
+            .unwrap_or_else(|| panic!("row containing {needle:?} not found"))
+    };
+    let (user_row, reply_row) = (row_of("hello"), row_of("hi there"));
+    for x in 0..40 {
+        assert_eq!(buf[(x, user_row)].bg, Color::DarkGray, "column {x}");
+        assert_eq!(buf[(x, reply_row)].bg, Color::Reset, "column {x}");
+    }
 }
 
 #[test]
@@ -393,7 +449,7 @@ fn the_input_row_reaches_the_true_bottom_of_the_footer_reservation() {
     let oversized_area_height = 20;
     let pos = render_footer_cursor_position("", 0, 80, oversized_area_height);
     // The five visible rows this content occupies — status,
-    // pad-above, input, pad-below, footer (suggestions is empty) —
+    // rule-above, input, rule-below, footer (suggestions is empty) —
     // sit flush against the bottom of the reservation. Input is the
     // third of those five, so two rows up from the very last one, not
     // stranded near the top.
@@ -414,29 +470,322 @@ fn the_input_row_reaches_the_true_bottom_of_the_footer_reservation() {
 // `MAX_DISPLAYED_SUGGESTIONS` suggestions.
 #[test]
 fn footer_height_with_no_suggestions_is_just_the_five_fixed_rows() {
-    assert_eq!(footer_height(0), 5);
+    assert_eq!(footer_height(0, false), 5);
 }
 
 #[test]
 fn footer_height_with_one_suggestion_adds_the_row_plus_its_border() {
-    assert_eq!(footer_height(1), 7);
+    assert_eq!(footer_height(1, false), 7);
 }
 
 #[test]
 fn footer_height_at_the_display_cap_reserves_every_row_with_no_more_row() {
-    assert_eq!(footer_height(MAX_DISPLAYED_SUGGESTIONS), 14);
+    assert_eq!(footer_height(MAX_DISPLAYED_SUGGESTIONS, false), 14);
 }
 
 #[test]
 fn footer_height_past_the_cap_adds_one_more_row_for_the_truncation_notice() {
-    assert_eq!(footer_height(MAX_DISPLAYED_SUGGESTIONS + 3), 15);
+    assert_eq!(footer_height(MAX_DISPLAYED_SUGGESTIONS + 3, false), 15);
+}
+
+#[test]
+fn footer_height_with_the_subagent_line_adds_its_row() {
+    assert_eq!(footer_height(0, true), 6);
+    assert_eq!(footer_height(MAX_DISPLAYED_SUGGESTIONS + 3, true), 16);
+}
+
+#[test]
+fn footer_height_is_exactly_the_number_of_rows_the_footer_draws() {
+    let all: Vec<&crate::slash::SlashCommand> = crate::slash::COMMANDS.iter().collect();
+    assert!(all.len() >= MAX_DISPLAYED_SUGGESTIONS + 3);
+    for count in [
+        0,
+        1,
+        MAX_DISPLAYED_SUGGESTIONS,
+        MAX_DISPLAYED_SUGGESTIONS + 3,
+    ] {
+        for subagent_line in [false, true] {
+            let live = FooterLive {
+                subagents: SubagentSummary {
+                    running: usize::from(subagent_line),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let spare = 3;
+            let height = footer_height(count, subagent_line) + spare;
+            let buffer = render_footer_with_live(
+                "",
+                &Status::Notice("status row".into()),
+                &live,
+                &all[..count],
+                80,
+                height,
+            );
+            let case = format!("suggestions={count} subagent_line={subagent_line}");
+            // The footer's first row is the status row; `footer_height`
+            // claims exactly the rows from there to the bottom edge.
+            let first = (0..height).find(|&y| row_text(&buffer, y).contains("status row"));
+            assert_eq!(first, Some(spare), "{case}: where the footer starts");
+            let last = row_text(&buffer, height - 1);
+            assert_eq!(
+                last.starts_with("subagents"),
+                subagent_line,
+                "{case}: what the last row is: {last:?}"
+            );
+            assert!(last.starts_with("subagents") || last.starts_with("gpt-5.4"));
+        }
+    }
+}
+
+fn stage(phase: Phase) -> FooterLive {
+    FooterLive {
+        workflow: Some(phase),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn the_workflow_stage_sits_at_the_right_end_of_the_footer_line() {
+    for phase in Phase::ALL {
+        let buffer = render_footer_with_live("", &Status::Idle, &stage(phase), &[], 100, 5);
+        let footer = row_text(&buffer, 4);
+        assert!(
+            footer.starts_with("gpt-5.4 low \u{b7} ~/example"),
+            "the path stays on the left: {footer:?}"
+        );
+        assert!(
+            footer.ends_with(&format!("workflow: {phase}")),
+            "flush with the right edge: {footer:?}"
+        );
+    }
+}
+
+#[test]
+fn the_workflow_stage_is_dropped_when_it_does_not_fit_beside_the_path() {
+    let left = "gpt-5.4 low \u{b7} ~/example".width();
+    let right = "workflow: implement".width();
+    let fits = (left + STAGE_GAP + right) as u16;
+    let live = stage(Phase::Implement);
+
+    let exact = render_footer_with_live("", &Status::Idle, &live, &[], fits, 5);
+    assert!(row_text(&exact, 4).ends_with("workflow: implement"));
+
+    for width in [fits - 1, left as u16, 20] {
+        let narrow = render_footer_with_live("", &Status::Idle, &live, &[], width, 5);
+        let kept: String = "gpt-5.4 low \u{b7} ~/example"
+            .chars()
+            .take(usize::from(width))
+            .collect();
+        assert!(
+            row_text(&narrow, 4).starts_with(&kept),
+            "width {width}: the path is what is kept"
+        );
+        assert!(
+            (0..5).all(|y| !row_text(&narrow, y).contains("workflow")),
+            "width {width}: the stage is dropped, not clipped or wrapped"
+        );
+    }
+}
+
+#[test]
+fn the_workflow_stage_follows_the_display_width_of_a_path_with_wide_characters() {
+    // A CJK character takes two columns; counting characters would push the
+    // stage past the right edge, or keep it when it no longer fits.
+    let header = HeaderInfo {
+        cwd_short: "~/\u{8cc7}\u{6599}",
+        ..test_header()
+    };
+    let live = stage(Phase::Implement);
+    let draw = |width: u16| {
+        let mut terminal = Terminal::new(TestBackend::new(width, 5)).expect("terminal");
+        terminal
+            .draw(|f| {
+                render_footer_with_mode(
+                    f,
+                    f.area(),
+                    "",
+                    0,
+                    &Status::Idle,
+                    &header,
+                    &[],
+                    0,
+                    false,
+                    &live,
+                )
+            })
+            .expect("draw");
+        terminal.backend().buffer().clone()
+    };
+    let left = "gpt-5.4 low \u{b7} ~/\u{8cc7}\u{6599}".width();
+    let fits = (left + STAGE_GAP + "workflow: implement".width()) as u16;
+    assert!(row_text(&draw(fits), 4).ends_with("workflow: implement"));
+    assert!(row_text(&draw(fits + 6), 4).ends_with("workflow: implement"));
+    let narrow = draw(fits - 1);
+    assert!((0..5).all(|y| !row_text(&narrow, y).contains("workflow")));
+}
+
+#[test]
+fn only_an_enabled_workflow_has_a_stage() {
+    let on = render_footer_with_live("", &Status::Idle, &stage(Phase::Review), &[], 100, 5);
+    let off = render_footer_with_live("", &Status::Idle, &FooterLive::default(), &[], 100, 5);
+    assert!(row_text(&on, 4).contains("workflow: review"));
+    assert!(row_text(&off, 4).starts_with("gpt-5.4 low"));
+    assert!((0..5).all(|y| !row_text(&off, y).contains("workflow")));
+}
+
+#[test]
+fn the_subagent_line_shows_the_counts_and_leaves_out_the_zero_ones() {
+    for (summary, expected) in [
+        (
+            SubagentSummary {
+                done: 2,
+                running: 1,
+                failed: 1,
+            },
+            "subagents 2/4 done \u{b7} 1 running \u{b7} 1 failed",
+        ),
+        (
+            SubagentSummary {
+                done: 3,
+                running: 0,
+                failed: 0,
+            },
+            "subagents 3/3 done",
+        ),
+        (
+            SubagentSummary {
+                done: 0,
+                running: 3,
+                failed: 0,
+            },
+            "subagents 0/3 done \u{b7} 3 running",
+        ),
+        (
+            SubagentSummary {
+                done: 1,
+                running: 0,
+                failed: 2,
+            },
+            "subagents 1/3 done \u{b7} 2 failed",
+        ),
+    ] {
+        let live = FooterLive {
+            subagents: summary,
+            ..Default::default()
+        };
+        let buffer = render_footer_with_live("", &Status::Idle, &live, &[], 80, 6);
+        assert_eq!(row_text(&buffer, 5).trim_end(), expected);
+    }
+}
+
+#[test]
+fn the_subagent_line_appears_only_while_there_are_subagents() {
+    let none = render_footer_with_live("", &Status::Idle, &FooterLive::default(), &[], 80, 6);
+    assert!(row_text(&none, 5).starts_with("gpt-5.4 low"));
+    assert!((0..6).all(|y| !row_text(&none, y).contains("subagents")));
+
+    let live = FooterLive {
+        subagents: SubagentSummary {
+            done: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let some = render_footer_with_live("", &Status::Idle, &live, &[], 80, 6);
+    assert!(row_text(&some, 5).starts_with("subagents 1/1 done"));
+    assert!(
+        row_text(&some, 4).starts_with("gpt-5.4 low"),
+        "the model line stays above the subagent line"
+    );
+}
+
+fn spawn_started(name: &str) -> AgentEvent {
+    AgentEvent::SpawnStarted {
+        display_name: name.into(),
+        agent_type: "file-reader".into(),
+        task: "inspect".into(),
+    }
+}
+
+fn spawn_finished(name: &str, ok: bool) -> AgentEvent {
+    AgentEvent::SpawnFinished {
+        display_name: name.into(),
+        agent_type: "file-reader".into(),
+        ok,
+    }
+}
+
+#[test]
+fn spawn_events_are_counted_as_done_running_and_failed() {
+    let mut live = FooterLive::default();
+    assert!(!live.subagents.is_shown());
+    for name in ["Sirius", "Antares", "Vega", "Rigel"] {
+        live.observe(&spawn_started(name));
+    }
+    assert_eq!(live.subagents.running, 4);
+    live.observe(&spawn_finished("Sirius", true));
+    live.observe(&spawn_finished("Antares", true));
+    live.observe(&spawn_finished("Vega", false));
+    assert!(live.subagents.is_shown());
+    assert_eq!(
+        live.subagents,
+        SubagentSummary {
+            done: 2,
+            running: 1,
+            failed: 1
+        }
+    );
+    // A finish whose start was never seen cannot drive the count negative.
+    let mut orphan = FooterLive::default();
+    orphan.observe(&spawn_finished("Sirius", true));
+    assert_eq!(
+        orphan.subagents,
+        SubagentSummary {
+            done: 1,
+            running: 0,
+            failed: 0
+        }
+    );
+}
+
+#[test]
+fn a_child_cut_off_with_its_turn_is_settled_as_failed_not_left_running() {
+    let mut live = FooterLive::default();
+    live.observe(&spawn_started("Sirius"));
+    live.observe(&spawn_started("Antares"));
+    live.observe(&spawn_finished("Sirius", true));
+    live.subagents.end_run();
+    assert_eq!(
+        live.subagents,
+        SubagentSummary {
+            done: 1,
+            running: 0,
+            failed: 1
+        }
+    );
+}
+
+#[test]
+fn the_resolved_workflow_phase_replaces_the_stage_and_unknown_names_are_ignored() {
+    let resolved = |phase: &str| AgentEvent::WorkflowResolved {
+        phase: phase.into(),
+        skill_ids: Vec::new(),
+        changed_skill_ids: Vec::new(),
+        manifest_hash: "h".into(),
+    };
+    let mut live = stage(Phase::General);
+    live.observe(&resolved("implement"));
+    assert_eq!(live.workflow, Some(Phase::Implement));
+    live.observe(&resolved("no-such-phase"));
+    assert_eq!(live.workflow, Some(Phase::Implement));
 }
 
 #[test]
 fn the_cursor_lands_right_after_the_prompt_prefix_when_the_buffer_is_empty() {
     let pos = render_footer_cursor_position("", 0, 60, 6);
     // A 6-row area holds 1 more row than the 5 rows this frame's
-    // content actually needs (status+pad-above+input+pad-below+footer,
+    // content actually needs (status+rule+input+rule+footer,
     // suggestions being empty) — `Flex::End` anchors that content to
     // the bottom of the area, so the leftover row lands above
     // `status_area`, shifting the input row from index 2 to index 3.

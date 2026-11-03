@@ -118,6 +118,11 @@ pub(super) fn status_lines(snapshot: StatusSnapshot<'_>) -> Vec<ratatui::text::L
         "Session ID",
         conversation_id.as_deref().unwrap_or("unsaved"),
     ));
+    #[cfg(unix)]
+    lines.push(status_row(
+        "Project root",
+        &project_root.display().to_string(),
+    ));
     status_section(&mut lines, "Account");
     #[cfg(unix)]
     lines.push(status_row(

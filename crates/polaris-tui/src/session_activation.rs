@@ -2,8 +2,6 @@
 
 use std::path::Path;
 use std::sync::Arc;
-#[cfg(target_os = "linux")]
-use std::time::Instant;
 
 use polaris_core::session::Session;
 #[cfg(unix)]
@@ -12,7 +10,7 @@ use polaris_core::tool_memory::RetentionMode;
 use polaris_provider::Provider;
 
 #[cfg(unix)]
-use crate::input;
+use crate::{draft::DraftAutosave, input};
 use crate::{memory, persist, tool_memory};
 
 #[cfg(unix)]
@@ -75,10 +73,7 @@ pub(super) struct SavedDraftTarget<'a> {
     pub(super) input_buffer: &'a mut String,
     pub(super) input_cursor: &'a mut usize,
     pub(super) input_history: &'a mut input::History,
-    pub(super) saved_text: &'a mut String,
-    pub(super) candidate: &'a mut String,
-    #[cfg(target_os = "linux")]
-    pub(super) changed_at: &'a mut Instant,
+    pub(super) autosave: &'a mut DraftAutosave,
 }
 
 #[cfg(unix)]
@@ -89,12 +84,7 @@ pub(super) fn apply_saved_draft(activation: SavedActivationRead, target: SavedDr
     *target.input_buffer = draft;
     *target.input_cursor = target.input_buffer.len();
     *target.input_history = input::History::new();
-    target.saved_text.clone_from(target.input_buffer);
-    target.candidate.clone_from(target.input_buffer);
-    #[cfg(target_os = "linux")]
-    {
-        *target.changed_at = Instant::now();
-    }
+    target.autosave.restored(target.input_buffer);
 }
 
 pub(super) struct ProcessServices<'a> {

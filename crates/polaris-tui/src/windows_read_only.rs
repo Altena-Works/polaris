@@ -161,6 +161,7 @@ impl ReadOnlyView {
                     self.selected,
                     &None,
                     true,
+                    &render::FooterLive::default(),
                 );
             })
             .map(|_| ())
@@ -321,8 +322,6 @@ fn supported(action: &slash::Action) -> bool {
         slash::Action::Help
             | slash::Action::Status
             | slash::Action::Doctor
-            | slash::Action::Pwd
-            | slash::Action::Compare(_)
             | slash::Action::Quit
             | slash::Action::Phase(_)
             | slash::Action::Workflow(_)
@@ -360,18 +359,13 @@ fn command_lines(action: &slash::Action, cwd: &Path) -> Result<Vec<String>, Stri
             "Authentication, MCP, saved sessions: not loaded (Windows protection mechanisms unsupported)".into(),
             "Normal input, changes, subprocess execution: denied as unsupported".into(),
             "This screen does not save, send, or run external commands".into(),
-        ],
-        slash::Action::Pwd => vec![
-            polaris_core::project::resolve_root(cwd)
-                .display()
-                .to_string(),
+            format!(
+                "Project root: {}",
+                polaris_core::project::resolve_root(cwd).display()
+            ),
         ],
         slash::Action::Decided(value) if matches!(value.as_str(), "" | "list") => {
             return decided_read_lines(cwd)
-                .map(|lines| lines.iter().map(ToString::to_string).collect());
-        }
-        slash::Action::Compare(value) => {
-            return compare_read_lines(cwd, value)
                 .map(|lines| lines.iter().map(ToString::to_string).collect());
         }
         slash::Action::Phase(value) | slash::Action::Workflow(value) if value.is_empty() => {

@@ -452,60 +452,6 @@ pub fn apply(
     })
 }
 
-/// Cancels only this queued, unappended instruction, never a running root.
-pub fn cancel_queue(
-    store: &SessionManagerStore,
-    manager: &mut SessionManagerV1,
-    persistence: &PersistedSession,
-    effects: &ManagementEffectStoreV1,
-    activity: &ProjectActivityLeaseV1,
-    instruction: QueuedInstructionV1,
-) -> Result<(), String> {
-    let admission = require_handle(manager, &instruction)?;
-    if !matches!(admission.state, AdmissionState::Reserved) {
-        return Err("Running or applied instructions cannot be cancelled as queued input".into());
-    }
-    let snapshot = persistence.snapshot().map_err(|e| e.to_string())?;
-    if snapshot.state.session_id != instruction.parent_session.as_str() {
-        return Err("Cancellation target conversation mismatch".into());
-    }
-    let mut next = manager.clone();
-    next.cancel(&admission.id, next.revision, admission.revision)
-        .map_err(|e| e.to_string())?;
-    let operation = ManagementOperationIdV1::random().map_err(|e| e.to_string())?;
-    let request = serde_json::to_vec(&(admission.id.as_str(), &admission.payload_hash))
-        .map_err(|e| e.to_string())?;
-    let started = prepare_effect(
-        effects,
-        activity,
-        operation,
-        "D10",
-        &snapshot,
-        ManagementEffectHashV1::digest(&request),
-    )?;
-    if let Err(error) = persist_transition(store, manager, next) {
-        effects
-            .mark_outcome_unknown_runtime(
-                activity,
-                &started,
-                ManagementUnknownReasonV1::ReceiptPersistenceFailed,
-            )
-            .map_err(|e| e.to_string())?;
-        return Err(error);
-    }
-    effects
-        .complete_started_runtime(
-            activity,
-            &started,
-            ManagementEffectHashV1::digest(
-                &serde_json::to_vec(&(admission.id.as_str(), manager.revision, "queued_cancelled"))
-                    .map_err(|e| e.to_string())?,
-            ),
-        )
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -600,34 +546,6 @@ mod tests {
         let before = manager.revision;
         assert!(apply(&store, &mut manager, &mut foreign_session, exact).is_err());
         assert_eq!(manager.revision, before);
-
-        let cancelled = receive(
-            &store,
-            &mut manager,
-            &persistence,
-            &effects,
-            &activity,
-            ManagementOperationIdV1::random().unwrap(),
-            "この指示は取消する",
-        )
-        .unwrap();
-        let cancelled_id = cancelled.admission_id().clone();
-        cancel_queue(
-            &store,
-            &mut manager,
-            &persistence,
-            &effects,
-            &activity,
-            cancelled,
-        )
-        .unwrap();
-        assert!(matches!(
-            manager.status(&cancelled_id).unwrap().state,
-            AdmissionState::Terminal {
-                status: polaris_core::session_manager::TerminalStatus::Cancelled,
-                ..
-            }
-        ));
 
         // The previous turn may publish more raw events after acceptance.
         session.push_assistant("前のrunが完了した", Vec::new());

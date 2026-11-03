@@ -1,6 +1,5 @@
 //! Commands over the live host control plane; no desktop-state mirror.
 use polaris_core::{
-    approval::ApprovalPolicy,
     management_effect::{
         ManagementDenialReasonV1, ManagementEffectHashV1, ManagementEffectScopeV1,
         ManagementEffectStoreV1, ManagementInventoryIdV1, ManagementOperationIdV1,
@@ -14,8 +13,6 @@ use polaris_core::{
     },
     subagent_control::{CancelResultV1, ChildAttemptRefV1, ChildStateV1},
 };
-use polaris_sandbox::SandboxPolicy;
-use polaris_skills::AgentType;
 use std::{sync::Arc, time::Duration};
 
 const MAX_ROWS: usize = 128;
@@ -288,85 +285,6 @@ pub async fn subagents(
     ])
 }
 
-pub fn roles(roles: &[AgentType], command: &str) -> Result<Vec<String>, String> {
-    if !matches!(command.trim(), "" | "list") {
-        return Err("Usage: /roles list. No role binding mutation owner is available".into());
-    }
-    if roles.len() > MAX_ROWS {
-        return Err("Role count exceeds the display limit".into());
-    }
-    let mut lines = vec!["Role definitions used by the current run".into()];
-    lines.extend(roles.iter().map(|role| {
-        format!(
-            "{}: tier={}..{} access={:?} turns={} wall={}s",
-            safe(&role.name, 128),
-            role.tier_min,
-            role.tier,
-            role.access,
-            role.max_turns,
-            role.wall_seconds
-        )
-    }));
-    bounded(lines)
-}
-
-/// Only the next StopTracker is changed. No live run, provider, account or
-/// sandbox capability is rebound by this process-local setting.
-pub fn run_settings(
-    command: &str,
-    next_max_turns: &mut u32,
-    startup_max_turns: u32,
-) -> Result<Vec<String>, String> {
-    if command.len() > 1024 || command.chars().any(char::is_control) {
-        return Err("Invalid run settings input".into());
-    }
-    let words = command.split_whitespace().collect::<Vec<_>>();
-    match words.as_slice() {
-        [] | ["settings"] => {}
-        ["settings", "max-turns", number] => {
-            let number = number
-                .parse::<u32>()
-                .map_err(|_| "max-turns must be an integer".to_owned())?;
-            if number == 0 || number > startup_max_turns {
-                return Err(format!(
-                    "max-turns must be 1..={startup_max_turns}. Restart with --max-turns to increase the startup limit"
-                ));
-            }
-            *next_max_turns = number;
-        }
-        _ => return Err("Usage: /run settings [max-turns <N>]".into()),
-    }
-    Ok(vec![format!(
-        "Next run: max-turns={} (startup limit={})",
-        next_max_turns, startup_max_turns
-    )])
-}
-
-pub async fn run_details(
-    control: Option<&Arc<RootDelegationControlV1>>,
-) -> Result<Vec<String>, String> {
-    subagents(control, "list", None).await
-}
-
-pub fn sandbox(
-    command: &str,
-    sandbox: &SandboxPolicy,
-    approval: ApprovalPolicy,
-) -> Result<Vec<String>, String> {
-    if !matches!(command.trim(), "" | "status") {
-        return Err("The startup sandbox cannot be changed. Restart with --sandbox".into());
-    }
-    let description = sandbox.describe();
-    if description.len() > 8192 {
-        return Err("Startup sandbox display exceeds the size limit".into());
-    }
-    bounded(vec![
-        format!("sandbox: {}", safe(&description, 8192)),
-        format!("approval: {approval:?}"),
-        "Changes apply only to a new launch".into(),
-    ])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -584,31 +502,5 @@ mod tests {
                 .any(|line| line.contains("already terminal"))
         );
         assert_eq!(control.snapshot().await, before);
-    }
-
-    #[test]
-    fn m3e_next_run_limit_and_sandbox_preserve_startup_ceiling() {
-        let mut next = 32;
-        run_settings("settings max-turns 12", &mut next, 32).unwrap();
-        let mut tracker = polaris_core::stop::StopTracker::new(next);
-        for _ in 0..11 {
-            assert!(tracker.observe_turn().is_none());
-        }
-        assert_eq!(
-            tracker.observe_turn(),
-            Some(polaris_core::stop::StopReason::MaxTurns)
-        );
-        assert!(run_settings("settings max-turns 33", &mut next, 32).is_err());
-        assert_eq!(next, 12);
-        let policy = SandboxPolicy::new(polaris_sandbox::SandboxMode::ReadOnly, &[]).unwrap();
-        assert!(
-            sandbox("status", &policy, ApprovalPolicy::Never).unwrap()[0].contains("read-only")
-        );
-        assert!(sandbox("full-access", &policy, ApprovalPolicy::Never).is_err());
-        assert_eq!(policy.mode(), polaris_sandbox::SandboxMode::ReadOnly);
-        let roles = polaris_skills::builtin::agent_types();
-        let lines = super::roles(&roles, "list").unwrap();
-        assert!(lines.iter().any(|line| line.contains("file-reader")));
-        assert!(super::roles(&roles, "bind file-reader other-account").is_err());
     }
 }

@@ -136,6 +136,37 @@ fn linux_signal_tui_diff_result_is_suppressed_after_latch() {
     assert_eq!(lines[0].spans[0].content, "earlier output");
 }
 
+/// D17: the draft autosave rides on the idle tick, so the composer must wake
+/// repeatedly while no key has arrived instead of blocking in one read.
+#[cfg(all(unix, not(target_os = "linux")))]
+#[test]
+fn idle_reader_ticks_until_input_arrives_then_reads_once() {
+    use ratatui::crossterm::event::Event;
+
+    let mut waits = Vec::new();
+    let mut reads = 0;
+    let event = read_idle_event_with(
+        |wait| {
+            waits.push(wait);
+            Ok(waits.len() == 3)
+        },
+        || {
+            reads += 1;
+            Ok(Event::FocusGained)
+        },
+    )
+    .unwrap();
+    assert_eq!(event, Event::FocusGained);
+    assert_eq!(waits, [IDLE_POLL_INTERVAL; 3]);
+    assert_eq!(reads, 1);
+    let failed = read_idle_event_with(
+        |_| Err(std::io::Error::other("tick failed")),
+        || panic!("a failed tick must not read"),
+    )
+    .unwrap_err();
+    assert_eq!(failed.to_string(), "tick failed");
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn linux_signal_tui_inflight_shutdown_uses_existing_cleanup() {
@@ -373,67 +404,6 @@ fn decided_read_is_bounded_and_marks_old_entries_as_history() {
     )
     .unwrap();
     assert!(decided_read_lines(root.path()).is_err());
-}
-
-#[test]
-fn readonly_acceptance_compare_folders_and_errors_preserve_source() {
-    let root = tempfile::tempdir().unwrap();
-    let left = root.path().join("left");
-    let right = root.path().join("right");
-    std::fs::create_dir(&left).unwrap();
-    std::fs::create_dir(&right).unwrap();
-    for path in [&left, &right] {
-        std::fs::write(path.join("same.txt"), "contents stay in place").unwrap();
-    }
-    let mut session = Session::default();
-    let mut status = Status::Idle;
-    let mut local_lines = Vec::new();
-    let session_path = root.path().join("session.jsonl");
-    let outcome = call(
-        slash::parse("/compare left | right").unwrap(),
-        &mut session,
-        &session_path,
-        &mut status,
-        &[],
-        root.path(),
-        &mut local_lines,
-    );
-    assert!(matches!(outcome, SlashOutcome::Continue));
-    assert!(matches!(status, Status::Notice(_)));
-    let lines = local_lines
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(lines.contains("similarity"), "{lines}");
-    assert!(lines.contains("Nothing is moved or deleted"), "{lines}");
-    for command in [
-        "/compare left | missing".to_owned(),
-        format!("/compare {} | right", "x".repeat(2049)),
-    ] {
-        let before = local_lines.clone();
-        call(
-            slash::parse(&command).unwrap(),
-            &mut session,
-            &session_path,
-            &mut status,
-            &[],
-            root.path(),
-            &mut local_lines,
-        );
-        assert!(matches!(status, Status::Error(_)));
-        assert_eq!(local_lines, before);
-    }
-    assert!(session.messages.is_empty());
-    assert!(!session_path.exists());
-    assert_eq!(
-        std::fs::read_to_string(left.join("same.txt")).unwrap(),
-        "contents stay in place"
-    );
-    assert_eq!(
-        std::fs::read_to_string(right.join("same.txt")).unwrap(),
-        "contents stay in place"
-    );
 }
 
 #[test]
@@ -1667,99 +1637,6 @@ async fn distinct_tui_input_uses_an_empty_durable_sidechat_and_terminal_receipt(
     ));
     drop(_store);
 
-    fn admission_files(root: &Path) -> std::collections::BTreeMap<PathBuf, Option<Vec<u8>>> {
-        let mut files = std::collections::BTreeMap::new();
-        for entry in std::fs::read_dir(root).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                files.insert(path.clone(), None);
-                files.extend(admission_files(&path));
-            } else {
-                files.insert(path.clone(), Some(std::fs::read(&path).unwrap()));
-            }
-        }
-        files
-    }
-    let admissions_root = state_dir.join("tui-admissions-v1");
-    let before_status = admission_files(&admissions_root);
-    let sandbox = SandboxPolicy::new(polaris_sandbox::SandboxMode::ReadOnly, &[]).unwrap();
-    let activity = conversation_view::ConversationViewState::new(
-        &render::HeaderInfo {
-            provider_name: "test",
-            model_name: "test",
-            usage: Default::default(),
-            cwd: "test",
-            cwd_short: "test",
-            effort_name: "auto",
-        },
-        80,
-    );
-    let mut max_turns = 1;
-    let command = format!("input status {}", admission_id.as_str());
-    let lines = handle_runtime_command(
-        &command,
-        None,
-        session.persistence.as_ref(),
-        &state_dir,
-        &[],
-        &sandbox,
-        ApprovalPolicy::Never,
-        &mut max_turns,
-        1,
-        &activity,
-    )
-    .await
-    .unwrap();
-    assert!(lines[0].contains(admission_id.as_str()));
-    assert!(lines[0].contains("Completed"));
-    let unrelated =
-        PersistedSession::create(root.path(), &database, "project", HistoryMode::Legacy, None)
-            .unwrap();
-    assert!(
-        handle_runtime_command(
-            &command,
-            None,
-            Some(&unrelated),
-            &state_dir,
-            &[],
-            &sandbox,
-            ApprovalPolicy::Never,
-            &mut max_turns,
-            1,
-            &activity,
-        )
-        .await
-        .is_err()
-    );
-    assert_eq!(admission_files(&admissions_root), before_status);
-    let index = admissions_root.join("family-index.v1.json");
-    let original_index = std::fs::read(&index).unwrap();
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(&index)
-        .unwrap()
-        .set_len(2 * 1024 * 1024 + 1)
-        .unwrap();
-    let oversized = admission_files(&admissions_root);
-    assert!(
-        handle_runtime_command(
-            &command,
-            None,
-            session.persistence.as_ref(),
-            &state_dir,
-            &[],
-            &sandbox,
-            ApprovalPolicy::Never,
-            &mut max_turns,
-            1,
-            &activity,
-        )
-        .await
-        .is_err()
-    );
-    assert_eq!(admission_files(&admissions_root), oversized);
-    std::fs::write(&index, original_index).unwrap();
-
     let denied = admit_tui_input(
         &mut session,
         "another isolated task",
@@ -2446,6 +2323,27 @@ fn judged_effort_replaces_the_undecided_footer_value() {
     assert_eq!(effort, "extra high");
 }
 
+#[test]
+fn only_a_session_with_an_enabled_workflow_has_a_footer_stage() {
+    use polaris_core::workflow::{Phase, SessionWorkflow, WorkflowConfig};
+    let with = |enabled: bool| {
+        let mut session = polaris_core::session::Session::new();
+        session.workflow = Some(SessionWorkflow::new(WorkflowConfig {
+            enabled,
+            initial_phase: Phase::Review,
+            ..Default::default()
+        }));
+        session
+    };
+    assert_eq!(
+        footer_workflow_phase(&polaris_core::session::Session::new()),
+        None
+    );
+    assert_eq!(footer_workflow_phase(&with(true)), Some(Phase::Review));
+    // Switched off with `/workflow off`: the phase is still held, not shown.
+    assert_eq!(footer_workflow_phase(&with(false)), None);
+}
+
 #[cfg(unix)]
 #[test]
 fn working_turn_accepts_and_queues_prompts_and_commands_in_order() {
@@ -2894,6 +2792,122 @@ fn m3b_sync_tui_join_pull_leave_and_denial() {
         participation::ParticipationReadV2::Missing
     ));
     assert_eq!(peer.head(), head);
+}
+
+/// C09: `/sync` and `/sync status` show what this device recorded. The first
+/// line must say so, because nothing on the screen was read from the remote.
+/// The same fixture shows why the command list does not offer `join`: the
+/// confirmed TUI join still cannot be completed.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn c09_sync_status_labels_the_local_record_and_join_is_not_offered() {
+    const CHILD: &str = "POLARIS_C09_SYNC_STATUS_CHILD";
+    const TEST: &str = "tests::c09_sync_status_labels_the_local_record_and_join_is_not_offered";
+    if std::env::var_os(CHILD).is_none() {
+        let home = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([TEST, "--exact", "--nocapture"])
+            .env(CHILD, "1")
+            .env("HOME", home.path())
+            .env_remove("POLARIS_DATA_DIR")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    use polaris_core::sync::{
+        participation,
+        share::{ShareLink, ShareManifest},
+    };
+    const LABEL: &str = "Local record (read from this device only; the remote was not contacted)";
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+    polaris_auth::protection::use_trusted_home(&home).unwrap();
+    let project = home.join("project");
+    std::fs::create_dir(&project).unwrap();
+    let state = polaris_core::project::state_dir(&project).unwrap();
+    let status = |request: &str| {
+        sync_action(&project, &state, request, false, |_| {
+            panic!("a read must not ask for confirmation")
+        })
+        .unwrap()
+    };
+
+    // Not participating: still a statement about this device only.
+    let alone = status("");
+    assert_eq!(alone.lines().next(), Some(LABEL), "{alone}");
+    assert!(alone.contains("Shared apply: not participating"), "{alone}");
+    assert_eq!(status("status"), alone);
+
+    // A confirmed TUI join is refused and records nothing.
+    let remote = home.join("remote-that-does-not-exist");
+    let link = ShareLink {
+        remote: format!("file://{}", remote.display()),
+        share_id: "share-id1".into(),
+        invitation_id: "invite-id1".into(),
+        expires_unix_seconds: u64::MAX,
+    };
+    let join = format!(
+        "join {} {} {} {}",
+        link.remote, link.share_id, link.invitation_id, link.expires_unix_seconds
+    );
+    let mut asked = false;
+    assert!(
+        sync_action(&project, &state, &join, false, |_| {
+            asked = true;
+            true
+        })
+        .is_err()
+    );
+    assert!(asked, "the join reaches its confirmation before it fails");
+    assert!(matches!(
+        participation::read(&state).unwrap(),
+        participation::ParticipationReadV2::Missing
+    ));
+    let sync_description = slash::COMMANDS
+        .iter()
+        .find(|command| command.name == "sync")
+        .unwrap()
+        .description;
+    assert!(!sync_description.contains("join"), "{sync_description}");
+
+    // Participating: every value is read from the stored record, and the
+    // remote (which does not exist) is never needed to show it.
+    participation::join(
+        &state,
+        link,
+        ShareManifest {
+            version: 1,
+            excluded: Vec::new(),
+        },
+        1,
+    )
+    .unwrap();
+    let mut held = participation::read(&state)
+        .unwrap()
+        .participation()
+        .unwrap()
+        .clone();
+    held.agreed_commit = Some("0123456789abcdef0123456789abcdef01234567".into());
+    held.applied_commit = Some("fedcba9876543210fedcba9876543210fedcba98".into());
+    held.unresolved = vec!["notes.txt".into()];
+    participation::write(&state, &held).unwrap();
+    let joined = status("");
+    assert_eq!(joined.lines().next(), Some(LABEL), "{joined}");
+    for expected in [
+        "Shared apply: participating",
+        "Agreed revision: 0123456789abcdef0123456789abcdef01234567",
+        "Applied revision: fedcba9876543210fedcba9876543210fedcba98",
+        "Unresolved: 1",
+        "Incomplete: none",
+    ] {
+        assert!(joined.contains(expected), "{expected}\n{joined}");
+    }
+    assert!(!remote.exists());
 }
 
 #[cfg(target_os = "linux")]
@@ -3366,6 +3380,7 @@ fn draw_frame_puts_the_footer_in_the_bottom_inline_viewport_height_rows() {
                 &[],
                 0,
                 &None,
+                &render::FooterLive::default(),
             )
         })
         .expect("draw");
@@ -3379,9 +3394,9 @@ fn draw_frame_puts_the_footer_in_the_bottom_inline_viewport_height_rows() {
         .collect();
     assert!(rows[0].contains("line from history"));
     // The footer's placeholder text lands in the bottom
-    // `render::footer_height(0)` rows (no suggestions here), not the
+    // `render::footer_height(0, false)` rows (no suggestions here), not the
     // top history region.
-    let footer_start = 30 - render::footer_height(0) as usize;
+    let footer_start = 30 - render::footer_height(0, false) as usize;
     assert!(
         rows[footer_start..]
             .iter()
@@ -3426,7 +3441,7 @@ fn chat_draw_repairs_an_ime_cleared_cjk_composer_suffix() {
         "日本語を繰り返して入力する長い文です。日本語を繰り返して入力する長い文です。",
     ] {
         let cursor = input.len();
-        draw_chat_frame(&mut terminal, input, cursor, 0, |frame| {
+        draw_chat_frame(&mut terminal, input, cursor, 0, false, |frame| {
             draw_frame(
                 frame,
                 &history,
@@ -3439,12 +3454,13 @@ fn chat_draw_repairs_an_ime_cleared_cjk_composer_suffix() {
                 &[],
                 0,
                 &None,
+                &render::FooterLive::default(),
             );
         })
         .expect("initial chat draw");
 
         let (input_area, cursor_position) =
-            render::composer_geometry(terminal.backend().buffer().area, 0, input, cursor)
+            render::composer_geometry(terminal.backend().buffer().area, 0, false, input, cursor)
                 .expect("input row");
         let before_damage = terminal.backend().buffer().clone();
         let suffix_width = input_area.width.min(21);
@@ -3460,13 +3476,13 @@ fn chat_draw_repairs_an_ime_cleared_cjk_composer_suffix() {
             .backend_mut()
             .draw(before.diff(&cleared).into_iter())
             .expect("simulate IME clearing the real terminal suffix");
-        assert_ne!(
-            terminal.backend().buffer()[(damaged_area.x, damaged_area.y)].bg,
-            Color::DarkGray,
+        assert!(
+            (damaged_area.left()..damaged_area.right())
+                .all(|x| terminal.backend().buffer()[(x, damaged_area.y)].symbol() == " "),
             "the simulated IME damage must reach the real terminal"
         );
 
-        draw_chat_frame(&mut terminal, input, cursor, 0, |frame| {
+        draw_chat_frame(&mut terminal, input, cursor, 0, false, |frame| {
             draw_frame(
                 frame,
                 &history,
@@ -3479,6 +3495,7 @@ fn chat_draw_repairs_an_ime_cleared_cjk_composer_suffix() {
                 &[],
                 0,
                 &None,
+                &render::FooterLive::default(),
             );
         })
         .expect("unchanged chat draw repairs the IME damage");
@@ -3496,7 +3513,7 @@ fn chat_draw_repairs_an_ime_cleared_cjk_composer_suffix() {
                 before_damage[(x, input_area.y)],
                 "composer cell was not restored at {x} for {input:?}"
             );
-            assert_eq!(buffer[(x, input_area.y)].bg, Color::DarkGray);
+            assert_eq!(buffer[(x, input_area.y)].bg, Color::Reset);
             // TestBackend stores each draw command independently. A real
             // terminal also paints a wide glyph's continuation column,
             // while Buffer::diff correctly omits that separate command.
@@ -3508,6 +3525,66 @@ fn chat_draw_repairs_an_ime_cleared_cjk_composer_suffix() {
                 .collect::<String>()
                 .contains("history must remain visible"),
             "replaying the composer row must not clear adjacent history"
+        );
+    }
+}
+
+#[test]
+fn chat_draw_puts_the_caret_after_the_typed_text_with_and_without_the_subagent_line() {
+    let header = render::HeaderInfo {
+        provider_name: "openai",
+        model_name: "test",
+        usage: polaris_provider::Usage::default(),
+        cwd: "/tmp",
+        cwd_short: "~",
+        effort_name: "low",
+    };
+    let input = "日本語";
+    for subagent_line in [false, true] {
+        let live = render::FooterLive {
+            subagents: render::SubagentSummary {
+                running: usize::from(subagent_line),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 14)).unwrap();
+        let mut cache = render::HistoryWrapCache::default();
+        draw_chat_frame(
+            &mut terminal,
+            input,
+            input.len(),
+            0,
+            subagent_line,
+            |frame| {
+                draw_frame(
+                    frame,
+                    &[],
+                    &mut cache,
+                    0,
+                    input,
+                    input.len(),
+                    &Status::Idle,
+                    &header,
+                    &[],
+                    0,
+                    &None,
+                    &live,
+                );
+            },
+        )
+        .expect("chat draw");
+
+        let buffer = terminal.backend().buffer();
+        let input_row = (0..buffer.area.height)
+            .find(|&y| buffer[(0, y)].symbol() == "\u{203a}")
+            .expect("the prompt is on screen");
+        // "› " is 2 columns and each of the 3 wide characters takes 2.
+        assert_eq!(
+            terminal.backend_mut().get_cursor_position().unwrap(),
+            ratatui::layout::Position::new(2 + 6, input_row),
+            "subagent_line={subagent_line}"
         );
     }
 }
@@ -3559,6 +3636,7 @@ fn submission_preview_is_drawn_without_committing_and_is_removed_afterward() {
                         &[],
                         0,
                         &None,
+                        &render::FooterLive::default(),
                     )
                 }).map(|_| ())
             },
@@ -3608,6 +3686,7 @@ fn submission_preview_is_drawn_without_committing_and_is_removed_afterward() {
                 &[],
                 0,
                 &None,
+                &render::FooterLive::default(),
             )
         })
         .expect("redraw after preflight failure");
@@ -3735,6 +3814,7 @@ fn draw_frame_wraps_a_history_line_wider_than_a_narrow_window_instead_of_clippin
                 &[],
                 0,
                 &None,
+                &render::FooterLive::default(),
             )
         })
         .expect("draw");
@@ -3761,7 +3841,7 @@ fn draw_frame_wraps_a_history_line_wider_than_a_narrow_window_instead_of_clippin
 
 #[test]
 fn draw_frame_highlights_an_active_selection() {
-    // Tall enough that `render::footer_height(0)` doesn't eat the whole
+    // Tall enough that `render::footer_height(0, false)` doesn't eat the whole
     // viewport and leave zero rows for the history area (matches the
     // height the other `draw_frame` tests in this module use).
     let backend = ratatui::backend::TestBackend::new(40, 20);
@@ -3803,6 +3883,7 @@ fn draw_frame_highlights_an_active_selection() {
                 &[],
                 0,
                 &sel,
+                &render::FooterLive::default(),
             )
         })
         .expect("draw");
@@ -3822,7 +3903,7 @@ fn draw_frame_highlights_an_active_selection() {
 /// Regression test for the *elimination*, not just relocation, of the
 /// blank gap between the last conversation-history row and the footer
 /// block — proves `history_area` actually grows to use every row
-/// `footer_height(0)` doesn't need, rather than always leaving the
+/// `footer_height(0, false)` doesn't need, rather than always leaving the
 /// difference between a fixed worst-case reservation and the popup's
 /// actual height (9 rows, `14 - 5`) as unused blank space whenever the
 /// suggestions popup isn't showing (the common case).
@@ -3869,6 +3950,7 @@ fn draw_frame_leaves_no_blank_gap_between_history_and_the_footer() {
                 &[],
                 0,
                 &None,
+                &render::FooterLive::default(),
             )
         })
         .expect("draw");
@@ -3882,7 +3964,7 @@ fn draw_frame_leaves_no_blank_gap_between_history_and_the_footer() {
         .collect();
     // 0 suggestions here, so this must match what `draw_frame` itself
     // just used to size `footer_area`.
-    let expected_history_height = 20 - render::footer_height(0) as usize;
+    let expected_history_height = 20 - render::footer_height(0, false) as usize;
     assert!(
         rows[expected_history_height - 1].contains("history line"),
         "the row immediately above the footer must still be real \
@@ -3909,13 +3991,26 @@ fn draw_frame_leaves_no_blank_gap_between_history_and_the_footer() {
 /// contiguous rows from the top actually got that marker drawn into
 /// them — the true observable size of `history_area`, straight from
 /// the rendered buffer. That count must equal
-/// `area_height_for_history(render::footer_height(n), terminal_height)`
-/// for both a representative suggestion count with no popup (`0`) and
-/// one at the popup's display cap (`MAX_DISPLAYED_SUGGESTIONS`).
+/// `area_height_for_history(render::footer_height(n, subagent_line),
+/// terminal_height)` for both a representative suggestion count with no
+/// popup (`0`) and one at the popup's display cap
+/// (`MAX_DISPLAYED_SUGGESTIONS`), each with and without the subagent line.
 #[test]
 fn area_height_for_history_matches_draw_frames_actual_history_area_height() {
-    for &suggestion_count in &[0usize, render::MAX_DISPLAYED_SUGGESTIONS] {
+    for &(suggestion_count, subagent_line) in &[
+        (0usize, false),
+        (render::MAX_DISPLAYED_SUGGESTIONS, false),
+        (0, true),
+        (render::MAX_DISPLAYED_SUGGESTIONS, true),
+    ] {
         let terminal_height: u16 = 20;
+        let live = render::FooterLive {
+            subagents: render::SubagentSummary {
+                running: usize::from(subagent_line),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let suggestions: Vec<&slash::SlashCommand> =
             slash::COMMANDS.iter().take(suggestion_count).collect();
         assert_eq!(
@@ -3954,6 +4049,7 @@ fn area_height_for_history_matches_draw_frames_actual_history_area_height() {
                     &suggestions,
                     0,
                     &None,
+                    &live,
                 )
             })
             .expect("draw");
@@ -3961,12 +4057,15 @@ fn area_height_for_history_matches_draw_frames_actual_history_area_height() {
         let actual_history_rows = (0..buffer.area.height)
             .take_while(|&y| (0..buffer.area.width).any(|x| buffer[(x, y)].symbol() == "H"))
             .count() as u16;
-        let via_helper =
-            area_height_for_history(render::footer_height(suggestion_count), terminal_height);
+        let via_helper = area_height_for_history(
+            render::footer_height(suggestion_count, subagent_line),
+            terminal_height,
+        );
         assert_eq!(
             actual_history_rows, via_helper,
-            "suggestion_count={suggestion_count}: area_height_for_history \
-                 must stay in sync with what draw_frame actually renders"
+            "suggestion_count={suggestion_count} subagent_line={subagent_line}: \
+                 area_height_for_history must stay in sync with what draw_frame \
+                 actually renders"
         );
     }
 }
@@ -6449,6 +6548,263 @@ fn help_lists_no_compaction_command() {
     );
 }
 
+/// The eight commands removed from the TUI, written out here rather than read
+/// back from `slash`, each with a form that carries the old arguments.
+const REMOVED_TUI_COMMANDS: [(&str, &str); 8] = [
+    ("/pwd", "/pwd now"),
+    ("/sandbox", "/sandbox status"),
+    ("/instruction", "/instruction send do the next thing"),
+    ("/input", "/input cancel input-id"),
+    ("/roles", "/roles bind worker subgiant"),
+    ("/compare", "/compare left | right"),
+    ("/run", "/run settings max-turns 5"),
+    ("/history", "/history 20"),
+];
+
+#[test]
+fn help_lists_none_of_the_removed_tui_commands_and_still_lists_status() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut session = Session::default();
+    let mut status = Status::Idle;
+    let mut local_lines = Vec::new();
+
+    call(
+        slash::Action::Help,
+        &mut session,
+        &dir.path().join("session.jsonl"),
+        &mut status,
+        &[],
+        dir.path(),
+        &mut local_lines,
+    );
+
+    let help: Vec<String> = local_lines.iter().map(ToString::to_string).collect();
+    for (name, _) in REMOVED_TUI_COMMANDS {
+        assert!(
+            help.iter()
+                .all(|line| !line.starts_with(&format!("{name} "))),
+            "{name} is listed: {help:?}"
+        );
+    }
+    // The positive control: the same lines do list a command that stays.
+    assert!(
+        help.iter().any(|line| line.starts_with("/status ")),
+        "{help:?}"
+    );
+    assert!(
+        help.iter().any(|line| line.starts_with("/subagents ")),
+        "{help:?}"
+    );
+}
+
+#[test]
+fn removed_tui_commands_answer_one_notice_and_change_nothing() {
+    use polaris_core::{conversation_state::HistoryMode, session_store::PersistedSession};
+
+    fn project_files(
+        dir: &std::path::Path,
+    ) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        let mut files = std::collections::BTreeMap::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files.extend(project_files(&path));
+            } else {
+                files.insert(path.clone(), std::fs::read(&path).unwrap());
+            }
+        }
+        files
+    }
+
+    let root = tempfile::tempdir().expect("temp dir");
+    let project = root.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(project.join("notes.txt"), "unchanged").unwrap();
+    let persisted = PersistedSession::create(
+        root.path(),
+        &root.path().join("memory.sqlite3"),
+        "project",
+        HistoryMode::Legacy,
+        None,
+    )
+    .unwrap();
+    let mut session = Session::default();
+    session.attach(persisted.clone()).unwrap();
+    session.push_user("an earlier question");
+    session.push_assistant("an earlier answer", vec![]);
+    let messages = serde_json::to_string(&session.messages).unwrap();
+    let saved = persisted.snapshot().unwrap();
+    let files = project_files(&project);
+    let session_path = project.join("session.jsonl");
+
+    for (bare, with_arguments) in REMOVED_TUI_COMMANDS {
+        for line in [bare, with_arguments] {
+            let mut status = Status::Idle;
+            let mut local_lines = Vec::new();
+
+            let outcome = call(
+                slash::parse(line).expect("a slash command"),
+                &mut session,
+                &session_path,
+                &mut status,
+                &[],
+                &project,
+                &mut local_lines,
+            );
+
+            assert!(matches!(outcome, SlashOutcome::Continue), "{line}");
+            match status {
+                Status::Notice(notice) => {
+                    assert!(
+                        notice.starts_with(&format!("{bare} was removed.")),
+                        "{notice}"
+                    );
+                    assert!(!notice.contains('\n'), "one line: {notice:?}");
+                }
+                _ => panic!("expected a Notice for {line}"),
+            }
+            assert!(local_lines.is_empty(), "the answer is one line: {line}");
+        }
+    }
+
+    assert_eq!(serde_json::to_string(&session.messages).unwrap(), messages);
+    assert!(!session_path.exists(), "nothing is persisted");
+    assert_eq!(project_files(&project), files);
+    let after = persisted.snapshot().unwrap();
+    assert_eq!(after.state, saved.state);
+    assert_eq!(after.events.len(), saved.events.len());
+}
+
+/// `/subagents` is the one runtime command left. The handler gets the whole
+/// request, name included, and passes on only the words after the name, along
+/// with the run's owner. With no run there is no owner, and the answer says so.
+#[cfg(unix)]
+#[tokio::test]
+async fn subagents_request_passes_its_arguments_and_the_run_owner_on() {
+    for request in ["subagents", "subagents list"] {
+        assert_eq!(
+            handle_runtime_command(request, None).await,
+            Ok(vec!["The current run has no subagent owner".to_owned()]),
+            "{request}"
+        );
+    }
+    let error = handle_runtime_command("subagents wait child attempt", None)
+        .await
+        .unwrap_err();
+    assert!(error.contains("no subagent owner"), "{error}");
+
+    let sandbox = SandboxPolicy::new(polaris_sandbox::SandboxMode::ReadOnly, &[]).unwrap();
+    let mut session = Session::default();
+    let control = install_tui_root_control(
+        &mut session,
+        TuiRootControlArgs {
+            session_id: "subagents-session",
+            turn: 1,
+            sandbox: &sandbox,
+            approval: ApprovalPolicy::Never,
+            mcp_available: false,
+            tool_names: &[],
+            model: "gpt-6-astra",
+            effort: "xhigh",
+        },
+    )
+    .unwrap();
+    let lines = handle_runtime_command("subagents list", Some(&control))
+        .await
+        .unwrap();
+    assert!(lines.iter().any(|line| line == "No subagents"), "{lines:?}");
+}
+
+/// What `/status` shows now that `/pwd` is gone, and the positive control for
+/// the removed-command tests: `/status` itself is still a live command.
+#[cfg(unix)]
+#[test]
+fn status_shows_the_canonical_project_root_next_to_the_other_identity_rows() {
+    use polaris_core::rewind_workspace::{RewindLimits, WorkspaceOwner};
+
+    assert!(matches!(
+        slash::parse("/status"),
+        Some(slash::Action::Status)
+    ));
+    assert!(
+        slash::COMMANDS
+            .iter()
+            .any(|command| command.name == "status")
+    );
+
+    let root = tempfile::tempdir().unwrap();
+    // The run started below a symlink into the project, as `args.cwd` can.
+    let project = root.path().join("real-project");
+    std::fs::create_dir_all(project.join(".polaris")).unwrap();
+    std::fs::create_dir(project.join("sub")).unwrap();
+    std::os::unix::fs::symlink(&project, root.path().join("linked")).unwrap();
+    let canonical = project.canonicalize().unwrap();
+    let project_root = polaris_core::project::resolve_root(&root.path().join("linked/sub"));
+    assert_eq!(project_root, canonical);
+
+    let state_dir = root.path().join("state");
+    std::fs::create_dir(&state_dir).unwrap();
+    let owner = WorkspaceOwner::open(
+        &canonical,
+        &state_dir.join("rewind-workspace"),
+        RewindLimits::default(),
+    )
+    .unwrap();
+    let lease = owner.try_mutation().unwrap();
+    let store = polaris_core::management_effect::ManagementEffectStoreV1::open_at_state_dir(
+        &canonical, &state_dir, &lease,
+    )
+    .unwrap();
+    drop(lease);
+    let sandbox = SandboxPolicy::new(polaris_sandbox::SandboxMode::ReadOnly, &[]).unwrap();
+    let session = Session::default();
+    let lines = status_lines(StatusSnapshot {
+        session: &session,
+        session_path: None,
+        accounts: Ok(Vec::new()),
+        binding: None,
+        provider_name: "openai",
+        model_name: "gpt-5.4",
+        usage_report: polaris_provider::UsageReport::default(),
+        sandbox: &sandbox,
+        approval: ApprovalPolicy::Never,
+        startup_approval: ApprovalPolicy::OnRequest,
+        mcp_external: false,
+        audit_path: None,
+        turn_authority_present: false,
+        fixed_effort: None,
+        answer_finalizer: None,
+        project_root: &project_root,
+        management_effects: &store,
+        recovery_issue: None,
+    });
+
+    let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
+    let at = |needle: &str| text.iter().position(|line| line.contains(needle));
+    let row = &text[at("Project root:").expect("a Project root row")];
+    assert!(row.ends_with(&canonical.display().to_string()), "{row}");
+    assert!(!row.contains("linked"), "{row}");
+    assert_eq!(
+        text.iter()
+            .filter(|line| line.contains("Project root:"))
+            .count(),
+        1
+    );
+    // It sits with the identity rows, ahead of the Account section.
+    let account = text.iter().position(|line| line == "Account").unwrap();
+    assert!(at("Session ID:").unwrap() < at("Project root:").unwrap());
+    assert!(at("Project root:").unwrap() < account);
+    // The rest of `/status` is untouched, including what `/sandbox` showed.
+    for needle in [
+        "Model:",
+        "sandbox:",
+        "Approval (current):",
+        "Approval (startup):",
+    ] {
+        assert!(text.iter().any(|line| line.contains(needle)), "{needle}");
+    }
+}
+
 /// A `Provider` whose only job is recording what `set_model` was last
 /// called with, so `handle_model` tests can confirm it actually
 /// reaches the provider (not just the display copy). `complete` is
@@ -6792,6 +7148,186 @@ fn status_rows_align_labels_and_keep_values_when_wrapped() {
     assert!(escaped.contains("/tmp/audit\\nforged\\t"), "{escaped}");
 }
 
+fn doctor_facts(workspace_write: Result<String, String>) -> DoctorFacts {
+    DoctorFacts {
+        chatgpt_file: true,
+        api_key_file: false,
+        api_key_env: false,
+        provider_env: None,
+        openai_key: false,
+        codex_credentials: true,
+        sandboxes: vec![
+            ("read-only", Ok("read-only".into())),
+            ("workspace-write", workspace_write),
+        ],
+        capacity: vec![
+            "Memory: synthetic host".into(),
+            "Execution fit: not verified here".into(),
+        ],
+        state: "/synthetic/state (present)".into(),
+        delivered: 7,
+    }
+}
+
+/// C39: configured, available and observed are separate statements. Changing
+/// what is available never changes what is configured, and the observed part
+/// stays "nothing" however much is available.
+#[test]
+fn doctor_keeps_configured_available_and_observed_apart() {
+    let startup = SandboxPolicy::new(polaris_sandbox::SandboxMode::ReadOnly, &[]).unwrap();
+    let report = |approval, facts: &DoctorFacts| {
+        doctor_report(("openai", "gpt-5.4"), &startup, approval, true, facts)
+    };
+    let group = |lines: &[String], prefix: &str| -> Vec<String> {
+        lines
+            .iter()
+            .filter(|line| line.starts_with(prefix))
+            .cloned()
+            .collect()
+    };
+    let broken = report(
+        ApprovalPolicy::Never,
+        &doctor_facts(Err("writable root is missing".into())),
+    );
+    assert_eq!(broken[0], "Diagnostics (read-only)");
+    // Configured first, then available, then the single observed statement.
+    let rank = |line: &String| match line.split(':').next().unwrap() {
+        "Configured" => 0,
+        "Available" => 1,
+        "Observed" => 2,
+        other => panic!("unlabelled line: {other}"),
+    };
+    let ranks: Vec<_> = broken[1..].iter().map(rank).collect();
+    assert!(ranks.is_sorted(), "{broken:#?}");
+    assert_eq!(ranks.iter().filter(|rank| **rank == 0).count(), 3);
+    assert_eq!(ranks.iter().filter(|rank| **rank == 2).count(), 1);
+    assert_eq!(ranks.last(), Some(&2));
+
+    let configured = group(&broken, "Configured:").join("\n");
+    for expected in [
+        "provider=openai, model=gpt-5.4",
+        "sandbox=read-only, approval=Never",
+        "external MCP=true",
+    ] {
+        assert!(configured.contains(expected), "{configured}");
+    }
+    for availability in ["credential", "resolution", "capacity", "available"] {
+        assert!(
+            !configured.to_lowercase().contains(availability),
+            "configured part states {availability}: {configured}"
+        );
+    }
+
+    let available = group(&broken, "Available:").join("\n");
+    for expected in [
+        "ChatGPT credential file=true, API key file=false, environment API key=false",
+        "provider resolution: POLARIS_PROVIDER is not set; a new launch would default to codex",
+        "sandbox read-only: available (read-only)",
+        "sandbox workspace-write: NOT available (writable root is missing)",
+        "state=/synthetic/state (present); delivered always-on instruction lines=7",
+        "decision capacity: Memory: synthetic host",
+        "decision capacity: Execution fit: not verified here",
+    ] {
+        assert!(available.contains(expected), "{expected}\n{available}");
+    }
+
+    let observed = group(&broken, "Observed:");
+    assert_eq!(observed.len(), 1);
+    assert!(observed[0].contains("does not contact"), "{observed:?}");
+    assert!(observed[0].contains("unverified"), "{observed:?}");
+
+    // The sandbox that becomes available changes only the available part.
+    let healthy = report(
+        ApprovalPolicy::Never,
+        &doctor_facts(Ok("workspace-write".into())),
+    );
+    assert_eq!(
+        group(&healthy, "Configured:"),
+        group(&broken, "Configured:")
+    );
+    assert_eq!(group(&healthy, "Observed:"), observed);
+    assert_ne!(group(&healthy, "Available:"), group(&broken, "Available:"));
+    // A different approval policy changes only the configured part.
+    let stricter = report(
+        ApprovalPolicy::OnRequest,
+        &doctor_facts(Err("writable root is missing".into())),
+    );
+    assert_eq!(group(&stricter, "Available:"), group(&broken, "Available:"));
+    assert_ne!(
+        group(&stricter, "Configured:"),
+        group(&broken, "Configured:")
+    );
+}
+
+#[test]
+fn doctor_provider_resolution_follows_the_launch_rule() {
+    assert_eq!(
+        provider_resolution(Some("llamacpp"), true, true),
+        "POLARIS_PROVIDER is set explicitly: llamacpp"
+    );
+    for (openai_key, codex_credentials, chosen) in [
+        (false, false, "openai"),
+        (true, false, "openai"),
+        (true, true, "openai"),
+        (false, true, "codex"),
+    ] {
+        assert_eq!(
+            provider_resolution(None, openai_key, codex_credentials),
+            format!("POLARIS_PROVIDER is not set; a new launch would default to {chosen}"),
+            "key {openai_key}, codex credentials {codex_credentials}"
+        );
+    }
+}
+
+#[test]
+fn doctor_sandbox_availability_is_computed_for_this_project_not_copied_from_startup() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().canonicalize().unwrap();
+    assert_eq!(
+        sandbox_availability(&root, polaris_sandbox::SandboxMode::ReadOnly).unwrap(),
+        "read-only"
+    );
+    let writable = sandbox_availability(&root, polaris_sandbox::SandboxMode::WorkspaceWrite)
+        .expect("a project directory can be made writable");
+    assert!(
+        writable.starts_with(&format!("workspace-write (writable: {}", root.display())),
+        "{writable}"
+    );
+    // A project that does not exist can be read-only but not writable.
+    let missing = root.join("not-created");
+    assert!(sandbox_availability(&missing, polaris_sandbox::SandboxMode::ReadOnly).is_ok());
+    assert!(sandbox_availability(&missing, polaris_sandbox::SandboxMode::WorkspaceWrite).is_err());
+}
+
+#[test]
+fn doctor_reads_availability_from_this_host_without_claiming_a_connection() {
+    let project = tempfile::tempdir().unwrap();
+    let startup = SandboxPolicy::new(polaris_sandbox::SandboxMode::ReadOnly, &[]).unwrap();
+    let text = doctor_lines(
+        "openai",
+        "gpt-5.4",
+        project.path(),
+        &startup,
+        ApprovalPolicy::OnRequest,
+        false,
+    )
+    .iter()
+    .map(ToString::to_string)
+    .collect::<Vec<_>>()
+    .join("\n");
+    for expected in [
+        "Configured: provider=openai, model=gpt-5.4",
+        "Available: provider resolution: POLARIS_PROVIDER ",
+        "Available: sandbox read-only: available (read-only)",
+        "Available: sandbox workspace-write: available (workspace-write (writable: ",
+        "Available: decision capacity: Memory: ",
+        "Available: decision capacity: Execution fit: not verified here",
+        "Observed: nothing.",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+}
+
 #[test]
 fn phase_command_cannot_write_without_managed_owner() {
     let mut session = Session::new();
@@ -7058,36 +7594,6 @@ fn confirmed_phase_change_records_effect_and_cancel_preserves_session() {
     assert!(matches!(status, Status::Error(_)));
     assert_eq!(persistence.snapshot().unwrap().state, disabled_state);
     assert_eq!(std::fs::read(&journal).unwrap(), disabled_journal);
-}
-
-#[test]
-fn pwd_reports_the_canonical_project_root() {
-    let mut session = Session::default();
-    let mut status = Status::Idle;
-    let dir = tempfile::tempdir().expect("temp dir");
-    let project = dir.path().join("project");
-    let nested = project.join("nested");
-    std::fs::create_dir_all(project.join(".git")).unwrap();
-    std::fs::create_dir_all(&nested).unwrap();
-    let session_path = dir.path().join("session.jsonl");
-    let mut local_lines = Vec::new();
-
-    call(
-        slash::Action::Pwd,
-        &mut session,
-        &session_path,
-        &mut status,
-        &[],
-        &nested,
-        &mut local_lines,
-    );
-
-    match status {
-        Status::Notice(n) => {
-            assert_eq!(n, project.canonicalize().unwrap().display().to_string())
-        }
-        _ => panic!("expected a Notice"),
-    }
 }
 
 /// The registry lives under `HOME`, not under the project, so "nothing is
@@ -7593,6 +8099,100 @@ fn help_lists_every_registered_command_in_scrollback() {
         );
     }
     assert!(local_lines.last().unwrap().to_string().contains("/quit"));
+}
+
+/// `(cfg, name)` for each line that opens with a `target_os` attribute and is
+/// followed by a line `name_of` can read a name from.
+fn target_os_pairs(
+    source: &str,
+    name_of: impl Fn(&str) -> Option<String>,
+) -> std::collections::BTreeSet<(String, String)> {
+    let lines: Vec<&str> = source.lines().map(str::trim).collect();
+    lines
+        .windows(2)
+        .filter(|pair| {
+            pair[0].starts_with("#[cfg(target_os = \"")
+                || pair[0].starts_with("#[cfg(not(target_os = \"")
+        })
+        .filter_map(|pair| Some((pair[0].to_owned(), name_of(pair[1])?)))
+        .collect()
+}
+
+fn identifier(text: &str) -> Option<String> {
+    let name: String = text
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+/// The `Action` a handler arm matches, as `slash::Action::Name` or
+/// `Some(slash::Action::Name`.
+fn arm_variant(line: &str) -> Option<String> {
+    identifier(
+        line.trim_start_matches("Some(")
+            .strip_prefix("slash::Action::")?,
+    )
+}
+
+/// A variant declaration such as `Name(String),`.
+fn declared_variant(line: &str) -> Option<String> {
+    let name = identifier(line)?;
+    (name.starts_with(|c: char| c.is_ascii_uppercase()) && line[name.len()..].starts_with('('))
+        .then_some(name)
+}
+
+/// Arms in `handlers` that exist on one platform while the command is
+/// recognized on every platform: `actions` does not gate the variant the same
+/// way, and `dispatcher` does not serve it on the other platforms.
+fn arms_without_a_route_elsewhere(handlers: &str, actions: &str, dispatcher: &str) -> Vec<String> {
+    let declared = target_os_pairs(actions, declared_variant);
+    let served = target_os_pairs(dispatcher, arm_variant);
+    target_os_pairs(handlers, arm_variant)
+        .into_iter()
+        .filter(|(cfg, variant)| {
+            let other = cfg
+                .replace("(target_os", "(not(target_os")
+                .replace("\")]", "\"))]");
+            !declared.contains(&(cfg.clone(), variant.clone()))
+                && !served.contains(&(other, variant.clone()))
+        })
+        .map(|(cfg, variant)| format!("{variant} has a {cfg} arm"))
+        .collect()
+}
+
+/// T01: a handler arm compiled for one platform must belong to a command that
+/// exists only there, or be served by the dispatcher everywhere else. Otherwise
+/// the other platforms list the command and end in the unconnected fallback.
+#[test]
+fn single_platform_handler_arms_belong_to_single_platform_commands() {
+    let handlers = include_str!("../lib.rs");
+    let actions = include_str!("../slash.rs");
+    let dispatcher = include_str!("../command_dispatch.rs");
+    // The scan must see the arms it exists to check.
+    let arms = target_os_pairs(handlers, arm_variant);
+    for variant in ["WorkspaceControl", "Apply", "Decided"] {
+        assert!(
+            arms.iter().any(|(_, found)| found == variant),
+            "no {variant} arm found"
+        );
+    }
+    assert_eq!(
+        arms_without_a_route_elsewhere(handlers, actions, dispatcher),
+        Vec::<String>::new()
+    );
+
+    // And it reports an arm whose command the other platforms still list.
+    let arm = "#[cfg(target_os = \"linux\")]\n    slash::Action::Feature(x) => {}\n";
+    let ungated = "    Feature(String),\n";
+    let gated = "    #[cfg(target_os = \"linux\")]\n    Feature(String),\n";
+    let served = "    #[cfg(not(target_os = \"linux\"))]\n    slash::Action::Feature(x) => {}\n";
+    assert_eq!(
+        arms_without_a_route_elsewhere(arm, ungated, ""),
+        ["Feature has a #[cfg(target_os = \"linux\")] arm"]
+    );
+    assert!(arms_without_a_route_elsewhere(arm, gated, "").is_empty());
+    assert!(arms_without_a_route_elsewhere(arm, ungated, served).is_empty());
 }
 
 #[test]

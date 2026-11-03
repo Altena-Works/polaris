@@ -336,6 +336,109 @@ pub(crate) fn handle_with_selection<B: Backend, R: KeyReader>(
     ))])
 }
 
+/// C35: appends one exact statement to the project's decision ledger after the
+/// person confirms it as written. Declining records a denial; a failed append is
+/// recorded as an unknown outcome and never retried.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn decided<B: Backend, R: KeyReader>(
+    text: &str,
+    at: &str,
+    terminal: &RefCell<Terminal<B>>,
+    reader: &mut R,
+    workspace: &WorkspaceOwner,
+    effects: &ManagementEffectStoreV1,
+    has_pending: bool,
+) -> Result<Vec<Line<'static>>, String> {
+    if text.trim().is_empty()
+        || text.len() > 8192
+        || at.is_empty()
+        || at.len() > 64
+        || text
+            .chars()
+            .any(|ch| ch.is_control() && ch != '\n' && ch != '\t')
+        || at.chars().any(char::is_control)
+    {
+        return Err("Specify non-whitespace decision text within 8 KiB".into());
+    }
+    if has_pending {
+        return Err("Cannot save decisions while input is queued".into());
+    }
+    let lease = workspace
+        .try_mutation()
+        .map_err(|_| "Cannot save while an operation is active")?;
+    workspace
+        .require_quiescent_with_lease(&lease)
+        .map_err(|_| "An operation awaits recovery")?;
+    polaris_core::sync::composite::C10CompositeBlockerV1::require_clear_with_mutation(
+        workspace.project_root(),
+        effects.state_dir(),
+        &lease,
+    )
+    .map_err(|error| error.to_string())?;
+    let cursor = effects
+        .cursor()
+        .map_err(|_| "Cannot verify the management effect")?;
+    let request = PrepareManagementEffectV1 {
+        operation_id: ManagementOperationIdV1::random()
+            .map_err(|_| "Cannot create an operation ID")?,
+        inventory: ManagementInventoryIdV1::parse("C35")
+            .map_err(|_| "Cannot verify the operation")?,
+        scope: ManagementEffectScopeV1 {
+            project: effects.project_scope_hash(),
+            session: None,
+            generation: cursor.generation(),
+            revision: 0,
+            permission: ManagementPermissionScopeV1::Project,
+            account_binding: None,
+        },
+        request_hash: ManagementEffectHashV1::digest(
+            &serde_json::to_vec(&(at, text)).map_err(|_| "Cannot verify decisions")?,
+        ),
+        rewind: ManagementRewindDispositionV1::IrreversibleLocal,
+    };
+    let PrepareManagementEffectOutcomeV1::Prepared(prepared) = effects
+        .prepare(&lease, cursor, request)
+        .map_err(|_| "Cannot prepare the management effect")?
+    else {
+        return Err("The same operation is already recorded".into());
+    };
+    if !account::confirm(
+        terminal,
+        reader,
+        "Save decision",
+        ".polaris/decisions.csv",
+        text,
+    ) {
+        effects
+            .deny(&lease, &prepared, ManagementDenialReasonV1::UserDeclined)
+            .map_err(|_| "Cannot record cancellation")?;
+        return Ok(vec![Line::from("Decision save cancelled")]);
+    }
+    let started = effects
+        .start(&lease, &prepared)
+        .map_err(|_| "Cannot record the save start")?;
+    if polaris_core::decisions::append(workspace.project_root(), at, text).is_err() {
+        effects
+            .mark_outcome_unknown(
+                &lease,
+                &started,
+                ManagementUnknownReasonV1::UnclassifiedEffect,
+            )
+            .map_err(|_| "Cannot verify the save outcome or management effect. Do not rerun")?;
+        return Err("Decision save outcome is unknown. No automatic retry will occur".into());
+    }
+    effects
+        .complete_started(
+            &lease,
+            &started,
+            ManagementEffectHashV1::digest(b"decision append durably acknowledged"),
+        )
+        .map_err(|_| "Recording failed after saving. Do not rerun")?;
+    Ok(vec![Line::from(
+        "Decision saved. This is a historical record, not current approval.",
+    )])
+}
+
 #[cfg(test)]
 mod selection_copy_tests {
     use super::*;
@@ -546,5 +649,162 @@ mod tests {
                 .count(),
             4
         );
+    }
+}
+
+#[cfg(test)]
+mod decided_tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, crossterm::event::KeyCode};
+    use std::os::unix::fs::PermissionsExt;
+
+    struct Key(KeyCode);
+    impl KeyReader for Key {
+        fn read_key(&mut self) -> std::io::Result<KeyCode> {
+            Ok(self.0)
+        }
+    }
+
+    struct Fixture {
+        _root: tempfile::TempDir,
+        project: PathBuf,
+        workspace: WorkspaceOwner,
+        effects: ManagementEffectStoreV1,
+        terminal: RefCell<Terminal<TestBackend>>,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let temporary = tempfile::tempdir().unwrap();
+            let root = temporary.path().canonicalize().unwrap();
+            let project = root.join("project");
+            let state = root.join("state");
+            std::fs::create_dir(&project).unwrap();
+            std::fs::create_dir(&state).unwrap();
+            std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let workspace = WorkspaceOwner::open(
+                &project,
+                &state.join("rewind-workspace"),
+                Default::default(),
+            )
+            .unwrap();
+            let lease = workspace.try_mutation().unwrap();
+            let effects =
+                ManagementEffectStoreV1::open_at_state_dir(&project, &state, &lease).unwrap();
+            drop(lease);
+            Self {
+                _root: temporary,
+                project,
+                workspace,
+                effects,
+                terminal: RefCell::new(Terminal::new(TestBackend::new(100, 30)).unwrap()),
+            }
+        }
+
+        fn decide(
+            &self,
+            text: &str,
+            key: KeyCode,
+            pending: bool,
+        ) -> Result<Vec<Line<'static>>, String> {
+            decided(
+                text,
+                "2026-10-04",
+                &self.terminal,
+                &mut Key(key),
+                &self.workspace,
+                &self.effects,
+                pending,
+            )
+        }
+
+        fn states(&self) -> Vec<ManagementEffectStateV1> {
+            self.effects
+                .effects()
+                .unwrap()
+                .into_iter()
+                .map(|effect| effect.state)
+                .collect()
+        }
+    }
+
+    #[test]
+    fn c35_confirmed_statement_is_saved_exactly_and_recorded_once() {
+        let fixture = Fixture::new();
+        // Quotes, commas, a newline and outer spaces are the cases a CSV
+        // ledger can silently rewrite.
+        let statement = "  keep \"quotes\", commas\nand 日本語  ";
+        let lines = fixture
+            .decide(statement, KeyCode::Char('y'), false)
+            .unwrap();
+        assert!(lines[0].to_string().contains("Decision saved"));
+        let entries = polaris_core::decisions::load(&fixture.project);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].what, statement);
+        assert_eq!(entries[0].at, "2026-10-04");
+        let states = fixture.states();
+        assert!(matches!(
+            states.as_slice(),
+            [ManagementEffectStateV1::Completed { .. }]
+        ));
+        assert!(fixture.effects.blocker().unwrap().is_none());
+    }
+
+    #[test]
+    fn c35_declined_or_refused_statements_leave_the_ledger_untouched() {
+        let fixture = Fixture::new();
+        let declined = fixture
+            .decide("must not save", KeyCode::Esc, false)
+            .unwrap();
+        assert!(declined[0].to_string().contains("cancelled"));
+        assert!(matches!(
+            fixture.states().as_slice(),
+            [ManagementEffectStateV1::Denied { .. }]
+        ));
+        let before = fixture.states().len();
+        for (text, pending) in [
+            ("   \n\t", false),
+            ("bad\u{1b}[31mcontrol", false),
+            (&"x".repeat(8193), false),
+            ("valid but input is queued", true),
+        ] {
+            assert!(
+                fixture.decide(text, KeyCode::Char('y'), pending).is_err(),
+                "{text:?}"
+            );
+        }
+        assert!(polaris_core::decisions::load(&fixture.project).is_empty());
+        assert_eq!(fixture.states().len(), before);
+    }
+
+    #[test]
+    fn c35_failed_append_is_an_unresolved_unknown_outcome_not_a_retry() {
+        let fixture = Fixture::new();
+        fixture.decide("first", KeyCode::Char('y'), false).unwrap();
+        // A ledger swapped for a symlink must never be written through.
+        let ledger = fixture.project.join(polaris_core::decisions::PATH);
+        let retained = fixture.project.join(".polaris/retained.csv");
+        std::fs::rename(&ledger, &retained).unwrap();
+        std::os::unix::fs::symlink(&retained, &ledger).unwrap();
+        let before = std::fs::read(&retained).unwrap();
+        let error = fixture
+            .decide("second", KeyCode::Char('y'), false)
+            .unwrap_err();
+        assert!(error.contains("outcome is unknown"), "{error}");
+        assert_eq!(std::fs::read(&retained).unwrap(), before);
+        // The records are not kept in time order: one completed, one unknown.
+        let states = fixture.states();
+        assert_eq!(states.len(), 2);
+        assert!(
+            states
+                .iter()
+                .any(|state| matches!(state, ManagementEffectStateV1::Completed { .. }))
+        );
+        assert!(
+            states
+                .iter()
+                .any(|state| matches!(state, ManagementEffectStateV1::OutcomeUnknown { .. }))
+        );
+        assert!(fixture.effects.blocker().unwrap().is_some());
     }
 }

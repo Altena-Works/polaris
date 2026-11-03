@@ -19,7 +19,7 @@ macOS arm64のTUIを配布対象として準備する。GUIと他OSのソース�
 - TUIの既定・推奨モデルをGPT-6.1 Solへ変更し、起動ヘッダにバージョンを表示する。
 - ファイルのD&Dをまとめて削除できる入力リンクとして扱い、出力されたファイルへのCtrl-click（端末対応時はCmd-click）からFinderで保存場所を表示する。範囲選択した文章は追加の確認画面なしでコピーする。
 - help・ログ・エラーを英語へ統一する。TUIのアカウント操作は`/login`・`/logout`・`/status`へ、remember設定は`/memory configure`へ集約する。CLIの`polaris account`は保持する。
-- 会話の再開・分岐・巻戻し、原文参照、workflowとskill、MCP・subagentをTUIから扱える。
+- 会話の再開・分岐・巻戻し、workflowとskill、MCP・subagentをTUIから扱える。
 - working中の補完と子タスク照会、入力受理ID、整理したstatus表示を提供する。
 - 判断backendの共通化と明示選択を追加し、Jev/SemIfを保持する。Clefは本番profile未登録のため通常利用できない。
 - 実装の流れと配布範囲を示すシステム構成図、コマンド参照、暫定リリース資料を整備する。
@@ -28,6 +28,13 @@ macOS arm64のTUIを配布対象として準備する。GUIと他OSのソース�
 - 自動圧縮は、直前の完了した要求でproviderが報告した入力トークン数に、その後に足したメッセージの推定を加えた数を閾値と比べる。報告がないとき（最初の要求、usageを返さないprovider、履歴を置き換えた直後）は、reasoningの暗号化された中身を除いた推定と比べる。暗号化された中身をo200kで数えていたため、報告が34,696トークンの要求を205,761トークンと見積もり、圧縮が無駄に走っていた。
 - turn-onlyで台帳の行を書く最も軽いTierのモデルと、検索用の埋め込みを、プロセス全体の静的な設定から、記憶を作るたびに渡す作り方へ移した。CLIの`-p`とTUIは同じ作り方を使い、TUIは`/new`・`/resume`・`/fork`・巻き戻し・sidechatで会話を作り直しても、この2つを失わない。`/clear`は記憶も捨て、新しい会話を最初のターンから取り込み直す。取り込んだ位置はターンの序数で数えるため、失敗したターンを巻き戻しても、Escで中断しても、次のターンの取り込みがずれない。`[decision]`の`local_only = true`のときは、行を書くモデルに通信制限を確認できるものだけを使う。
 - turn-onlyの記憶に、記憶専用のふるい`screen_for_memory`と、1つの関門を入れた。ふるいはメッセージをチャンクに切る前に1回だけ通し、判定を記録する。台帳の行を書くモデルを呼ぶのは、入力と回答がふるいを通ってそのままだったターンだけで、送る量も先頭3文・600字ずつ（全体1,500字）に絞る。拒否されたパスを読んだツールの結果は`withheld: denied path`の1行にし、`at=`と辞書のパス候補にも同じ判定をかける。ツールの出力に由来するチャンクは、引用で`untrusted tool output (turn N)`の印を付けて載せる。共有の`screen_text`は変えない。何をどこへ送るかの表は[利用ガイド](docs/usage.md)にある。
+- macOSのTUIで`/decided add <文章>`を使えるようにする。文章は加工せずにそのまま記録する。
+- macOSのTUIでも、入力中の下書きを手を止めて350ミリ秒後に自動で保存する。
+- TUIの`/doctor`を、設定（Configured）・利用可能（Available）・観測（Observed）の3区分で示す。利用可能の区分に、read-onlyとworkspace-writeのsandboxの可否、providerの解決、判定の容量を足す。
+- TUIの`/sync`と`/sync status`の先頭に、表示がこの端末の記録であり、remoteを観測していないことを示す行を足す。
+- macOSのTUIの一覧と`/help`から、macOSでは動かない`/setting`を外す。`/sync`の説明から、TUIでは参加を確定できない`join`を外す。
+- TUIの`/pwd`・`/sandbox`・`/instruction`・`/input`・`/roles`・`/compare`・`/run`・`/history`を廃止する。入力しても何も実行せず、廃止した旨と代わりの操作を1行で答える。代わりは、`/pwd`と`/sandbox`が`/status`（`Project root`行を追加）、`/instruction`が実行中に入力した文章の待ち行列、`/input`がEsc、`/roles`が`agents/<型名>/SKILL.md`、`/compare`が`polaris compare`、`/run`が`/subagents`と起動時の`--max-turns`、`/history`が画面のスクロールと`/export`である。CLIの`polaris compare`・`polaris sandbox`・`--max-turns`は保持する。
+- TUIの入力欄の灰色の背景をやめ、入力行の上下を灰色の罫線にする。会話履歴の自分の発言の灰色の背景は変えない。モデルの行の右端にworkflowの段階（`workflow: implement`）、その下の行にsubagentの集計（`subagents 2/4 done · 1 running · 1 failed`）を表示する。幅が足りないときは段階を省き、subagentのないrunでは集計の行を出さない。
 
 ### 修正
 

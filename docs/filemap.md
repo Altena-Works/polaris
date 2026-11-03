@@ -1720,7 +1720,6 @@ UPDATE_FILEMAP=1 cargo test -p polaris-core --test filemap
 - `role_commands.rs` — Role bindings select existing fixed tier providers; they create no provider.
 - `runtime_commands.rs` — Commands over the live host control plane; no desktop-state mirror.
 - `runtime_effects.rs` — Runtime management requests use the bound activity lease, never source mutation.
-- `sandbox_commands.rs` — Explicit argv execution under the startup ceiling and durable C38 receipt.
 - `screen_selection.rs` — Selection of visible terminal cells only; no input buffers or persistence.
 - `selection.rs` — Mouse drag-to-select over the conversation history. Operates entirely
 - `session_activation.rs` — 保存会話の設定とプロセス所有サービスを実行中のセッションへ適用する。
@@ -1751,11 +1750,7 @@ UPDATE_FILEMAP=1 cargo test -p polaris-core --test filemap
 
 ## `crates/polaris-tui/src/role_commands`
 
-- `tests.rs` — TUI role and tier controls with fixed-provider and permission checks.
-
-## `crates/polaris-tui/src/sandbox_commands`
-
-- `tests.rs` — TUI sandbox controls and startup permission-ceiling regression tests.
+- `tests.rs` — TUI saved role and tier bindings with fixed-provider checks.
 
 ## `crates/polaris-tui/src/session_commands`
 

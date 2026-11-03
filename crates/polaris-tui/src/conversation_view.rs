@@ -3,7 +3,7 @@
 
 use crate::{render, selection};
 use ratatui::text::Line;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 pub(super) struct ConversationViewState {
     pub(super) history: Vec<render::HistoryLine>,
@@ -15,6 +15,9 @@ pub(super) struct ConversationViewState {
     #[cfg(target_os = "macos")]
     pub(super) file_click: crate::file_reveal::FileClick,
     activity_rows: AgentActivityRows,
+    /// The footer's workflow stage and subagent summary, kept from the same
+    /// live events as `activity_rows`.
+    pub(super) footer: render::FooterLive,
 }
 
 impl ConversationViewState {
@@ -29,6 +32,7 @@ impl ConversationViewState {
             #[cfg(target_os = "macos")]
             file_click: crate::file_reveal::FileClick::default(),
             activity_rows: AgentActivityRows::default(),
+            footer: render::FooterLive::default(),
         }
     }
 
@@ -70,18 +74,18 @@ impl ConversationViewState {
         #[cfg(target_os = "macos")]
         self.file_click.cancel();
         self.activity_rows = AgentActivityRows::default();
+        // The previous conversation's subagents are not this one's. The
+        // workflow stage is read again from the session before each draw.
+        self.footer.subagents = render::SubagentSummary::default();
     }
 
     pub(super) fn append_live_event(&mut self, event: &polaris_core::AgentEvent) {
+        self.footer.observe(event);
         let appended = append_live_event_parts(event, &mut self.history, &mut self.activity_rows);
         self.history_wrap_cache.invalidate();
         if self.scroll_offset > 0 {
             self.scroll_offset += appended;
         }
-    }
-
-    pub(super) fn tool_detail_lines(&self) -> Vec<String> {
-        self.activity_rows.tool_detail_lines()
     }
 
     pub(super) fn push_history_line(&mut self, line: render::HistoryLine) {
@@ -144,53 +148,6 @@ pub(super) fn append_new_history_parts(
 #[derive(Default)]
 struct AgentActivityRows {
     rows: HashMap<(String, String), usize>,
-    tools: VecDeque<(String, String, &'static str)>,
-}
-
-impl AgentActivityRows {
-    fn tool_detail_lines(&self) -> Vec<String> {
-        if self.tools.is_empty() {
-            return vec!["No tool events observed in this run".into()];
-        }
-        self.tools
-            .iter()
-            .map(|(name, _, state)| format!("tool {}: {}", render::sanitize(name), state))
-            .collect()
-    }
-
-    fn observe_tool(&mut self, event: &polaris_core::AgentEvent) {
-        let (name, detail, state) = match event {
-            polaris_core::AgentEvent::ToolStarted { name, detail } => {
-                (name, detail, "start observed; completion unverified")
-            }
-            polaris_core::AgentEvent::ToolFinished {
-                name, detail, ok, ..
-            } => (
-                name,
-                detail,
-                if *ok {
-                    "success observed"
-                } else {
-                    "failure observed"
-                },
-            ),
-            _ => return,
-        };
-        let name = name.chars().take(256).collect::<String>();
-        let detail = detail.chars().take(256).collect::<String>();
-        if matches!(event, polaris_core::AgentEvent::ToolFinished { .. })
-            && let Some(row) = self.tools.iter_mut().rev().find(|(n, d, s)| {
-                n == &name && d == &detail && *s == "start observed; completion unverified"
-            })
-        {
-            row.2 = state;
-            return;
-        }
-        if self.tools.len() == 128 {
-            self.tools.pop_front();
-        }
-        self.tools.push_back((name, detail, state));
-    }
 }
 
 fn append_live_event_parts(
@@ -198,7 +155,6 @@ fn append_live_event_parts(
     history: &mut Vec<render::HistoryLine>,
     activity_rows: &mut AgentActivityRows,
 ) -> usize {
-    activity_rows.observe_tool(event);
     let key = match event {
         polaris_core::AgentEvent::SpawnStarted {
             display_name,
@@ -338,6 +294,44 @@ mod tests {
     }
 
     #[test]
+    fn live_events_feed_the_footer_and_a_reset_forgets_the_old_conversations_subagents() {
+        let mut view = ConversationViewState::new(&header(), 80);
+        let started = |display_name: &str| polaris_core::AgentEvent::SpawnStarted {
+            display_name: display_name.to_string(),
+            agent_type: "file-reader".to_string(),
+            task: "private".to_string(),
+        };
+        view.append_live_event(&polaris_core::AgentEvent::WorkflowResolved {
+            phase: "implement".to_string(),
+            skill_ids: Vec::new(),
+            changed_skill_ids: Vec::new(),
+            manifest_hash: "hash".to_string(),
+        });
+        view.append_live_event(&started("Sirius"));
+        view.append_live_event(&started("Antares"));
+        view.append_live_event(&polaris_core::AgentEvent::SpawnFinished {
+            display_name: "Sirius".to_string(),
+            agent_type: "file-reader".to_string(),
+            ok: true,
+        });
+        assert_eq!(
+            view.footer.workflow,
+            Some(polaris_core::workflow::Phase::Implement)
+        );
+        assert_eq!(
+            view.footer.subagents,
+            render::SubagentSummary {
+                done: 1,
+                running: 1,
+                failed: 0
+            }
+        );
+
+        view.reset(&header(), 80);
+        assert_eq!(view.footer.subagents, render::SubagentSummary::default());
+    }
+
+    #[test]
     fn child_tool_activity_replaces_only_that_agents_single_progress_row() {
         let mut view = ConversationViewState::new(&header(), 80);
         let header_rows = view.history.len();
@@ -387,40 +381,5 @@ mod tests {
                 .iter()
                 .any(|line| line.line.to_string() == "  → read(first.md)")
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn tool_details_are_bounded_and_reset_with_the_conversation() {
-        let mut view = ConversationViewState::new(&header(), 80);
-        view.append_live_event(&polaris_core::AgentEvent::ToolStarted {
-            name: "read".into(),
-            detail: "one".into(),
-        });
-        assert!(view.tool_detail_lines()[0].contains("completion unverified"));
-        view.append_live_event(&polaris_core::AgentEvent::ToolFinished {
-            name: "read".into(),
-            detail: "one".into(),
-            ok: false,
-            result: "private body".into(),
-            diff: None,
-        });
-        assert!(view.tool_detail_lines()[0].contains("failure observed"));
-        assert!(!view.tool_detail_lines()[0].contains("private body"));
-        for n in 0..130 {
-            view.append_live_event(&polaris_core::AgentEvent::ToolStarted {
-                name: format!("tool-{n}"),
-                detail: "x".into(),
-            });
-        }
-        assert_eq!(view.activity_rows.tools.len(), 128);
-        assert!(
-            view.tool_detail_lines()
-                .iter()
-                .all(|line| line.contains("completion unverified"))
-        );
-        view.reset(&header(), 80);
-        assert!(view.activity_rows.tools.is_empty());
-        assert!(view.tool_detail_lines()[0].contains("No tool events observed"));
     }
 }
