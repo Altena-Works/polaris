@@ -40,106 +40,6 @@ impl WorkspaceCommands {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn decided<B: Backend, R: KeyReader>(
-    text: &str,
-    at: &str,
-    terminal: &RefCell<Terminal<B>>,
-    reader: &mut R,
-    workspace: &WorkspaceOwner,
-    effects: &ManagementEffectStoreV1,
-    has_pending: bool,
-) -> Result<Vec<Line<'static>>, String> {
-    if text.trim().is_empty()
-        || text.len() > 8192
-        || at.is_empty()
-        || at.len() > 64
-        || text
-            .chars()
-            .any(|ch| ch.is_control() && ch != '\n' && ch != '\t')
-        || at.chars().any(char::is_control)
-    {
-        return Err("Specify non-whitespace decision text within 8 KiB".into());
-    }
-    if has_pending {
-        return Err("Cannot save decisions while input is queued".into());
-    }
-    let lease = workspace
-        .try_mutation()
-        .map_err(|_| "Cannot save while an operation is active")?;
-    workspace
-        .require_quiescent_with_lease(&lease)
-        .map_err(|_| "An operation awaits recovery")?;
-    polaris_core::sync::composite::C10CompositeBlockerV1::require_clear_with_mutation(
-        workspace.project_root(),
-        effects.state_dir(),
-        &lease,
-    )
-    .map_err(|error| error.to_string())?;
-    let cursor = effects
-        .cursor()
-        .map_err(|_| "Cannot verify the management effect")?;
-    let request = PrepareManagementEffectV1 {
-        operation_id: ManagementOperationIdV1::random()
-            .map_err(|_| "Cannot create an operation ID")?,
-        inventory: ManagementInventoryIdV1::parse("C35")
-            .map_err(|_| "Cannot verify the operation")?,
-        scope: ManagementEffectScopeV1 {
-            project: effects.project_scope_hash(),
-            session: None,
-            generation: cursor.generation(),
-            revision: 0,
-            permission: ManagementPermissionScopeV1::Project,
-            account_binding: None,
-        },
-        request_hash: ManagementEffectHashV1::digest(
-            &serde_json::to_vec(&(at, text)).map_err(|_| "Cannot verify decisions")?,
-        ),
-        rewind: ManagementRewindDispositionV1::IrreversibleLocal,
-    };
-    let PrepareManagementEffectOutcomeV1::Prepared(prepared) = effects
-        .prepare(&lease, cursor, request)
-        .map_err(|_| "Cannot prepare the management effect")?
-    else {
-        return Err("The same operation is already recorded".into());
-    };
-    if !crate::account::confirm(
-        terminal,
-        reader,
-        "Save decision",
-        ".polaris/decisions.csv",
-        text,
-    ) {
-        effects
-            .deny(&lease, &prepared, ManagementDenialReasonV1::UserDeclined)
-            .map_err(|_| "Cannot record cancellation")?;
-        return Ok(vec![Line::from("Decision save cancelled")]);
-    }
-    let started = effects
-        .start(&lease, &prepared)
-        .map_err(|_| "Cannot record the save start")?;
-    if polaris_core::decisions::append(workspace.project_root(), at, text).is_err() {
-        effects
-            .mark_outcome_unknown(
-                &lease,
-                &started,
-                ManagementUnknownReasonV1::UnclassifiedEffect,
-            )
-            .map_err(|_| "Cannot verify the save outcome or management effect. Do not rerun")?;
-        return Err("Decision save outcome is unknown. No automatic retry will occur".into());
-    }
-    effects
-        .complete_started(
-            &lease,
-            &started,
-            ManagementEffectHashV1::digest(b"decision append durably acknowledged"),
-        )
-        .map_err(|_| "Recording failed after saving. Do not rerun")?;
-    Ok(vec![Line::from(
-        "Decision saved. This is a historical record, not current approval.",
-    )])
-}
-
 impl WorkspaceCommands {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn decided<B: Backend, R: KeyReader>(
@@ -156,7 +56,7 @@ impl WorkspaceCommands {
         if workspace.project_root() != self.source {
             return Err("Storage location does not match the startup target folder".into());
         }
-        decided(text, at, terminal, reader, workspace, effects, has_pending)
+        crate::local_actions::decided(text, at, terminal, reader, workspace, effects, has_pending)
     }
 }
 

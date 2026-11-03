@@ -133,6 +133,25 @@ pub(super) async fn dispatch<B: Backend, R: KeyReader>(
                 },
             )
         }
+        // C35. Linux enters through `WorkspaceCommands` in the terminal loop,
+        // which also pins the startup folder. The save itself is the same.
+        #[cfg(not(target_os = "linux"))]
+        slash::Action::Decided(request) if request.starts_with("add ") => Some(
+            match crate::local_actions::decided(
+                request.strip_prefix("add ").unwrap_or_default(),
+                &crate::now_millis().to_string(),
+                terminal,
+                reader,
+                workspace,
+                effects,
+                has_pending,
+            ) {
+                Ok(lines) => {
+                    CommandDispatchResult::success(lines, "Decision record result displayed")
+                }
+                Err(error) => CommandDispatchResult::error(error),
+            },
+        ),
         slash::Action::Mcp(request) if request.split_whitespace().next() != Some("prompt") => Some(
             match mcp_commands::handle(
                 request,
@@ -166,5 +185,106 @@ pub(super) async fn dispatch<B: Backend, R: KeyReader>(
             },
         ),
         _ => None,
+    }
+}
+
+#[cfg(all(test, not(target_os = "linux")))]
+mod tests {
+    use super::*;
+    use polaris_provider::{CompletionRequest, CompletionResponse, ProviderError};
+    use ratatui::{backend::TestBackend, crossterm::event::KeyCode};
+    use std::os::unix::fs::PermissionsExt;
+
+    struct NoProvider;
+    #[async_trait::async_trait]
+    impl Provider for NoProvider {
+        async fn complete(
+            &self,
+            _: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            panic!("decision commands never call a provider")
+        }
+    }
+
+    struct Key(KeyCode);
+    impl KeyReader for Key {
+        fn read_key(&mut self) -> std::io::Result<KeyCode> {
+            Ok(self.0)
+        }
+    }
+
+    /// C35 on a platform whose terminal loop has no `WorkspaceCommands`: the
+    /// dispatcher claims `/decided add <statement>` and saves exactly the text
+    /// after the first `add `. The bare and `list` forms stay with the display.
+    #[tokio::test]
+    async fn decided_add_is_claimed_and_saves_the_statement_after_the_first_add() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let project = root.join("project");
+        let state = root.join("state");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&state).unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let workspace = WorkspaceOwner::open(
+            &project,
+            &state.join("rewind-workspace"),
+            Default::default(),
+        )
+        .unwrap();
+        let lease = workspace.try_mutation().unwrap();
+        let effects = ManagementEffectStoreV1::open_at_state_dir(&project, &state, &lease).unwrap();
+        drop(lease);
+        let initial =
+            SavedSessionSettingsV1::new("fake".into(), "model".into(), "auto".into()).unwrap();
+        let terminal = RefCell::new(Terminal::new(TestBackend::new(100, 30)).unwrap());
+        let mut session = Session::new();
+        let mut dispatch_line = async |line: &str, key: KeyCode, pending: bool| {
+            let action = slash::parse(line).expect("a slash command");
+            dispatch(
+                &action,
+                &terminal,
+                &mut Key(key),
+                &mut session,
+                (&initial, &NoProvider, None),
+                (&workspace, &effects),
+                (&project, &state),
+                None,
+                (false, ApprovalPolicy::OnRequest),
+                pending,
+            )
+            .await
+        };
+
+        let saved = dispatch_line(
+            "/decided add add retries to fetch",
+            KeyCode::Char('y'),
+            false,
+        )
+        .await
+        .expect("the dispatcher claims /decided add");
+        assert!(matches!(saved.status, Status::Notice(_)));
+        assert!(saved.lines[0].to_string().contains("Decision saved"));
+        let entries = polaris_core::decisions::load(&project);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].what, "add retries to fetch");
+
+        let declined = dispatch_line("/decided add not recorded", KeyCode::Esc, false)
+            .await
+            .expect("a declined save is still claimed");
+        assert!(declined.lines[0].to_string().contains("cancelled"));
+        let queued = dispatch_line("/decided add queued", KeyCode::Char('y'), true)
+            .await
+            .expect("a queued-input refusal is still claimed");
+        assert!(matches!(queued.status, Status::Error(_)));
+        assert_eq!(polaris_core::decisions::load(&project).len(), 1);
+
+        for line in ["/decided", "/decided list", "/decided add"] {
+            assert!(
+                dispatch_line(line, KeyCode::Char('y'), false)
+                    .await
+                    .is_none(),
+                "{line} stays with the display path"
+            );
+        }
     }
 }

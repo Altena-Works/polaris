@@ -41,14 +41,16 @@ profileは`node`・`nextjs`・`react`・`vue`・`svelte`・`astro`・`nuxt`・`a
 
 | コマンド | 役割 | 主な出力 |
 | --- | --- | --- |
-| `/help`、`/` | 利用できるコマンドを調べる。 | `commands:`に続くコマンド名と説明の一覧。 |
+| `/help`、`/` | 利用できるコマンドを調べる。 | `commands:`に続くコマンド名と説明の一覧。一覧と`/`の候補に載るのは、今のOSで経路が接続されているコマンドだけ（macOSでは`/setting`と`/apply`を載せない）。 |
 | `/status` | 現在の設定、利用条件、使用量、workflow、管理状態を確認する。モデルへの送信や接続確認は行わない。 | アカウント・利用条件・usage/workflow・可用性・管理診断を項目ごとに表示。対話ID、保存済みログイン状態・使用登録、provider/model/effort、承認・sandbox、tokens、phase/skills、未確認事項、audit、CAT等。 |
-| `/doctor` | ローカルの認証設定の有無、保存先、sandbox、指示ファイル、復旧状態を診断する。 | 認証ファイル・環境キーの存在、provider/model、状態保存先、AGENTS到達量、MCP・CAT・巻き戻し・管理診断。認証値は表示しない。 |
+| `/doctor` | 設定済み（Configured）・利用可能（Available）・観測済み（Observed）を分けて診断する。認証・モデル・MCPには接続しない。 | `Configured:`にprovider/model、起動時のsandboxと承認方針、外部MCPの上限。`Available:`に認証ファイル・環境キーの有無、provider解決（`POLARIS_PROVIDER`の明示、なければ次回起動時の既定）、read-onlyとworkspace-writeそれぞれのsandboxの可否、容量の観測（物理メモリ。統合メモリの機種では容量帯の目安も出る）、状態保存先、AGENTS到達量。`Observed:`は接続をしていない旨だけ。続けてMCP・CAT・巻き戻し・管理診断。認証値は表示しない。 |
 | `/pwd` | 現在のproject rootを確認する。 | 作業ディレクトリの絶対パス。 |
 | `/diff` | 未コミットの変更を見る。 | `diff:`に続く未stage・stage済みの差分。未追跡ファイルは`?? <path>`で名前だけを表示。最大200行、変更なしなら`(no changes)`。 |
 | `/skills` | 検出されたskillを閲覧する。 | 名前・説明・探索元を一覧表示。↑↓で選び、Enter/Escで閉じる。選択による有効化は行わない。 |
 
 `/status`のtokensは観測済みの使用量であり、アカウントの残り利用枠ではない。認証・モデル・MCPの接続や、capacityの空きを確認済みという意味でもない。
+
+`/doctor`の`Available:`は手元のファイルとホストを読んだ結果で、接続の成功を意味しない。sandboxの可否は、その方式の方針を組み立てられるかの確認であり、実行の保証ではない。容量の観測は物理メモリの読取りで、モデルを動かせるかの判定ではない。`Configured:`は`Available:`の結果で変わらず、`Observed:`は接続を行うまで未検証のままである。CLIの`polaris doctor`にあるsandboxの可否・provider解決・容量の観測は、TUIでは`Available:`に出る。provider解決は、登録済みアカウントがあれば起動時と同じくそれもChatGPT認証として数える。
 
 ### モデル・承認・workflow
 
@@ -85,6 +87,8 @@ profileは`node`・`nextjs`・`react`・`vue`・`svelte`・`astro`・`nuxt`・`a
 `/resume`で会話を開いても、現在の作業ファイルと保存状態が一致しない場合は閲覧のみになる。`/new`・`/fork`・`/resume`は別の操作であり、IDは`/session current`で確認できる。
 
 履歴の圧縮は自動で行い、手動で起動するコマンドとオプションはない。閾値の決め方は[コンテキスト効率化](context-efficiency.md#圧縮と履歴保存)にある。
+
+保存済みのv2会話では、入力欄の未送信の下書きを、入力が約0.35秒止まるたびに会話へ保存する（空白だけなら消去）。起動時と、`/resume`・`/new`・`/fork`で会話を切り替えたときに、開いた会話の下書きを入力欄へ戻す。端末を閉じるなど終了処理を通らない場合も、直前の保存までは残る。`/`で始まる行は下書きとして保存せず、直前の下書きを保つ。`/mcp secret`の行は保存しない。ほかのプロセスがprojectを使用中、または未解決の管理操作がある間は保存を待ち、約0.35秒おきに再試行する。保存先に障害があると`Cannot save the draft: ...`を表示して終了する。legacy会話には下書きの保存がない。
 
 ログイン画面・ダイアログ・実行中も、可視文字をドラッグして離すと選択範囲を直接clipboardへコピーする。非表示の秘密値は対象外で、追加の確認画面は表示しない。リンクはCtrl-click、端末が通知する場合はCmd-clickで開く。通常のクリック・ドラッグでは開かない。Terminal.appのCmd＋単クリックは未対応であり、Ctrl-clickを使う。
 
@@ -189,7 +193,7 @@ TUIの`/account`は廃止し、上記の3入口へ集約した。CLIの`polaris 
 | `/memory forget <session>` | 記憶・vector・検証済み保管原文を削除し、再取り込みを禁止する。 | 確認後、削除した旨と件数、操作ID、revision。巻き戻しでは取り消せない。 |
 | `/memory reconcile <操作ID>` | 保存receiptを照合し、変更結果を確認する。 | 照合結果。同じ変更の再実行はしない。 |
 | `/decided`、`/decided list` | 保存された決定事項を読む。 | 件数、過去記録であり現在の承認ではない旨、時刻と文章。最新100件、空なら`No records`。 |
-| `/decided add <文章>` | 決定事項を追記する。 | **TUIはLinuxのみ対応**。確認後の保存通知。macOSでは拒否するため、必要ならCLIの`polaris decided add`を使う。 |
+| `/decided add <文章>` | 決定事項を追記する。macOSとLinuxの両方で使える。 | 文章を示した確認画面の後、`.polaris/decisions.csv`へ追記して`Decision saved. This is a historical record, not current approval.`。`add `の直後の文章を加工せずに保存する（`add `で始まる文章や、引用符・カンマ・改行を含む文章も同じ）。取消時は`Decision save cancelled`で何も書かない。入力待ちがあるとき、または文章が空・8KiB超・制御文字入りのときは拒否する。追記の結果が不明になったときは再試行せず、未解決の管理操作として残る。 |
 
 `/memory configure ...`は会話設定の節を参照。記憶の変更では`記録の変更を保存しました。記録<n>件、v2索引削除<n>件。`等と`操作ID: <ID> / revision <前> → <後>`を表示する。埋め込み処理は設定済みloopback APIへ接続する。
 
@@ -198,8 +202,8 @@ TUIの`/account`は廃止し、上記の3入口へ集約した。CLIの`polaris 
 | コマンド | 役割 | 主な出力・現在の制限 |
 | --- | --- | --- |
 | `/compare <folder1> \| <folder2> [\| ...]` | 2〜8フォルダを名前とサイズで比較する。 | `<path1> / <path2>: 類似度 <値>、共通 <n>件`と提案。本文の読取・移動・削除は行わない。 |
-| `/sync`、`/sync status` | 共有の参加・合意・反映・衝突・復旧状態を見る。 | 参加中/未参加、revision、解消待ち、未完了操作、復旧用控え等。 |
-| `/sync join <remote> <share-ID> <invite-ID> <expires-UNIX秒> [除外名...]` | TUIから共有への参加を要求する入口。 | **現状のTUI経路は未完成で、参加を確定できない**。結果を確定できない旨と`/sync`での確認案内。CLIのC08経路とは別。 |
+| `/sync`、`/sync status` | 共有の参加・合意・反映・衝突・復旧状態を、この端末の手元の記録から見る。remoteには接続しない。 | 先頭の`Local record (read from this device only; the remote was not contacted)`に続けて、参加中/未参加、revision、解消待ち、未完了操作、復旧用控え等。表示は全て手元の記録で、remoteの現在の状態ではない。 |
+| `/sync join <remote> <share-ID> <invite-ID> <expires-UNIX秒> [除外名...]` | TUIから共有への参加を要求する入口。 | **現状のTUI経路は未完成で、参加を確定できない**。結果を確定できない旨と`/sync`での確認案内。CLIのC08経路とは別。`/help`と候補の説明にもjoinは載せない。 |
 | `/sync pull` | 既存の参加情報を使いremoteから受信・統合する。 | `受け取りました: <n>件、解消待ち<m>件。sourceへは未反映です。`。 |
 | `/sync leave` | この端末の参加を解除する。 | `This device left the share`。 |
 | `/sync apply` | 確認後、同期内容をsourceへ書き込む。 | `<n>件を反映しました。復旧用の控え: <path>`。 |
@@ -210,13 +214,11 @@ TUIの`/account`は廃止し、上記の3入口へ集約した。CLIの`polaris 
 
 ### Linux限定のTUI操作
 
-`/setting`はmacOSでも候補に出るが、実行handlerは接続されていない。macOSでは`This operation requires an active terminal and storage owner`と表示する。CLIに同名の機能がある場合も、TUI側の対応とは別である。
+`/setting`と`/apply`は、handlerがLinuxにしか接続されていない。macOSでは`/help`にも`/`の候補にも出ず、入力しても`unknown command`になる。macOSで`.gitignore`の規則を整えるときは、シェルで`polaris setting git`を使う。
 
 | コマンド | Linuxでの役割 | 主な出力 |
 | --- | --- | --- |
 | `/setting git` | `.gitignore`追加規則を確認し、保存する。 | 候補の確認と`Already added: <rule>`。 |
-
-`/apply`はLinuxだけの候補で、macOSでは候補にも出ない。
 
 | コマンド | Linuxでの役割 | 主な出力 |
 | --- | --- | --- |

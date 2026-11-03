@@ -25,6 +25,11 @@ macOS arm64のTUIを配布対象として準備する。GUIと他OSのソース�
 - 実装の流れと配布範囲を示すシステム構成図、コマンド参照、暫定リリース資料を整備する。
 - 履歴の圧縮を自動だけにする。TUIの`/compact`と`/compact threshold`、操作一覧の「Compact conversation」、CLIの`--compact-at`、保存会話の`compact_threshold`を、すべての履歴方式で廃止する。`/compact`と入力しても何も実行せず、圧縮は自動であると1行で答える。`--compact-at`は理由を示すエラーで終了する。保存会話に残る`compact_threshold`は読み込みで無視し、書き戻すときに落とす。
 - 自動圧縮の閾値は、モデルの文脈の長さの70%（端数は切り捨て）とする。長さが分からないモデルは従来どおり200,000とする。文脈の長さを引く公表値の表はまだ空で、手元のモデルは`config.toml`の`context_window`に長さを書いて渡す（クラウドのモデルには効かない）。圧縮するのはlegacyの履歴だけで、turn-onlyでは自動圧縮も止める。
+- macOSのTUIで`/decided add <文章>`を使えるようにする。文章は加工せずにそのまま記録する。
+- macOSのTUIでも、入力中の下書きを手を止めて350ミリ秒後に自動で保存する。
+- TUIの`/doctor`を、設定（Configured）・利用可能（Available）・観測（Observed）の3区分で示す。利用可能の区分に、read-onlyとworkspace-writeのsandboxの可否、providerの解決、判定の容量を足す。
+- TUIの`/sync`と`/sync status`の先頭に、表示がこの端末の記録であり、remoteを観測していないことを示す行を足す。
+- macOSのTUIの一覧と`/help`から、macOSでは動かない`/setting`を外す。`/sync`の説明から、TUIでは参加を確定できない`join`を外す。
 
 ### 修正
 

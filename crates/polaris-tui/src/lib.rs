@@ -432,6 +432,22 @@ impl approver::KeyReader for LinuxSignalAwareKeyReader {
     }
 }
 
+/// How often an idle composer wakes to let the draft autosave run.
+#[cfg(all(unix, not(target_os = "linux")))]
+const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Waits for the next terminal event. `tick` runs about every
+/// `IDLE_POLL_INTERVAL` while none has arrived and once more when one has;
+/// its `true` means an event is ready to read.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn read_idle_event_with(
+    mut tick: impl FnMut(Duration) -> std::io::Result<bool>,
+    read: impl FnOnce() -> std::io::Result<ratatui::crossterm::event::Event>,
+) -> std::io::Result<ratatui::crossterm::event::Event> {
+    while !tick(IDLE_POLL_INTERVAL)? {}
+    read()
+}
+
 #[cfg(target_os = "linux")]
 fn linux_read_idle_event_with(
     mut poll: impl FnMut(Duration) -> std::io::Result<bool>,
@@ -3744,11 +3760,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
     #[cfg(unix)]
     let mut refresh_saved_settings = true;
     #[cfg(unix)]
-    let mut draft_candidate = String::new();
-    #[cfg(unix)]
-    let mut draft_saved_text = String::new();
-    #[cfg(target_os = "linux")]
-    let mut draft_changed_at = Instant::now();
+    let mut draft_autosave = draft::DraftAutosave::new();
     let mut next_max_turns = args.max_turns;
     #[cfg(unix)]
     let mut last_submission_was_local = false;
@@ -3883,10 +3895,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                         input_buffer: &mut input_buffer,
                         input_cursor: &mut input_cursor,
                         input_history: &mut input_history,
-                        saved_text: &mut draft_saved_text,
-                        candidate: &mut draft_candidate,
-                        #[cfg(target_os = "linux")]
-                        changed_at: &mut draft_changed_at,
+                        autosave: &mut draft_autosave,
                     },
                 );
             }
@@ -4065,45 +4074,44 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                     status = Status::Notice("File link inserted".into());
                     continue 'outer;
                 }
-                #[cfg(target_os = "linux")]
-                let candidate = match linux_read_idle_event_with(
-                    |duration| {
-                        let ready = ratatui::crossterm::event::poll(duration)?;
-                        if session.persistence.is_some() {
-                            let pending = input_history.pending_draft(&input_buffer);
-                            if pending != draft_candidate {
-                                draft_candidate = pending.to_owned();
-                                draft_changed_at = Instant::now();
-                            }
-                            if !ready
-                                && draft_candidate != draft_saved_text
-                                && draft_changed_at.elapsed() >= Duration::from_millis(350)
-                            {
-                                if let Err(error) = draft::save(
-                                    &session,
-                                    &initial_saved_settings,
-                                    rewind_workspace.as_ref().expect("startup owner"),
-                                    &management_effects,
-                                    &draft_candidate,
-                                ) {
-                                    fatal_message = Some(format!("Cannot save the draft: {error}"));
-                                    return Err(std::io::Error::other(error));
-                                }
-                                draft_saved_text = draft_candidate.clone();
-                            }
+                // The idle tick stores the unsent draft once the composer has
+                // been quiet, so a closed terminal does not lose it.
+                #[cfg(unix)]
+                let candidate = {
+                    let tick = |wait: Duration| -> std::io::Result<bool> {
+                        let ready = ratatui::crossterm::event::poll(wait)?;
+                        if let Err(error) = draft_autosave.tick(
+                            (
+                                &session,
+                                &initial_saved_settings,
+                                rewind_workspace.as_ref().expect("startup owner"),
+                                &management_effects,
+                            ),
+                            input_history.pending_draft(&input_buffer),
+                            ready,
+                        ) {
+                            fatal_message = Some(format!("Cannot save the draft: {error}"));
+                            return Err(std::io::Error::other(error));
                         }
                         Ok(ready)
-                    },
-                    ratatui::crossterm::event::read,
-                    || signal::pending_linux_process_shutdown().is_some(),
-                ) {
-                    Ok(Some(event)) => event,
-                    Ok(None) | Err(_) if linux_pending_exit_code().is_some() => {
-                        break 'outer linux_pending_exit_code().unwrap_or(ExitCode::FAILURE);
+                    };
+                    #[cfg(target_os = "linux")]
+                    let read =
+                        linux_read_idle_event_with(tick, ratatui::crossterm::event::read, || {
+                            signal::pending_linux_process_shutdown().is_some()
+                        });
+                    #[cfg(not(target_os = "linux"))]
+                    let read = read_idle_event_with(tick, crate::terminal::read_event).map(Some);
+                    match read {
+                        Ok(Some(event)) => event,
+                        #[cfg(target_os = "linux")]
+                        Ok(None) | Err(_) if linux_pending_exit_code().is_some() => {
+                            break 'outer linux_pending_exit_code().unwrap_or(ExitCode::FAILURE);
+                        }
+                        Ok(None) | Err(_) => break 'outer ExitCode::FAILURE,
                     }
-                    Ok(None) | Err(_) => break 'outer ExitCode::FAILURE,
                 };
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(not(unix))]
                 let candidate = match crate::terminal::read_event() {
                     Ok(e) => e,
                     Err(_) => break 'outer ExitCode::FAILURE,
@@ -4549,7 +4557,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                                 .map_err(Clone::clone)
                                 .and_then(|owner| {
                                     owner.decided(
-                                        request.trim_start_matches("add "),
+                                        request.strip_prefix("add ").unwrap_or_default(),
                                         &format!("{}", now_millis()),
                                         &terminal,
                                         &mut key_reader,
@@ -5462,7 +5470,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                             .map_err(Clone::clone)
                             .and_then(|owner| {
                                 owner.decided(
-                                    request.trim_start_matches("add "),
+                                    request.strip_prefix("add ").unwrap_or_default(),
                                     &format!("{}", now_millis()),
                                     &terminal,
                                     &mut key_reader,
@@ -6172,8 +6180,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                 status = Status::Error(format!("Cannot save draft send preparation: {error}"));
                 continue;
             }
-            draft_saved_text.clear();
-            draft_candidate.clear();
+            draft_autosave.sent();
         }
         #[cfg(unix)]
         let rewind_pre_manifest_id = if session.persistence.is_some() {
@@ -8736,7 +8743,7 @@ fn sync_action(
         let classification = participation::read(&state).map_err(|e| e.to_string())?;
         let held = classification.participation();
         return Ok(format!(
-            "Shared apply: {}\nAgreed revision: {}\nApplied revision: {}\nUnresolved: {}\nIncomplete: {}\nManagement operation: {}\nRecovery backup: {}\n/sync apply · /sync recover <operation-id>",
+            "Local record (read from this device only; the remote was not contacted)\nShared apply: {}\nAgreed revision: {}\nApplied revision: {}\nUnresolved: {}\nIncomplete: {}\nManagement operation: {}\nRecovery backup: {}\n/sync apply · /sync recover <operation-id>",
             if held.is_some() {
                 "participating"
             } else {
@@ -11119,6 +11126,184 @@ fn rewind_candidate_diagnostic(
     lines
 }
 
+/// What a diagnostic can read without contacting anything: files and the host.
+struct DoctorFacts {
+    chatgpt_file: bool,
+    api_key_file: bool,
+    api_key_env: bool,
+    provider_env: Option<String>,
+    /// An API key a launch would find (environment or a readable file).
+    openai_key: bool,
+    /// A ChatGPT credential file or a registered account a launch would find.
+    codex_credentials: bool,
+    /// Whether a policy for each mode can be built for this project.
+    sandboxes: Vec<(&'static str, Result<String, String>)>,
+    capacity: Vec<String>,
+    state: String,
+    delivered: usize,
+}
+
+impl DoctorFacts {
+    fn read(cwd: &std::path::Path) -> Self {
+        use polaris_sandbox::SandboxMode;
+        let chatgpt_file = polaris_auth::store::default_path()
+            .ok()
+            .is_some_and(|path| path.is_file());
+        let key_path = polaris_auth::api_key::default_path().ok();
+        let api_key_file = key_path.as_deref().is_some_and(|path| path.is_file());
+        let api_key_env = std::env::var_os("POLARIS_API_KEY").is_some();
+        let openai_key = api_key_env
+            || key_path
+                .and_then(|path| polaris_auth::api_key::load_from(&path).ok().flatten())
+                .is_some();
+        let registered = match polaris_auth::accounts::store::AccountStore::read_only_snapshot() {
+            Ok(snapshot) => !snapshot.accounts.is_empty(),
+            Err(polaris_auth::AuthError::RecoveryRequired) => true,
+            Err(_) => false,
+        };
+        let project_root = polaris_core::project::resolve_root(cwd);
+        let storage_root = std::env::var_os("POLARIS_DATA_DIR")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".polaris"))
+            });
+        let state = match storage_root {
+            Some(root) if root.is_absolute() => {
+                let path = root
+                    .join("state")
+                    .join(polaris_core::project::project_id(&project_root));
+                format!(
+                    "{} ({})",
+                    path.display(),
+                    if path.is_dir() {
+                        "present"
+                    } else {
+                        "not created"
+                    }
+                )
+            }
+            _ => "unavailable (cannot locate storage)".to_owned(),
+        };
+        Self {
+            chatgpt_file,
+            api_key_file,
+            api_key_env,
+            provider_env: std::env::var("POLARIS_PROVIDER").ok(),
+            openai_key,
+            codex_credentials: chatgpt_file || (!openai_key && registered),
+            sandboxes: [
+                ("read-only", SandboxMode::ReadOnly),
+                ("workspace-write", SandboxMode::WorkspaceWrite),
+            ]
+            .map(|(label, mode)| (label, sandbox_availability(cwd, mode)))
+            .into(),
+            capacity: polaris_core::decision_capacity::observation::diagnostic_lines(
+                &polaris_core::decision_capacity::observation::host_memory(),
+            ),
+            state,
+            delivered: polaris_core::constitution::reach(&project_root)
+                .iter()
+                .map(|rule| rule.delivered)
+                .sum(),
+        }
+    }
+}
+
+/// Whether a policy for `mode` can be built for this project, with the same
+/// writable roots a run gets (`build_sandbox_policy` in polaris-cli, which
+/// polaris-tui cannot depend on). Building the policy does not run anything.
+fn sandbox_availability(
+    cwd: &std::path::Path,
+    mode: polaris_sandbox::SandboxMode,
+) -> Result<String, String> {
+    let mut roots = Vec::new();
+    if mode == polaris_sandbox::SandboxMode::WorkspaceWrite {
+        roots.push(polaris_core::project::resolve_root(cwd));
+        roots.extend(
+            std::env::var_os("TMPDIR")
+                .map(std::path::PathBuf::from)
+                .filter(|path| path.is_absolute() && path.is_dir()),
+        );
+    }
+    polaris_sandbox::SandboxPolicy::new(mode, &roots)
+        .map(|policy| policy.describe())
+        .map_err(|error| error.to_string())
+}
+
+/// What `polaris` would pick as its provider on the next launch, by the rule
+/// of `default_provider_name` in polaris-cli.
+fn provider_resolution(
+    explicit: Option<&str>,
+    openai_key: bool,
+    codex_credentials: bool,
+) -> String {
+    match explicit {
+        Some(name) => format!("POLARIS_PROVIDER is set explicitly: {name}"),
+        None => format!(
+            "POLARIS_PROVIDER is not set; a new launch would default to {}",
+            if !openai_key && codex_credentials {
+                "codex"
+            } else {
+                "openai"
+            }
+        ),
+    }
+}
+
+/// `/doctor` keeps three kinds of statement apart. Configured is what this
+/// session was started with. Available is what local files and the host show
+/// could be used. Observed is what was actually seen on a live connection.
+fn doctor_report(
+    (provider_name, model_name): (&str, &str),
+    sandbox: &polaris_sandbox::SandboxPolicy,
+    approval: polaris_core::approval::ApprovalPolicy,
+    mcp_external: bool,
+    facts: &DoctorFacts,
+) -> Vec<String> {
+    let mut lines = vec![
+        "Diagnostics (read-only)".to_owned(),
+        format!("Configured: provider={provider_name}, model={model_name}"),
+        format!(
+            "Configured: sandbox={}, approval={approval:?}",
+            sandbox.describe()
+        ),
+        format!("Configured: external MCP={mcp_external}; inspect individual servers with /mcp"),
+        format!(
+            "Available: ChatGPT credential file={}, API key file={}, environment API key={}",
+            facts.chatgpt_file, facts.api_key_file, facts.api_key_env
+        ),
+        format!(
+            "Available: provider resolution: {}",
+            provider_resolution(
+                facts.provider_env.as_deref(),
+                facts.openai_key,
+                facts.codex_credentials
+            )
+        ),
+    ];
+    for (mode, availability) in &facts.sandboxes {
+        lines.push(match availability {
+            Ok(described) => format!("Available: sandbox {mode}: available ({described})"),
+            Err(error) => format!("Available: sandbox {mode}: NOT available ({error})"),
+        });
+    }
+    lines.push(format!(
+        "Available: state={}; delivered always-on instruction lines={}",
+        facts.state, facts.delivered
+    ));
+    lines.extend(
+        facts
+            .capacity
+            .iter()
+            .map(|line| format!("Available: decision capacity: {line}")),
+    );
+    lines.push(
+        "Observed: nothing. This diagnostic does not contact authentication, model, or MCP endpoints. Connection success and actual resource availability are unverified."
+            .to_owned(),
+    );
+    lines
+}
+
 fn doctor_lines(
     provider_name: &str,
     model_name: &str,
@@ -11127,54 +11312,13 @@ fn doctor_lines(
     approval: polaris_core::approval::ApprovalPolicy,
     mcp_external: bool,
 ) -> Vec<ratatui::text::Line<'static>> {
-    let saved_chatgpt = polaris_auth::store::default_path()
-        .ok()
-        .is_some_and(|path| path.is_file());
-    let saved_api_key = polaris_auth::api_key::default_path()
-        .ok()
-        .is_some_and(|path| path.is_file());
-    let env_api_key = std::env::var_os("POLARIS_API_KEY").is_some();
-    let project_root = polaris_core::project::resolve_root(cwd);
-    let storage_root = std::env::var_os("POLARIS_DATA_DIR")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".polaris"))
-        });
-    let state = match storage_root {
-        Some(root) if root.is_absolute() => {
-            let path = root
-                .join("state")
-                .join(polaris_core::project::project_id(&project_root));
-            format!(
-                "{} ({})",
-                path.display(),
-                if path.is_dir() {
-                    "present"
-                } else {
-                    "not created"
-                }
-            )
-        }
-        _ => "unavailable (cannot locate storage)".to_owned(),
-    };
-    let rules = polaris_core::constitution::reach(&project_root);
-    let delivered = rules.iter().map(|rule| rule.delivered).sum::<usize>();
-    [
-        "Diagnostics (read-only)".to_owned(),
-        format!("Configuration: provider={provider_name}, model={model_name}"),
-        format!(
-            "Configuration: ChatGPT credential file={}, API key file={}, environment API key={}",
-            saved_chatgpt, saved_api_key, env_api_key
-        ),
-        format!(
-            "Conditions: sandbox={}, approval={approval:?}",
-            sandbox.describe()
-        ),
-        format!("Conditions: external MCP={mcp_external}; inspect individual servers with /mcp"),
-        format!("Conditions: state={state}; delivered always-on instruction lines={delivered}"),
-        "Observation: this diagnostic does not contact authentication, model, or MCP endpoints. Connection success and actual resource availability are unverified."
-            .to_owned(),
-    ]
+    doctor_report(
+        (provider_name, model_name),
+        sandbox,
+        approval,
+        mcp_external,
+        &DoctorFacts::read(cwd),
+    )
     .into_iter()
     .map(|line| ratatui::text::Line::from(render::sanitize(&line).escape_debug().to_string()))
     .collect()
@@ -11617,6 +11761,8 @@ fn management_clearance_error(
     }
 }
 
+const OWNER_REQUIRED: &str = "This operation requires an active terminal and storage owner";
+
 #[allow(clippy::too_many_arguments)]
 fn apply_slash_action(
     action: slash::Action,
@@ -11646,11 +11792,13 @@ fn apply_slash_action(
     match action {
         slash::Action::SessionControl(_)
         | slash::Action::Environment(_)
-        | slash::Action::WorkspaceControl(_)
         | slash::Action::RuntimeControl(_) => {
-            *status = Status::Error(
-                "This operation requires an active terminal and storage owner".into(),
-            );
+            *status = Status::Error(OWNER_REQUIRED.into());
+            SlashOutcome::Continue
+        }
+        #[cfg(target_os = "linux")]
+        slash::Action::WorkspaceControl(_) => {
+            *status = Status::Error(OWNER_REQUIRED.into());
             SlashOutcome::Continue
         }
         slash::Action::Quit => SlashOutcome::Quit,
@@ -11692,7 +11840,7 @@ fn apply_slash_action(
         }
         slash::Action::Decided(requested) => {
             if !requested.is_empty() && requested != "list" {
-                *status = Status::Error("/decided currently supports only list".into());
+                *status = Status::Error("Usage: /decided [list] | /decided add <statement>".into());
                 return SlashOutcome::Continue;
             }
             match decided_read_lines(cwd) {

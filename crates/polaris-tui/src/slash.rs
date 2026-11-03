@@ -11,6 +11,11 @@
 //! switches the model through `Provider::set_model` on the shared provider. The
 //! interactive picker deliberately leaves reasoning effort to automatic
 //! routing; fixed noninteractive measurements can still use `--effort`.
+//!
+//! A command whose handler exists on one platform only carries the same `cfg`
+//! on its `COMMANDS` entry, its `Action` variant, and its `parse` arm. Where the
+//! handler is absent the command is not listed and is not recognized, so `/help`
+//! and the popup never offer a route that is not there.
 
 pub struct SlashCommand {
     pub name: &'static str,
@@ -22,6 +27,7 @@ pub const COMMANDS: &[SlashCommand] = &[
         name: "env",
         description: "plan or provision a fixed development environment",
     },
+    #[cfg(target_os = "linux")]
     SlashCommand {
         name: "setting",
         description: "inspect or confirm Git ignore configuration",
@@ -101,7 +107,7 @@ pub const COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "sync",
-        description: "join, receive, leave, inspect, apply, push, or reconcile shared changes",
+        description: "receive, leave, inspect, apply, push, or reconcile shared changes",
     },
     SlashCommand {
         name: "phase",
@@ -200,6 +206,7 @@ pub enum Action {
     Account(String),
     Memory(String),
     SessionControl(String),
+    #[cfg(target_os = "linux")]
     WorkspaceControl(String),
     RuntimeControl(String),
     Decided(String),
@@ -339,7 +346,9 @@ impl Action {
                     "session" | "session current" | "session history" | "goal" | "goal current"
                 ) && !value.starts_with("history")
             }
-            Self::WorkspaceControl(_) | Self::RuntimeControl(_) => false,
+            #[cfg(target_os = "linux")]
+            Self::WorkspaceControl(_) => false,
+            Self::RuntimeControl(_) => false,
             Self::Sync(value) => {
                 // C10 owns composite admission and explicit recovery exceptions.
                 if value.split_whitespace().next() == Some("push") {
@@ -428,6 +437,7 @@ pub fn parse(line: &str) -> Option<Action> {
         "input" | "instruction" | "subagents" | "roles" | "run" | "sandbox" => {
             Action::RuntimeControl(format!("{name} {extra}").trim_end().to_owned())
         }
+        #[cfg(target_os = "linux")]
         "setting" => Action::WorkspaceControl(format!("{name} {extra}").trim_end().to_owned()),
         "decided" => Action::Decided(extra),
         "compare" => Action::Compare(extra),
@@ -650,6 +660,30 @@ mod tests {
                 "{} parses as Unknown",
                 c.name
             );
+        }
+    }
+
+    /// T01: these handlers are compiled on Linux only. Anywhere else the
+    /// command must be neither listed nor recognized; otherwise `/help` and the
+    /// popup offer a route that ends in the unconnected fallback.
+    #[test]
+    fn linux_only_commands_are_listed_and_recognized_only_on_linux() {
+        for name in ["setting", "apply"] {
+            let on_linux = cfg!(target_os = "linux");
+            let listed = COMMANDS.iter().any(|c| c.name == name);
+            let offered = !matching(name).is_empty();
+            let recognized = !matches!(parse(&format!("/{name}")), Some(Action::Unknown(_)));
+            assert_eq!(listed, on_linux, "/{name} listed");
+            assert_eq!(offered, on_linux, "/{name} offered by the popup");
+            assert_eq!(recognized, on_linux, "/{name} recognized");
+        }
+        // Commands with a handler on every platform are never gated away.
+        for name in ["decided", "doctor", "help", "sync"] {
+            assert_eq!(matching(name).len(), 1, "/{name} offered by the popup");
+            assert!(!matches!(
+                parse(&format!("/{name}")),
+                Some(Action::Unknown(_))
+            ));
         }
     }
 

@@ -136,6 +136,37 @@ fn linux_signal_tui_diff_result_is_suppressed_after_latch() {
     assert_eq!(lines[0].spans[0].content, "earlier output");
 }
 
+/// D17: the draft autosave rides on the idle tick, so the composer must wake
+/// repeatedly while no key has arrived instead of blocking in one read.
+#[cfg(all(unix, not(target_os = "linux")))]
+#[test]
+fn idle_reader_ticks_until_input_arrives_then_reads_once() {
+    use ratatui::crossterm::event::Event;
+
+    let mut waits = Vec::new();
+    let mut reads = 0;
+    let event = read_idle_event_with(
+        |wait| {
+            waits.push(wait);
+            Ok(waits.len() == 3)
+        },
+        || {
+            reads += 1;
+            Ok(Event::FocusGained)
+        },
+    )
+    .unwrap();
+    assert_eq!(event, Event::FocusGained);
+    assert_eq!(waits, [IDLE_POLL_INTERVAL; 3]);
+    assert_eq!(reads, 1);
+    let failed = read_idle_event_with(
+        |_| Err(std::io::Error::other("tick failed")),
+        || panic!("a failed tick must not read"),
+    )
+    .unwrap_err();
+    assert_eq!(failed.to_string(), "tick failed");
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn linux_signal_tui_inflight_shutdown_uses_existing_cleanup() {
@@ -2868,6 +2899,122 @@ fn m3b_sync_tui_join_pull_leave_and_denial() {
         participation::ParticipationReadV2::Missing
     ));
     assert_eq!(peer.head(), head);
+}
+
+/// C09: `/sync` and `/sync status` show what this device recorded. The first
+/// line must say so, because nothing on the screen was read from the remote.
+/// The same fixture shows why the command list does not offer `join`: the
+/// confirmed TUI join still cannot be completed.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn c09_sync_status_labels_the_local_record_and_join_is_not_offered() {
+    const CHILD: &str = "POLARIS_C09_SYNC_STATUS_CHILD";
+    const TEST: &str = "tests::c09_sync_status_labels_the_local_record_and_join_is_not_offered";
+    if std::env::var_os(CHILD).is_none() {
+        let home = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([TEST, "--exact", "--nocapture"])
+            .env(CHILD, "1")
+            .env("HOME", home.path())
+            .env_remove("POLARIS_DATA_DIR")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    use polaris_core::sync::{
+        participation,
+        share::{ShareLink, ShareManifest},
+    };
+    const LABEL: &str = "Local record (read from this device only; the remote was not contacted)";
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+    polaris_auth::protection::use_trusted_home(&home).unwrap();
+    let project = home.join("project");
+    std::fs::create_dir(&project).unwrap();
+    let state = polaris_core::project::state_dir(&project).unwrap();
+    let status = |request: &str| {
+        sync_action(&project, &state, request, false, |_| {
+            panic!("a read must not ask for confirmation")
+        })
+        .unwrap()
+    };
+
+    // Not participating: still a statement about this device only.
+    let alone = status("");
+    assert_eq!(alone.lines().next(), Some(LABEL), "{alone}");
+    assert!(alone.contains("Shared apply: not participating"), "{alone}");
+    assert_eq!(status("status"), alone);
+
+    // A confirmed TUI join is refused and records nothing.
+    let remote = home.join("remote-that-does-not-exist");
+    let link = ShareLink {
+        remote: format!("file://{}", remote.display()),
+        share_id: "share-id1".into(),
+        invitation_id: "invite-id1".into(),
+        expires_unix_seconds: u64::MAX,
+    };
+    let join = format!(
+        "join {} {} {} {}",
+        link.remote, link.share_id, link.invitation_id, link.expires_unix_seconds
+    );
+    let mut asked = false;
+    assert!(
+        sync_action(&project, &state, &join, false, |_| {
+            asked = true;
+            true
+        })
+        .is_err()
+    );
+    assert!(asked, "the join reaches its confirmation before it fails");
+    assert!(matches!(
+        participation::read(&state).unwrap(),
+        participation::ParticipationReadV2::Missing
+    ));
+    let sync_description = slash::COMMANDS
+        .iter()
+        .find(|command| command.name == "sync")
+        .unwrap()
+        .description;
+    assert!(!sync_description.contains("join"), "{sync_description}");
+
+    // Participating: every value is read from the stored record, and the
+    // remote (which does not exist) is never needed to show it.
+    participation::join(
+        &state,
+        link,
+        ShareManifest {
+            version: 1,
+            excluded: Vec::new(),
+        },
+        1,
+    )
+    .unwrap();
+    let mut held = participation::read(&state)
+        .unwrap()
+        .participation()
+        .unwrap()
+        .clone();
+    held.agreed_commit = Some("0123456789abcdef0123456789abcdef01234567".into());
+    held.applied_commit = Some("fedcba9876543210fedcba9876543210fedcba98".into());
+    held.unresolved = vec!["notes.txt".into()];
+    participation::write(&state, &held).unwrap();
+    let joined = status("");
+    assert_eq!(joined.lines().next(), Some(LABEL), "{joined}");
+    for expected in [
+        "Shared apply: participating",
+        "Agreed revision: 0123456789abcdef0123456789abcdef01234567",
+        "Applied revision: fedcba9876543210fedcba9876543210fedcba98",
+        "Unresolved: 1",
+        "Incomplete: none",
+    ] {
+        assert!(joined.contains(expected), "{expected}\n{joined}");
+    }
+    assert!(!remote.exists());
 }
 
 #[cfg(target_os = "linux")]
@@ -6419,6 +6566,186 @@ fn status_rows_align_labels_and_keep_values_when_wrapped() {
     assert!(escaped.contains("/tmp/audit\\nforged\\t"), "{escaped}");
 }
 
+fn doctor_facts(workspace_write: Result<String, String>) -> DoctorFacts {
+    DoctorFacts {
+        chatgpt_file: true,
+        api_key_file: false,
+        api_key_env: false,
+        provider_env: None,
+        openai_key: false,
+        codex_credentials: true,
+        sandboxes: vec![
+            ("read-only", Ok("read-only".into())),
+            ("workspace-write", workspace_write),
+        ],
+        capacity: vec![
+            "Memory: synthetic host".into(),
+            "Execution fit: not verified here".into(),
+        ],
+        state: "/synthetic/state (present)".into(),
+        delivered: 7,
+    }
+}
+
+/// C39: configured, available and observed are separate statements. Changing
+/// what is available never changes what is configured, and the observed part
+/// stays "nothing" however much is available.
+#[test]
+fn doctor_keeps_configured_available_and_observed_apart() {
+    let startup = SandboxPolicy::new(polaris_sandbox::SandboxMode::ReadOnly, &[]).unwrap();
+    let report = |approval, facts: &DoctorFacts| {
+        doctor_report(("openai", "gpt-5.4"), &startup, approval, true, facts)
+    };
+    let group = |lines: &[String], prefix: &str| -> Vec<String> {
+        lines
+            .iter()
+            .filter(|line| line.starts_with(prefix))
+            .cloned()
+            .collect()
+    };
+    let broken = report(
+        ApprovalPolicy::Never,
+        &doctor_facts(Err("writable root is missing".into())),
+    );
+    assert_eq!(broken[0], "Diagnostics (read-only)");
+    // Configured first, then available, then the single observed statement.
+    let rank = |line: &String| match line.split(':').next().unwrap() {
+        "Configured" => 0,
+        "Available" => 1,
+        "Observed" => 2,
+        other => panic!("unlabelled line: {other}"),
+    };
+    let ranks: Vec<_> = broken[1..].iter().map(rank).collect();
+    assert!(ranks.is_sorted(), "{broken:#?}");
+    assert_eq!(ranks.iter().filter(|rank| **rank == 0).count(), 3);
+    assert_eq!(ranks.iter().filter(|rank| **rank == 2).count(), 1);
+    assert_eq!(ranks.last(), Some(&2));
+
+    let configured = group(&broken, "Configured:").join("\n");
+    for expected in [
+        "provider=openai, model=gpt-5.4",
+        "sandbox=read-only, approval=Never",
+        "external MCP=true",
+    ] {
+        assert!(configured.contains(expected), "{configured}");
+    }
+    for availability in ["credential", "resolution", "capacity", "available"] {
+        assert!(
+            !configured.to_lowercase().contains(availability),
+            "configured part states {availability}: {configured}"
+        );
+    }
+
+    let available = group(&broken, "Available:").join("\n");
+    for expected in [
+        "ChatGPT credential file=true, API key file=false, environment API key=false",
+        "provider resolution: POLARIS_PROVIDER is not set; a new launch would default to codex",
+        "sandbox read-only: available (read-only)",
+        "sandbox workspace-write: NOT available (writable root is missing)",
+        "state=/synthetic/state (present); delivered always-on instruction lines=7",
+        "decision capacity: Memory: synthetic host",
+        "decision capacity: Execution fit: not verified here",
+    ] {
+        assert!(available.contains(expected), "{expected}\n{available}");
+    }
+
+    let observed = group(&broken, "Observed:");
+    assert_eq!(observed.len(), 1);
+    assert!(observed[0].contains("does not contact"), "{observed:?}");
+    assert!(observed[0].contains("unverified"), "{observed:?}");
+
+    // The sandbox that becomes available changes only the available part.
+    let healthy = report(
+        ApprovalPolicy::Never,
+        &doctor_facts(Ok("workspace-write".into())),
+    );
+    assert_eq!(
+        group(&healthy, "Configured:"),
+        group(&broken, "Configured:")
+    );
+    assert_eq!(group(&healthy, "Observed:"), observed);
+    assert_ne!(group(&healthy, "Available:"), group(&broken, "Available:"));
+    // A different approval policy changes only the configured part.
+    let stricter = report(
+        ApprovalPolicy::OnRequest,
+        &doctor_facts(Err("writable root is missing".into())),
+    );
+    assert_eq!(group(&stricter, "Available:"), group(&broken, "Available:"));
+    assert_ne!(
+        group(&stricter, "Configured:"),
+        group(&broken, "Configured:")
+    );
+}
+
+#[test]
+fn doctor_provider_resolution_follows_the_launch_rule() {
+    assert_eq!(
+        provider_resolution(Some("llamacpp"), true, true),
+        "POLARIS_PROVIDER is set explicitly: llamacpp"
+    );
+    for (openai_key, codex_credentials, chosen) in [
+        (false, false, "openai"),
+        (true, false, "openai"),
+        (true, true, "openai"),
+        (false, true, "codex"),
+    ] {
+        assert_eq!(
+            provider_resolution(None, openai_key, codex_credentials),
+            format!("POLARIS_PROVIDER is not set; a new launch would default to {chosen}"),
+            "key {openai_key}, codex credentials {codex_credentials}"
+        );
+    }
+}
+
+#[test]
+fn doctor_sandbox_availability_is_computed_for_this_project_not_copied_from_startup() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().canonicalize().unwrap();
+    assert_eq!(
+        sandbox_availability(&root, polaris_sandbox::SandboxMode::ReadOnly).unwrap(),
+        "read-only"
+    );
+    let writable = sandbox_availability(&root, polaris_sandbox::SandboxMode::WorkspaceWrite)
+        .expect("a project directory can be made writable");
+    assert!(
+        writable.starts_with(&format!("workspace-write (writable: {}", root.display())),
+        "{writable}"
+    );
+    // A project that does not exist can be read-only but not writable.
+    let missing = root.join("not-created");
+    assert!(sandbox_availability(&missing, polaris_sandbox::SandboxMode::ReadOnly).is_ok());
+    assert!(sandbox_availability(&missing, polaris_sandbox::SandboxMode::WorkspaceWrite).is_err());
+}
+
+#[test]
+fn doctor_reads_availability_from_this_host_without_claiming_a_connection() {
+    let project = tempfile::tempdir().unwrap();
+    let startup = SandboxPolicy::new(polaris_sandbox::SandboxMode::ReadOnly, &[]).unwrap();
+    let text = doctor_lines(
+        "openai",
+        "gpt-5.4",
+        project.path(),
+        &startup,
+        ApprovalPolicy::OnRequest,
+        false,
+    )
+    .iter()
+    .map(ToString::to_string)
+    .collect::<Vec<_>>()
+    .join("\n");
+    for expected in [
+        "Configured: provider=openai, model=gpt-5.4",
+        "Available: provider resolution: POLARIS_PROVIDER ",
+        "Available: sandbox read-only: available (read-only)",
+        "Available: sandbox workspace-write: available (workspace-write (writable: ",
+        "Available: decision capacity: Memory: ",
+        "Available: decision capacity: Execution fit: not verified here",
+        "Observed: nothing.",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+}
+
 #[test]
 fn phase_command_cannot_write_without_managed_owner() {
     let mut session = Session::new();
@@ -7220,6 +7547,100 @@ fn help_lists_every_registered_command_in_scrollback() {
         );
     }
     assert!(local_lines.last().unwrap().to_string().contains("/quit"));
+}
+
+/// `(cfg, name)` for each line that opens with a `target_os` attribute and is
+/// followed by a line `name_of` can read a name from.
+fn target_os_pairs(
+    source: &str,
+    name_of: impl Fn(&str) -> Option<String>,
+) -> std::collections::BTreeSet<(String, String)> {
+    let lines: Vec<&str> = source.lines().map(str::trim).collect();
+    lines
+        .windows(2)
+        .filter(|pair| {
+            pair[0].starts_with("#[cfg(target_os = \"")
+                || pair[0].starts_with("#[cfg(not(target_os = \"")
+        })
+        .filter_map(|pair| Some((pair[0].to_owned(), name_of(pair[1])?)))
+        .collect()
+}
+
+fn identifier(text: &str) -> Option<String> {
+    let name: String = text
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+/// The `Action` a handler arm matches, as `slash::Action::Name` or
+/// `Some(slash::Action::Name`.
+fn arm_variant(line: &str) -> Option<String> {
+    identifier(
+        line.trim_start_matches("Some(")
+            .strip_prefix("slash::Action::")?,
+    )
+}
+
+/// A variant declaration such as `Name(String),`.
+fn declared_variant(line: &str) -> Option<String> {
+    let name = identifier(line)?;
+    (name.starts_with(|c: char| c.is_ascii_uppercase()) && line[name.len()..].starts_with('('))
+        .then_some(name)
+}
+
+/// Arms in `handlers` that exist on one platform while the command is
+/// recognized on every platform: `actions` does not gate the variant the same
+/// way, and `dispatcher` does not serve it on the other platforms.
+fn arms_without_a_route_elsewhere(handlers: &str, actions: &str, dispatcher: &str) -> Vec<String> {
+    let declared = target_os_pairs(actions, declared_variant);
+    let served = target_os_pairs(dispatcher, arm_variant);
+    target_os_pairs(handlers, arm_variant)
+        .into_iter()
+        .filter(|(cfg, variant)| {
+            let other = cfg
+                .replace("(target_os", "(not(target_os")
+                .replace("\")]", "\"))]");
+            !declared.contains(&(cfg.clone(), variant.clone()))
+                && !served.contains(&(other, variant.clone()))
+        })
+        .map(|(cfg, variant)| format!("{variant} has a {cfg} arm"))
+        .collect()
+}
+
+/// T01: a handler arm compiled for one platform must belong to a command that
+/// exists only there, or be served by the dispatcher everywhere else. Otherwise
+/// the other platforms list the command and end in the unconnected fallback.
+#[test]
+fn single_platform_handler_arms_belong_to_single_platform_commands() {
+    let handlers = include_str!("../lib.rs");
+    let actions = include_str!("../slash.rs");
+    let dispatcher = include_str!("../command_dispatch.rs");
+    // The scan must see the arms it exists to check.
+    let arms = target_os_pairs(handlers, arm_variant);
+    for variant in ["WorkspaceControl", "Apply", "Decided"] {
+        assert!(
+            arms.iter().any(|(_, found)| found == variant),
+            "no {variant} arm found"
+        );
+    }
+    assert_eq!(
+        arms_without_a_route_elsewhere(handlers, actions, dispatcher),
+        Vec::<String>::new()
+    );
+
+    // And it reports an arm whose command the other platforms still list.
+    let arm = "#[cfg(target_os = \"linux\")]\n    slash::Action::Feature(x) => {}\n";
+    let ungated = "    Feature(String),\n";
+    let gated = "    #[cfg(target_os = \"linux\")]\n    Feature(String),\n";
+    let served = "    #[cfg(not(target_os = \"linux\"))]\n    slash::Action::Feature(x) => {}\n";
+    assert_eq!(
+        arms_without_a_route_elsewhere(arm, ungated, ""),
+        ["Feature has a #[cfg(target_os = \"linux\")] arm"]
+    );
+    assert!(arms_without_a_route_elsewhere(arm, gated, "").is_empty());
+    assert!(arms_without_a_route_elsewhere(arm, ungated, served).is_empty());
 }
 
 #[test]

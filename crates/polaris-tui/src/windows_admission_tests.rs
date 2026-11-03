@@ -54,7 +54,6 @@ fn windows_unavailable_owner_preserves_rejected_submission() {
         "/session configure fixture",
         "/run settings max-turns 2",
         "/subagents cancel child attempt",
-        "/setting git",
     ] {
         let mut buffer = text.to_owned();
         let mut cursor = text.chars().next().unwrap().len_utf8();
