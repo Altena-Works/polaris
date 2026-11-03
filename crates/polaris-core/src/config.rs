@@ -93,6 +93,12 @@ pub struct Config {
     /// `None` starts nothing. There is no default path and no search:
     /// which binary to execute is the one thing this must never guess.
     pub llama_cpp: Option<crate::llama_server::LlamaCppConfig>,
+    /// The context window, in tokens, of a model polaris has no published
+    /// figure for, such as a local one. TOML key: `context_window`.
+    ///
+    /// Automatic compaction starts at 70% of it. `None` leaves the threshold
+    /// at its fixed default for such a model.
+    pub context_window: Option<usize>,
 }
 
 /// The language Polaris should use when presenting final answers. Absence is
@@ -338,6 +344,7 @@ impl Default for Config {
             build_cache_path: None,
             approval_auto: crate::approval::AutoApproval::default(),
             llama_cpp: None,
+            context_window: None,
         }
     }
 }
@@ -382,6 +389,7 @@ struct RawConfig {
     approval: RawApproval,
     #[serde(default)]
     llama_cpp: RawLlamaCpp,
+    context_window: Option<std::num::NonZeroUsize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1059,6 +1067,9 @@ fn try_load_layers(paths: &[Option<&Path>]) -> Result<Config, ConfigError> {
             }
             if let Some(llama_cpp) = raw.llama_cpp.resolve()? {
                 merged.llama_cpp = Some(llama_cpp);
+            }
+            if let Some(window) = raw.context_window {
+                merged.context_window = Some(window.get());
             }
             raw.decision.apply_to(&mut merged.decision)?;
             if let Some(enabled) = raw.sidechat.enabled {
@@ -2089,6 +2100,32 @@ mod tests {
             try_load_from(None, Some(&path)),
             Err(ConfigError::EmptyDecisionValue)
         ));
+    }
+
+    #[test]
+    fn context_window_is_unset_by_default_and_the_project_value_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = write(
+            dir.path(),
+            "context_window = 8192\n[spawn]\nconcurrency = 2\n",
+        );
+        assert_eq!(Config::default().context_window, None);
+        assert_eq!(
+            try_load_from(Some(&global), None).unwrap().context_window,
+            Some(8192)
+        );
+        let project = tempfile::tempdir().unwrap();
+        let project = write(project.path(), "context_window = 32768\n");
+        assert_eq!(
+            try_load_from(Some(&global), Some(&project))
+                .unwrap()
+                .context_window,
+            Some(32768)
+        );
+        for body in ["context_window = 0\n", "context_window = -1\n"] {
+            let bad = write(dir.path(), body);
+            assert!(try_load_from(None, Some(&bad)).is_err(), "{body}");
+        }
     }
 
     #[test]

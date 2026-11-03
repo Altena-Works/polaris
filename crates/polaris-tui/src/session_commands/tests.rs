@@ -179,7 +179,6 @@ fn m3c_helper_settings_goal_rows_save_normal_values_and_refuse_unique_inputs() {
         "tool-memory off",
         "tool-memory endpoint http://localhost:8080/v1 embed-1",
         "tool-memory model embed-2",
-        "compact threshold 1000",
         "session configure codex gpt-6-astra auto",
         "goal set 実装を完了する",
         "goal stop",
@@ -195,7 +194,6 @@ fn m3c_helper_settings_goal_rows_save_normal_values_and_refuse_unique_inputs() {
     assert!(!saved.remember);
     assert_eq!(saved.tool_memory, ToolMemoryModeV1::Off);
     assert_eq!(saved.tool_memory_embedding.unwrap().model, "embed-2");
-    assert_eq!(saved.compact_threshold, Some(1000));
     assert_eq!(saved.model, "gpt-6-astra");
     assert_eq!(CurrentProvider.model().as_deref(), Some("gpt-5.6-sol"));
     assert!(!state.goal.unwrap().active);
@@ -204,7 +202,8 @@ fn m3c_helper_settings_goal_rows_save_normal_values_and_refuse_unique_inputs() {
         "tool-memory external",
         "tool-memory endpoint https://example.com/v1 model",
         "tool-memory model",
-        "compact threshold 999",
+        "compact threshold 1000",
+        "compact threshold off",
         "session configure other-provider gpt-6-astra auto",
         "session configure codex unavailable-model auto",
         "session configure codex gpt-6-astra high",
@@ -231,6 +230,50 @@ fn m3c_helper_settings_goal_rows_save_normal_values_and_refuse_unique_inputs() {
             .iter()
             .all(|effect| matches!(effect.state, ManagementEffectStateV1::Completed { .. }))
     );
+}
+
+#[test]
+fn saved_settings_written_with_a_compact_threshold_still_load_and_set_no_threshold() {
+    use crate::session_activation::{
+        MemoryActivation, apply_compaction_and_memory, read_saved_activation,
+    };
+    let mut fixture = Fixture::new();
+    for request in ["memory configure on", "memory configure off"] {
+        fixture
+            .call(request, KeyCode::Char('y'), false, None)
+            .unwrap();
+    }
+    // The file as it was written before the threshold was removed.
+    let path = fixture
+        .session
+        .persistence
+        .as_ref()
+        .unwrap()
+        .store
+        .directory()
+        .join("state.json");
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    state["session_settings"]["compact_threshold"] = serde_json::json!(5000);
+    std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+
+    assert!(
+        read_saved_activation(&fixture.session, &fixture.initial, "gpt-5.6-sol", false)
+            .expect("the old file loads")
+            .is_some()
+    );
+    let settings = fixture.snapshot().state.session_settings.unwrap();
+    let mut session = fixture.session.clone();
+    let any = std::path::Path::new(".");
+    apply_compaction_and_memory(
+        &mut session,
+        any,
+        any,
+        any,
+        &MemoryActivation::from_saved(&settings),
+    )
+    .unwrap();
+    assert_eq!(session.compaction_threshold, None);
 }
 
 #[test]

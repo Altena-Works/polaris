@@ -211,7 +211,7 @@ UPDATE_FILEMAP=1 cargo test -p polaris-core --test filemap
 - `build_cache.rs` — What a project's build output may grow to, and what goes when it does.
 - `clef.rs` — A lazy, offline Clef process owner. Package activation supplies the pinned
 - `common_tests.rs` — A small, bounded black-box test schema and its confined runner.
-- `compaction.rs` — Automatic history summarization. Fires when the conversation's measured
+- `compaction.rs` — Automatic history summarization. Fires when the estimated size of a
 - `computer.rs` — Driving an application by naming the goal, not the pixels.
 - `config.rs` — Loads config files. Not existing is normal; being malformed is not.
 - `constitution.rs` — The part of the always-on context that the harness does not own. The

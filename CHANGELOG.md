@@ -23,6 +23,8 @@ macOS arm64のTUIを配布対象として準備する。GUIと他OSのソース�
 - working中の補完と子タスク照会、入力受理ID、整理したstatus表示を提供する。
 - 判断backendの共通化と明示選択を追加し、Jev/SemIfを保持する。Clefは本番profile未登録のため通常利用できない。
 - 実装の流れと配布範囲を示すシステム構成図、コマンド参照、暫定リリース資料を整備する。
+- 履歴の圧縮を自動だけにする。TUIの`/compact`と`/compact threshold`、操作一覧の「Compact conversation」、CLIの`--compact-at`、保存会話の`compact_threshold`を、すべての履歴方式で廃止する。`/compact`と入力しても何も実行せず、圧縮は自動であると1行で答える。`--compact-at`は理由を示すエラーで終了する。保存会話に残る`compact_threshold`は読み込みで無視し、書き戻すときに落とす。
+- 自動圧縮の閾値は、モデルの文脈の長さの70%（端数は切り捨て）とする。長さが分からないモデルは従来どおり200,000とする。文脈の長さを引く公表値の表はまだ空で、手元のモデルは`config.toml`の`context_window`に長さを書いて渡す（クラウドのモデルには効かない）。圧縮するのはlegacyの履歴だけで、turn-onlyでは自動圧縮も止める。
 
 ### 修正
 

@@ -84,13 +84,10 @@ pub(crate) fn handle<B: Backend, R: KeyReader>(
                 saved.revision
             )),
             line(format!(
-                "History: {} / remember: {} / tool-memory: {} / compact: {}",
+                "History: {} / remember: {} / tool-memory: {}",
                 history_name(snapshot.state.history_mode),
                 on_off(saved.remember),
                 tool_name(saved.tool_memory),
-                saved
-                    .compact_threshold
-                    .map_or_else(|| "off".into(), |n| n.to_string())
             )),
             line(match &saved.tool_memory_embedding {
                 Some(pair) => format!("tool-memory endpoint: {} / model: {}", pair.url, pair.model),
@@ -228,11 +225,6 @@ fn parse(
             let pair = saved.tool_memory_embedding.as_ref().ok_or("Configure the pair first with /tool-memory endpoint <URL> <MODEL>")?;
             Ok(SessionSettingsCommandV1::EmbeddingModel { embedding: Some(SavedToolEmbeddingV1::new(pair.url.clone(), model.to_string()).map_err(|e| e.to_string())?) })
         }
-        ["compact", "threshold", threshold] => {
-            let threshold = if *threshold == "off" { None } else { Some(threshold.parse::<usize>().map_err(|_| "Specify compact threshold as an integer of at least 1000, or off")?) };
-            if threshold.is_some_and(|n| n < 1000) { return Err("compact threshold must be at least 1000".into()); }
-            Ok(SessionSettingsCommandV1::CompactThreshold { threshold })
-        }
         ["goal", "clear"] | ["goal", "stop"] | ["goal", "resume"] => {
             let operation = match words[1] { "clear" => GoalOperationV1::Clear, "stop" => GoalOperationV1::Stop, _ => GoalOperationV1::Resume };
             Ok(SessionSettingsCommandV1::Goal { expected_revision: snapshot.state.goal.as_ref().map_or(0, |goal| goal.revision.get()), operation })
@@ -241,7 +233,7 @@ fn parse(
             let text = request.strip_prefix("goal").unwrap().trim_start().strip_prefix("set").unwrap().trim_start();
             Ok(SessionSettingsCommandV1::Goal { expected_revision: snapshot.state.goal.as_ref().map_or(0, |goal| goal.revision.get()), operation: GoalOperationV1::Set { text: text.to_string() } })
         }
-        _ => Err("Specify /session configure <provider> <model> [effort], /session history <mode>, /memory configure on|off, /tool-memory, /compact threshold, or /goal".into()),
+        _ => Err("Specify /session configure <provider> <model> [effort], /session history <mode>, /memory configure on|off, /tool-memory, or /goal".into()),
     }
 }
 

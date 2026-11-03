@@ -776,6 +776,10 @@ pub trait Provider: Send + Sync {
     /// consumption is then recorded in the total but against no model —
     /// which reads as "spent, attribution unknown" rather than as a guess
     /// that would quietly move tokens onto the wrong price.
+    ///
+    /// The name also selects the context window at which automatic
+    /// compaction starts (`polaris_core::effort_plan::context_window`), so
+    /// it must stay the model's real name; `None` reads as an unknown window.
     fn model(&self) -> Option<String> {
         None
     }

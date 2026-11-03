@@ -699,7 +699,9 @@ pub struct RunArgs<'a> {
     pub remember: bool,
     pub tool_memory: Option<polaris_core::tool_memory::RetentionMode>,
     pub tool_memory_embedding: Option<(String, String)>,
-    pub compact_at: Option<usize>,
+    /// `Config::context_window`. Each turn gives it to the session only
+    /// while a local provider runs it (`context_window_for`).
+    pub context_window: Option<usize>,
     pub sandbox: SandboxPolicy,
     pub helper: PathBuf,
     pub approval_policy: ApprovalPolicy,
@@ -2320,6 +2322,13 @@ fn is_local_provider(provider_name: &str) -> bool {
     matches!(provider_name, "ollama" | "lmstudio" | "llamacpp")
 }
 
+/// The `context_window` setting describes a local model, so only a local
+/// provider is given it. A cloud model keeps its published window, or the
+/// default threshold while it has none.
+pub fn context_window_for(provider_name: &str, setting: Option<usize>) -> Option<usize> {
+    setting.filter(|_| is_local_provider(provider_name))
+}
+
 fn update_effort_from_event(event: &polaris_core::AgentEvent, effort_name: &mut String) {
     match event {
         polaris_core::AgentEvent::EffortJudging => *effort_name = "judging".to_string(),
@@ -3713,7 +3722,6 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
             Some(RetentionMode::Retrieval) => ToolMemoryModeV1::Retrieval,
             None => ToolMemoryModeV1::Off,
         };
-        initial_saved_settings.compact_threshold = args.compact_at;
         initial_saved_settings.tool_memory_embedding = match args
             .tool_memory_embedding
             .clone()
@@ -3945,7 +3953,6 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
         let memory_activation = session_activation::MemoryActivation::from_runtime(
             args.tool_memory,
             args.tool_memory_embedding.clone(),
-            args.compact_at,
             args.remember,
         );
         match apply_tool_memory(
@@ -3965,7 +3972,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                 break 'outer ExitCode::FAILURE;
             }
         }
-        let mut cumulative_usage = usage_meter.snapshot().usage;
+        let cumulative_usage = usage_meter.snapshot().usage;
         if let Err(error) = apply_compaction_and_memory(
             &mut session,
             &args.cwd,
@@ -5097,95 +5104,6 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                             .await;
                             continue;
                         }
-                        slash::Action::Compact => {
-                            // A real summarization call can take tens of
-                            // seconds — show something before awaiting it
-                            // rather than leaving the last drawn frame on
-                            // screen, which reads as a hang (same
-                            // "set status, force one immediate draw, then
-                            // do the slow thing" shape as the Ctrl+O
-                            // mid-turn confirmation above).
-                            status = Status::Notice("compacting...".to_string());
-                            if draw_chat_frame(
-                                &mut terminal.borrow_mut(),
-                                &input_buffer,
-                                input_cursor,
-                                0,
-                                |f| {
-                                    draw_frame(
-                                        f,
-                                        &conversation_view.history,
-                                        &mut conversation_view.history_wrap_cache,
-                                        conversation_view.scroll_offset,
-                                        &input_buffer,
-                                        input_cursor,
-                                        &status,
-                                        &render::HeaderInfo {
-                                            provider_name: &provider_name,
-                                            model_name: &model_name,
-                                            usage: cumulative_usage,
-                                            cwd: &cwd_display,
-                                            cwd_short: &cwd_footer_display,
-                                            effort_name: &effort_name,
-                                        },
-                                        &[],
-                                        0,
-                                        &conversation_view.selection,
-                                    )
-                                },
-                            )
-                            .is_err()
-                            {
-                                break ExitCode::FAILURE;
-                            }
-                            #[cfg(target_os = "linux")]
-                            if let Some(code) = linux_pending_exit_code() {
-                                break 'outer code;
-                            }
-                            #[cfg(unix)]
-                            let _compact_persistence_failed = match local_actions::compact(
-                                &terminal,
-                                &mut key_reader,
-                                args.provider.as_ref(),
-                                &mut session,
-                                &session_path,
-                                rewind_workspace.as_ref().expect("startup owner"),
-                                &management_effects,
-                                &mut status,
-                                &mut cumulative_usage,
-                                has_pending_inputs,
-                            )
-                            .await
-                            {
-                                Ok(_) => false,
-                                Err(error) => {
-                                    status = Status::Error(error);
-                                    true
-                                }
-                            };
-                            #[cfg(not(unix))]
-                            let _compact_persistence_failed = handle_compact(
-                                args.provider.as_ref(),
-                                &mut session,
-                                &session_path,
-                                &mut status,
-                                &mut cumulative_usage,
-                            )
-                            .await;
-                            #[cfg(target_os = "linux")]
-                            if let Some(code) = linux_pending_exit_code() {
-                                if _compact_persistence_failed {
-                                    fatal_message = Some(
-                                        "compacted history could not be persisted during shutdown"
-                                            .into(),
-                                    );
-                                    break 'outer ExitCode::FAILURE;
-                                }
-                                break 'outer code;
-                            }
-                            conversation_view.mark_messages_printed(session.messages.len());
-                            continue;
-                        }
                         action => {
                             // `apply_slash_action` clears `session.messages`/
                             // `local_lines` for `Clear` but has no access to
@@ -6105,91 +6023,6 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                         &mut local_lines,
                     )
                     .await;
-                    continue;
-                }
-                Some(slash::Action::Compact) => {
-                    // Same reasoning as the popup-selection path above:
-                    // show feedback before the (potentially tens-of-
-                    // seconds-long) summarization call rather than
-                    // leaving the last drawn frame on screen.
-                    status = Status::Notice("compacting...".to_string());
-                    if draw_chat_frame(
-                        &mut terminal.borrow_mut(),
-                        &input_buffer,
-                        input_cursor,
-                        0,
-                        |f| {
-                            draw_frame(
-                                f,
-                                &conversation_view.history,
-                                &mut conversation_view.history_wrap_cache,
-                                conversation_view.scroll_offset,
-                                &input_buffer,
-                                input_cursor,
-                                &status,
-                                &render::HeaderInfo {
-                                    provider_name: &provider_name,
-                                    model_name: &model_name,
-                                    usage: cumulative_usage,
-                                    cwd: &cwd_display,
-                                    cwd_short: &cwd_footer_display,
-                                    effort_name: &effort_name,
-                                },
-                                &[],
-                                0,
-                                &conversation_view.selection,
-                            )
-                        },
-                    )
-                    .is_err()
-                    {
-                        break ExitCode::FAILURE;
-                    }
-                    #[cfg(target_os = "linux")]
-                    if let Some(code) = linux_pending_exit_code() {
-                        break 'outer code;
-                    }
-                    #[cfg(unix)]
-                    let _compact_persistence_failed = match local_actions::compact(
-                        &terminal,
-                        &mut key_reader,
-                        args.provider.as_ref(),
-                        &mut session,
-                        &session_path,
-                        rewind_workspace.as_ref().expect("startup owner"),
-                        &management_effects,
-                        &mut status,
-                        &mut cumulative_usage,
-                        has_pending_inputs,
-                    )
-                    .await
-                    {
-                        Ok(_) => false,
-                        Err(error) => {
-                            status = Status::Error(error);
-                            true
-                        }
-                    };
-                    #[cfg(not(unix))]
-                    let _compact_persistence_failed = handle_compact(
-                        args.provider.as_ref(),
-                        &mut session,
-                        &session_path,
-                        &mut status,
-                        &mut cumulative_usage,
-                    )
-                    .await;
-                    #[cfg(target_os = "linux")]
-                    if let Some(code) = linux_pending_exit_code() {
-                        if _compact_persistence_failed {
-                            fatal_message = Some(
-                                "compacted history could not be persisted during shutdown".into(),
-                            );
-                            break 'outer ExitCode::FAILURE;
-                        }
-                        break 'outer code;
-                    }
-                    conversation_view.mark_messages_printed(session.messages.len());
                     continue;
                 }
                 Some(action) => {
@@ -7131,6 +6964,9 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
             // throttle the actual turn. Events are small and a turn's
             // worth of them is bounded by the turn itself.
             let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+            // Set per turn: `/model` can move between a cloud and a local
+            // provider without rebuilding the session.
+            session.context_window = context_window_for(&provider_name, args.context_window);
             let agent_future = agent::run_with_mcp(
                 args.provider.as_ref(),
                 &mut session,
@@ -10940,77 +10776,6 @@ fn handle_permissions<B: ratatui::backend::Backend, R: approver::KeyReader>(
     }
 }
 
-/// Runs compaction unconditionally (ignores the threshold — that's the
-/// point of a manual command) and reports the result via `status`. On
-/// success, also resyncs the persisted session log so `/resume` reflects
-/// the compacted state, matching how `TurnOutcome::Done(Ok(_))` does the
-/// same thing after an automatic compaction (see the call site in `run`).
-async fn handle_compact(
-    provider: &dyn Provider,
-    session: &mut polaris_core::session::Session,
-    session_path: &std::path::Path,
-    status: &mut Status,
-    usage: &mut polaris_provider::Usage,
-) -> bool {
-    let outcome = polaris_core::compaction::compact_with_usage(
-        provider,
-        &mut session.messages,
-        session.before_compact.as_deref(),
-    )
-    .await;
-    usage.input_tokens = usage
-        .input_tokens
-        .saturating_add(outcome.usage_report.usage.input_tokens);
-    usage.output_tokens = usage
-        .output_tokens
-        .saturating_add(outcome.usage_report.usage.output_tokens);
-    usage.total_tokens = usage
-        .total_tokens
-        .saturating_add(outcome.usage_report.usage.total_tokens);
-    usage.cached_tokens = usage
-        .cached_tokens
-        .saturating_add(outcome.usage_report.usage.cached_tokens);
-    let mut persistence_failed = false;
-    match outcome.result {
-        Ok(None) => {
-            *status = Status::Notice("nothing old enough to compact yet".to_string());
-        }
-        Ok(Some(report)) => {
-            let summary = format!(
-                "compacted {} messages → {} ({} tok → {} tok)",
-                report.messages_before,
-                report.messages_after,
-                report.tokens_before,
-                report.tokens_after
-            );
-            // Only a legacy file log needs rewriting. A v2 session already
-            // holds every message in its own append-only `raw.jsonl`, and
-            // writing the summarised list to `session_path` as well
-            // manufactures a second, lossy session that `/resume` then
-            // offers beside the intact one. The automatic path has always
-            // been guarded this way (the `TurnOutcome::Done(Ok(_))` arm);
-            // this one was not.
-            if session.persistence.is_some() {
-                *status = Status::Notice(summary);
-            } else {
-                match persist::rewrite(session_path, &session.messages) {
-                    Ok(()) => *status = Status::Notice(summary),
-                    Err(e) => {
-                        persistence_failed = true;
-                        *status = Status::Notice(format!(
-                            "compacted in memory, but couldn't persist it: {e}"
-                        ));
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            *status = Status::Notice(format!("compaction failed: {e}"));
-        }
-    }
-    persistence_failed
-}
-
 /// Runs the `/skills` picker: a blocking loop like the others, but with
 /// no selection outcome — Enter and Esc both just close it (see
 /// `render::render_skills_picker`'s docs on why: polaris has nothing
@@ -12149,8 +11914,7 @@ fn apply_slash_action(
         | slash::Action::Fork
         | slash::Action::Model
         | slash::Action::Skills
-        | slash::Action::Decider
-        | slash::Action::Compact => {
+        | slash::Action::Decider => {
             // Never reached: `run()` recognizes all of these before
             // dispatch — `Review` expands into a normal model turn;
             // `New`/`Resume`/`Fork` are handled by
@@ -12166,6 +11930,12 @@ fn apply_slash_action(
                 "internal: this command should have been handled before dispatch. \
                                  Please report this as a polaris bug."
                     .to_string(),
+            );
+            SlashOutcome::Continue
+        }
+        slash::Action::Compact => {
+            *status = Status::Notice(
+                "Compaction is automatic. /compact and /compact threshold were removed.".into(),
             );
             SlashOutcome::Continue
         }

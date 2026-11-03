@@ -122,19 +122,14 @@ fn m3c_settings_rows_publish_values_and_restore_without_replay() {
             .tool_memory_embedding,
         Some(pair)
     );
-    let snapshot = fixture.apply(SessionSettingsCommandV1::CompactThreshold {
-        threshold: Some(1000),
-    });
-    assert_eq!(
-        snapshot
-            .state
-            .session_settings
-            .as_ref()
-            .unwrap()
-            .compact_threshold,
-        Some(1000)
-    );
-    let revision = snapshot.state.session_settings.unwrap().revision;
+    let revision = fixture
+        .session
+        .snapshot()
+        .unwrap()
+        .state
+        .session_settings
+        .unwrap()
+        .revision;
     let snapshot = fixture.apply(SessionSettingsCommandV1::Configure {
         expected_revision: revision,
         provider: "fake".into(),
@@ -163,13 +158,52 @@ fn m3c_settings_rows_publish_values_and_restore_without_replay() {
     )
     .unwrap();
     assert_eq!(resumed.snapshot().unwrap().state, expected.state);
-    assert_eq!(fixture.effects.effects().unwrap().len(), 10);
+    assert_eq!(fixture.effects.effects().unwrap().len(), 9);
     cursor_clone
         .append(Message::user("次の入力"), true, None)
         .unwrap();
     assert_eq!(
         fixture.session.snapshot().unwrap().state.generation,
         expected.state.generation + 1
+    );
+}
+
+#[test]
+fn a_saved_compact_threshold_is_read_without_error_and_never_written() {
+    let settings =
+        SavedSessionSettingsV1::new("fake".into(), "model".into(), "auto".into()).unwrap();
+    let mut saved = serde_json::to_value(&settings).unwrap();
+    assert!(saved.get("compact_threshold").is_none(), "{saved}");
+    for old in [serde_json::json!(null), serde_json::json!(5000)] {
+        saved["compact_threshold"] = old;
+        let read: SavedSessionSettingsV1 = serde_json::from_value(saved.clone()).unwrap();
+        assert_eq!(read, settings, "the old value must not be kept");
+        assert!(
+            serde_json::to_value(&read)
+                .unwrap()
+                .get("compact_threshold")
+                .is_none()
+        );
+    }
+    saved["compact_thresholds"] = serde_json::json!(5000);
+    assert!(serde_json::from_value::<SavedSessionSettingsV1>(saved).is_err());
+}
+
+#[test]
+fn an_old_state_file_with_a_compact_threshold_loads_and_is_rewritten_without_it() {
+    let fixture = Fixture::new();
+    fixture.apply(SessionSettingsCommandV1::Remember { enabled: true });
+    let path = fixture.session.store.directory().join("state.json");
+    let mut state: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    state["session_settings"]["compact_threshold"] = serde_json::json!(5000);
+    fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+    let loaded = fixture.session.snapshot().unwrap();
+    assert!(loaded.state.session_settings.unwrap().remember);
+    fixture.apply(SessionSettingsCommandV1::Remember { enabled: false });
+    assert!(
+        !fs::read_to_string(&path)
+            .unwrap()
+            .contains("compact_threshold")
     );
 }
 
@@ -260,9 +294,6 @@ fn m3c_settings_rows_refuse_cancel_foreign_lease_and_invalid_values() {
             url: "http://127.0.0.1:8080/v1".into(),
             model: String::new(),
         }),
-    });
-    fixture.refuse(SessionSettingsCommandV1::CompactThreshold {
-        threshold: Some(999),
     });
     fixture.refuse(SessionSettingsCommandV1::Configure {
         expected_revision: 0,

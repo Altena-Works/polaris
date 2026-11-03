@@ -1,14 +1,15 @@
-//! Automatic history summarization. Fires when the conversation's measured
-//! token count crosses a fixed ceiling. Keeps recent user turns, or the
-//! original instruction and recent complete tool groups in a single turn.
+//! Automatic history summarization. Fires when the estimated size of a
+//! request crosses a share of the model's context window, or a fixed ceiling
+//! when the window is unknown. Keeps recent user turns, or the original
+//! instruction and recent complete tool groups in a single turn.
 
 use crate::budget::count_tokens;
 #[cfg(test)]
 use polaris_provider::ToolCall;
 use polaris_provider::{CompletionRequest, Message, Provider, ProviderError, Role};
 
-/// Model-agnostic — polaris has no per-model context window table (no
-/// provider exposes one). Originally 100k, picked well below the smallest
+/// The threshold for a model whose context window is not known (see
+/// [`threshold`]). Originally 100k, picked well below the smallest
 /// context window in common use (128k+) purely to bound growth. Raised to
 /// 200k on the reasoning that compacting often is self-defeating: each
 /// compaction replaces old turns with a freshly generated
@@ -23,13 +24,22 @@ use polaris_provider::{CompletionRequest, Message, Provider, ProviderError, Role
 /// before/after build comparison — see that CHANGELOG entry — and this one
 /// has not been put through the same test.
 ///
-/// Past the smallest common window, this constant stops protecting
-/// anything. A model whose window is under the threshold reaches its own
-/// limit before compaction can fire, so for those models the feature is
-/// inert rather than merely late. That is acceptable while polaris targets
-/// gpt-5.x windows, and it is the first thing to revisit if a provider
-/// with a smaller window is added.
+/// A model whose window is under this ceiling reaches its own limit before
+/// compaction can fire, so for it the feature is inert rather than merely
+/// late. That is why a known window decides the threshold instead.
 pub const COMPACTION_THRESHOLD: usize = 200_000;
+
+/// The estimated size of a request at which the history is compacted: 70% of
+/// the model's context window, or [`COMPACTION_THRESHOLD`] when the window is
+/// not known.
+///
+/// What it is compared with is the whole request, which already counts
+/// `fixed` (the system prompt, tools, examples and project reference), so
+/// `fixed` is not subtracted again here. It is a parameter only so that this
+/// is pinned: the result never depends on it.
+pub fn threshold(window: Option<usize>, _fixed: usize) -> usize {
+    window.map_or(COMPACTION_THRESHOLD, |window| window.saturating_mul(7) / 10)
+}
 
 /// How many of the most recent user turns survive compaction verbatim.
 pub const KEEP_RECENT_USER_TURNS: usize = 2;
@@ -81,10 +91,6 @@ pub fn session_tokens(messages: &[Message]) -> usize {
             total
         })
         .sum()
-}
-
-pub fn should_compact(total_tokens: usize) -> bool {
-    total_tokens >= COMPACTION_THRESHOLD
 }
 
 /// Returns the index to cut at: the index of the `KEEP_RECENT_USER_TURNS`
@@ -580,10 +586,21 @@ mod tests {
     }
 
     #[test]
-    fn should_compact_trips_at_the_threshold_not_before() {
-        assert!(!should_compact(COMPACTION_THRESHOLD - 1));
-        assert!(should_compact(COMPACTION_THRESHOLD));
-        assert!(should_compact(COMPACTION_THRESHOLD + 1));
+    fn the_threshold_is_seventy_percent_of_the_window_or_the_default() {
+        for fixed in [0, 1_000, 150_000, usize::MAX] {
+            assert_eq!(
+                threshold(Some(400_000), fixed),
+                280_000,
+                "the fixed part is already inside the compared total: {fixed}"
+            );
+            assert_eq!(threshold(None, fixed), 200_000);
+        }
+        assert_eq!(threshold(Some(8192), 0), 5_734, "the share rounds down");
+        assert_eq!(
+            threshold(Some(usize::MAX), 0),
+            usize::MAX / 10,
+            "no overflow"
+        );
     }
 
     #[test]

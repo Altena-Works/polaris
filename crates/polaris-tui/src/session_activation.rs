@@ -118,7 +118,6 @@ pub(super) fn attach_process_services(session: &mut Session, services: ProcessSe
 pub(super) struct MemoryActivation {
     tool_mode: Option<RetentionMode>,
     embedding: Option<(String, String)>,
-    compact_threshold: Option<usize>,
     remember: bool,
 }
 
@@ -140,7 +139,6 @@ impl MemoryActivation {
                 .tool_memory_embedding
                 .as_ref()
                 .map(|pair| (pair.url.clone(), pair.model.clone())),
-            compact_threshold: settings.compact_threshold,
             remember: settings.remember,
         }
     }
@@ -149,13 +147,11 @@ impl MemoryActivation {
     pub(super) fn from_runtime(
         tool_mode: Option<RetentionMode>,
         embedding: Option<(String, String)>,
-        compact_threshold: Option<usize>,
         remember: bool,
     ) -> Self {
         Self {
             tool_mode,
             embedding,
-            compact_threshold,
             remember,
         }
     }
@@ -205,7 +201,6 @@ pub(super) fn apply_compaction_and_memory(
     session_path: &Path,
     settings: &MemoryActivation,
 ) -> Result<(), String> {
-    session.compaction_threshold = settings.compact_threshold;
     if settings.remember {
         memory::configure_saved_memory(session, project, state_dir, session_path)
             .map_err(|error| format!("Cannot prepare history storage: {error}"))?;

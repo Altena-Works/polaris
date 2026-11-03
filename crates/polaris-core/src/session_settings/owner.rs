@@ -137,9 +137,6 @@ impl SessionSettingsOwnerV1<'_> {
                     | SessionSettingsCommandV1::EmbeddingModel { embedding } => {
                         settings.tool_memory_embedding = embedding
                     }
-                    SessionSettingsCommandV1::CompactThreshold { threshold } => {
-                        settings.compact_threshold = threshold
-                    }
                     SessionSettingsCommandV1::Configure {
                         expected_revision,
                         provider,

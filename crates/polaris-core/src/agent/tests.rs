@@ -6255,10 +6255,10 @@ async fn a_failed_compaction_call_does_not_block_the_turn() {
     // propagated that `ProviderError` straight out of `run_loop`,
     // failing the whole turn — and since `session.messages` is still
     // over `COMPACTION_THRESHOLD` afterward, every subsequent turn
-    // (including `/compact` itself) would retry compaction and fail
-    // the same way, permanently bricking the conversation until
-    // `/clear`/`/new`. The turn must instead proceed with its
-    // still-oversized history rather than fail.
+    // would retry compaction and fail the same way, permanently
+    // bricking the conversation until `/clear`/`/new`. The turn must
+    // instead proceed with its still-oversized history rather than
+    // fail.
     let dir = tempfile::tempdir().expect("temp directory");
 
     let big = "x".repeat(crate::compaction::COMPACTION_THRESHOLD * 10);
@@ -6314,6 +6314,303 @@ async fn a_failed_compaction_call_does_not_block_the_turn() {
         only_model_events(&mut events_rx),
         "no HistoryCompacted event should have been sent for a failed compaction"
     );
+}
+
+/// Answers every request with a short reply, keeps each one, and reports
+/// `model` as its model.
+struct Named {
+    model: Option<&'static str>,
+    sent: Mutex<Vec<CompletionRequest>>,
+}
+
+impl Named {
+    fn new(model: Option<&'static str>) -> Arc<Self> {
+        Arc::new(Self {
+            model,
+            sent: Mutex::new(Vec::new()),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for Named {
+    async fn complete(
+        &self,
+        req: CompletionRequest,
+    ) -> Result<CompletionResponse, polaris_provider::ProviderError> {
+        self.sent.lock().expect("lock").push(req);
+        Ok(CompletionResponse {
+            text: "reply".into(),
+            ..Default::default()
+        })
+    }
+
+    fn model(&self) -> Option<String> {
+        self.model.map(str::to_owned)
+    }
+}
+
+/// How the provider under test reaches `run`.
+#[derive(Clone, Copy)]
+enum Handed {
+    Bare,
+    InArc,
+    InRoleProvider,
+}
+
+/// The requests that asked for a summary of the history: they offer no tools.
+fn summaries(sent: &[CompletionRequest]) -> usize {
+    sent.iter()
+        .filter(|request| request.tools.is_empty())
+        .count()
+}
+
+/// What the compaction decision counts for a request.
+fn counted(request: &CompletionRequest) -> usize {
+    crate::budget::always_on_tokens(&request.system, &request.tools)
+        + crate::compaction::session_tokens(&request.messages)
+}
+
+async fn run_once(provider: &dyn Provider, session: &mut Session) {
+    let dir = tempfile::tempdir().expect("temp directory");
+    let always_on = crate::prompt::assemble_always_on("", "", &[]);
+    let (sandbox, helper, mut gate, mut approver) = dummy_tool_parts();
+    let mut ctx = ToolContext {
+        sandbox: &sandbox,
+        helper: &helper,
+        gate: &mut gate,
+        approver: &mut approver,
+    };
+    run(
+        provider,
+        session,
+        dummy_audit(&dir),
+        &mut StopTracker::new(10),
+        &always_on,
+        &[],
+        &[],
+        unused_provider_pool(),
+        crate::spawn::DEFAULT_CONCURRENCY,
+        crate::spawn::DEFAULT_WRITE_CONCURRENCY,
+        None,
+        &mut ctx,
+    )
+    .await
+    .expect("the turn runs");
+}
+
+/// Runs one root turn over a history that the compaction decision counts as
+/// exactly `total` tokens, and returns every request the provider saw.
+async fn requests_at(
+    handed: Handed,
+    model: Option<&'static str>,
+    total: usize,
+    configure: impl FnOnce(&mut Session),
+) -> Vec<CompletionRequest> {
+    use polaris_provider::Message;
+    // What every request carries before any history, measured on a request
+    // rather than assumed.
+    let probe = Named::new(model);
+    let mut session = Session::new();
+    session.quality = Some(crate::quality::Gates::default());
+    session.push_user("probe");
+    run_once(&*probe, &mut session).await;
+    let fixed = {
+        let sent = probe.sent.lock().expect("lock");
+        crate::budget::always_on_tokens(&sent[0].system, &sent[0].tools)
+    };
+
+    // The oldest turn is worth summarising and the last two are kept, so a
+    // crossing of the threshold does compact. " the" is one token under
+    // o200k_base, so a run of them counts exactly, and the check below says
+    // so if that ever stops being true.
+    let kept = [
+        Message::user("old"),
+        Message::user("recent"),
+        Message::user("latest"),
+    ];
+    let reply = vec!["the"; total - fixed - crate::compaction::session_tokens(&kept)].join(" ");
+    let named = Named::new(model);
+    let mut session = Session::new();
+    session.quality = Some(crate::quality::Gates::default());
+    session.messages = vec![
+        kept[0].clone(),
+        Message::assistant(reply),
+        kept[1].clone(),
+        kept[2].clone(),
+    ];
+    assert_eq!(
+        fixed + crate::compaction::session_tokens(&session.messages),
+        total
+    );
+    configure(&mut session);
+    match handed {
+        Handed::Bare => run_once(&*named, &mut session).await,
+        Handed::InArc => run_once(&named, &mut session).await,
+        Handed::InRoleProvider => {
+            let role = polaris_provider::role::RoleProvider::new(
+                named.clone(),
+                std::collections::HashMap::new(),
+            );
+            run_once(&role, &mut session).await
+        }
+    }
+    let sent = std::mem::take(&mut *named.sent.lock().expect("lock"));
+    assert_eq!(
+        sent.len(),
+        1 + summaries(&sent),
+        "the turn's own request, and any summary before it"
+    );
+    sent
+}
+
+#[tokio::test]
+async fn a_known_window_puts_the_threshold_at_seventy_percent_however_the_provider_is_wrapped() {
+    for handed in [Handed::Bare, Handed::InArc, Handed::InRoleProvider] {
+        let below = requests_at(handed, Some("window-400k"), 279_999, |_| {}).await;
+        assert_eq!(summaries(&below), 0);
+        assert_eq!(
+            counted(&below[0]),
+            279_999,
+            "the request is the size claimed"
+        );
+        let at = requests_at(handed, Some("window-400k"), 280_000, |_| {}).await;
+        assert_eq!(summaries(&at), 1);
+    }
+}
+
+#[tokio::test]
+async fn an_unknown_window_keeps_the_default_threshold() {
+    for model in [None, Some("unlisted-model")] {
+        let below = requests_at(Handed::Bare, model, 199_999, |_| {}).await;
+        assert_eq!(summaries(&below), 0);
+        let at = requests_at(Handed::Bare, model, 200_000, |_| {}).await;
+        assert_eq!(summaries(&at), 1);
+    }
+}
+
+#[tokio::test]
+async fn a_local_models_window_comes_from_the_setting() {
+    let local = Some("local-model");
+    let setting = |session: &mut Session| session.context_window = Some(8192);
+    // 70% of 8192 is 5,734.4, which rounds down.
+    let below = requests_at(Handed::Bare, local, 5_733, setting).await;
+    assert_eq!(summaries(&below), 0);
+    let at = requests_at(Handed::Bare, local, 5_734, setting).await;
+    assert_eq!(summaries(&at), 1);
+    // Without the setting the same size is far under the default.
+    let unset = requests_at(Handed::Bare, local, 5_734, |_| {}).await;
+    assert_eq!(summaries(&unset), 0);
+    // A published figure for the model is not overridden by the setting.
+    let published = requests_at(Handed::Bare, Some("window-400k"), 5_734, setting).await;
+    assert_eq!(summaries(&published), 0);
+}
+
+#[tokio::test]
+async fn a_threshold_set_on_the_session_wins_over_the_window() {
+    let sent = requests_at(Handed::Bare, Some("window-400k"), 5_000, |session| {
+        session.compaction_threshold = Some(5_000)
+    })
+    .await;
+    assert_eq!(summaries(&sent), 1);
+}
+
+#[tokio::test]
+async fn turn_only_does_not_compact_where_legacy_does() {
+    let model = Some("window-400k");
+    let legacy = requests_at(Handed::Bare, model, 280_000, |_| {}).await;
+    assert_eq!(
+        summaries(&legacy),
+        1,
+        "the same history is compacted under legacy"
+    );
+    let turn_only = requests_at(Handed::Bare, model, 280_000, |session| {
+        session.turn_memory = Some(Default::default())
+    })
+    .await;
+    assert_eq!(summaries(&turn_only), 0);
+}
+
+/// Runs four turns, each long enough to be worth summarising, under a
+/// threshold that every one of them is over, and returns every request the
+/// provider saw. `None` is legacy history; otherwise the turns are saved
+/// under `mode`.
+async fn requests_over_long_turns(
+    mode: Option<crate::conversation_state::HistoryMode>,
+) -> Vec<CompletionRequest> {
+    use crate::conversation_memory::{
+        EmbeddingModel, StrictEmbedder, StrictFuture, StrictHistory, StrictSummaryProvider,
+        SummaryRequest,
+    };
+    // Within the first ten turns nothing has expired, so the backend is asked
+    // for a query vector (strict10 does) and for nothing else.
+    struct Backend(EmbeddingModel);
+    impl StrictSummaryProvider for Backend {
+        fn summarize<'a>(&'a self, _: SummaryRequest) -> StrictFuture<'a, String> {
+            panic!("no turn has expired")
+        }
+    }
+    impl StrictEmbedder for Backend {
+        fn metadata(&self) -> &EmbeddingModel {
+            &self.0
+        }
+        fn embed_passage<'a>(&'a self, _: &'a str) -> StrictFuture<'a, Vec<f32>> {
+            panic!("no summary is published")
+        }
+        fn embed_query<'a>(&'a self, _: &'a str) -> StrictFuture<'a, Vec<Vec<f32>>> {
+            Box::pin(async { Ok(vec![vec![1., 0., 0.]]) })
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::new();
+    session.quality = Some(crate::quality::Gates::default());
+    if let Some(mode) = mode {
+        let saved = crate::session_store::PersistedSession::create(
+            dir.path(),
+            &dir.path().join("memory.sqlite3"),
+            "fixture",
+            mode,
+            None,
+        )
+        .unwrap();
+        session.attach(saved).unwrap();
+        let backend = Arc::new(Backend(EmbeddingModel {
+            model: "fixture".into(),
+            revision: "1".into(),
+            dimension: 3,
+        }));
+        session.strict_history = Some(Arc::new(StrictHistory::new(backend.clone(), backend)));
+    }
+    session.compaction_threshold = Some(1_000);
+    let provider = Named::new(None);
+    let turns = 4;
+    for turn in 1..=turns {
+        let body = "x".repeat(crate::compaction::MIN_TOKENS_TO_SUMMARIZE * 10);
+        session.push_user(&format!("turn {turn} {body}"));
+        run_once(&*provider, &mut session).await;
+    }
+    let sent = std::mem::take(&mut *provider.sent.lock().expect("lock"));
+    assert_eq!(
+        sent.len(),
+        turns + summaries(&sent),
+        "each turn's own request, and any summary before it"
+    );
+    sent
+}
+
+#[tokio::test]
+async fn strict10_and_structured10_do_not_compact_where_legacy_does() {
+    use crate::conversation_state::HistoryMode;
+    let legacy = requests_over_long_turns(None).await;
+    assert_ne!(
+        summaries(&legacy),
+        0,
+        "the same turns are compacted under legacy"
+    );
+    for mode in [HistoryMode::Strict10, HistoryMode::Structured10] {
+        let sent = requests_over_long_turns(Some(mode)).await;
+        assert_eq!(summaries(&sent), 0, "{mode:?}");
+    }
 }
 
 #[tokio::test]

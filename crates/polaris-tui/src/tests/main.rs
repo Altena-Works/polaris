@@ -2662,241 +2662,6 @@ fn inline_secret_value_is_redacted_before_idle_draw() {
     assert_eq!(secret_set_has_value("/mcp secret setup TOKEN"), None);
 }
 
-struct Summarizer;
-
-#[async_trait::async_trait]
-impl polaris_provider::Provider for Summarizer {
-    async fn complete(
-        &self,
-        _req: polaris_provider::CompletionRequest,
-    ) -> Result<polaris_provider::CompletionResponse, polaris_provider::ProviderError> {
-        Ok(polaris_provider::CompletionResponse {
-            text: "summary text".to_string(),
-            ..Default::default()
-        })
-    }
-}
-
-#[tokio::test]
-#[cfg(unix)]
-async fn m3e_confirmed_compaction_keeps_original_and_refuses_cancelled_send() {
-    struct BoundSummary;
-    #[async_trait::async_trait]
-    impl polaris_provider::Provider for BoundSummary {
-        async fn complete(
-            &self,
-            request: polaris_provider::CompletionRequest,
-        ) -> Result<polaris_provider::CompletionResponse, polaris_provider::ProviderError> {
-            Summarizer.complete(request).await
-        }
-        fn model(&self) -> Option<String> {
-            Some("test-summary".into())
-        }
-    }
-    let root = tempfile::tempdir().unwrap();
-    let project = root.path().join("project");
-    let state = root.path().join("state");
-    fs::create_dir(&project).unwrap();
-    fs::create_dir(&state).unwrap();
-    std::fs::set_permissions(
-        &state,
-        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
-    )
-    .unwrap();
-    let workspace = polaris_core::rewind_workspace::WorkspaceOwner::open(
-        &project,
-        &state.join("rewind-workspace"),
-        Default::default(),
-    )
-    .unwrap();
-    let lease = workspace.try_mutation().unwrap();
-    let effects = polaris_core::management_effect::ManagementEffectStoreV1::open_at_state_dir(
-        &project, &state, &lease,
-    )
-    .unwrap();
-    drop(lease);
-    let saved = polaris_core::session_store::PersistedSession::create(
-        root.path(),
-        &state.join("memory.sqlite3"),
-        project.to_str().unwrap(),
-        polaris_core::conversation_state::HistoryMode::Legacy,
-        None,
-    )
-    .unwrap();
-    let mut session = Session::new();
-    session.attach(saved.clone()).unwrap();
-    session.push_user("turn1");
-    session.push_assistant(&"older detailed reply ".repeat(2000), Vec::new());
-    session.push_user("turn2");
-    session.push_assistant("reply2", Vec::new());
-    session.push_user("turn3");
-    session.push_assistant("reply3", Vec::new());
-    let before = saved.snapshot().unwrap();
-    let terminal = RefCell::new(Terminal::new(TestBackend::new(100, 30)).unwrap());
-    let mut status = Status::Idle;
-    let mut usage = polaris_provider::Usage::default();
-    let mut declined = ScriptedReader(VecDeque::from([KeyCode::Esc]));
-    assert!(
-        !local_actions::compact(
-            &terminal,
-            &mut declined,
-            &BoundSummary,
-            &mut session,
-            &root.path().join("unused.jsonl"),
-            &workspace,
-            &effects,
-            &mut status,
-            &mut usage,
-            false
-        )
-        .await
-        .unwrap()
-    );
-    assert_eq!(saved.snapshot().unwrap().raw_hash, before.raw_hash);
-    assert_eq!(session.messages.len(), 6);
-    let mut accepted = ScriptedReader(VecDeque::from([KeyCode::Char('y')]));
-    assert!(
-        local_actions::compact(
-            &terminal,
-            &mut accepted,
-            &BoundSummary,
-            &mut session,
-            &root.path().join("unused.jsonl"),
-            &workspace,
-            &effects,
-            &mut status,
-            &mut usage,
-            false
-        )
-        .await
-        .unwrap()
-    );
-    assert_eq!(session.messages.len(), 5);
-    assert_eq!(saved.snapshot().unwrap().events.len(), 6);
-    assert!(!root.path().join("unused.jsonl").exists());
-    assert!(effects.blocker().unwrap().is_none());
-}
-
-#[tokio::test]
-async fn handle_compact_compacts_and_persists_when_there_is_something_to_compact() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let session_path = dir.path().join("s.jsonl");
-
-    // "reply 1" alone is well under `MIN_TOKENS_TO_SUMMARIZE`
-    // (`compaction::compact`'s floor guard) — inflated here so the
-    // summarized prefix actually clears the floor and this test still
-    // exercises a real compaction rather than tripping the "not worth
-    // it" no-op. Single-char repeats compress ~8:1 under o200k_base
-    // (see `polaris-core::compaction`'s own test for the same note).
-    let big_reply = "x".repeat(polaris_core::compaction::MIN_TOKENS_TO_SUMMARIZE * 10);
-    let mut session = Session::default();
-    session.push_user("turn 1");
-    session.push_assistant(&big_reply, vec![]);
-    session.push_user("turn 2");
-    session.push_assistant("reply 2", vec![]);
-    session.push_user("turn 3");
-    session.push_assistant("reply 3", vec![]);
-
-    let mut status = Status::Idle;
-    handle_compact(
-        &Summarizer,
-        &mut session,
-        &session_path,
-        &mut status,
-        &mut polaris_provider::Usage::default(),
-    )
-    .await;
-
-    assert!(
-        matches!(&status, Status::Notice(s) if s.contains("compacted")),
-        "expected a 'compacted' notice, got a different status"
-    );
-    assert_eq!(session.messages.len(), 5, "1 summary + kept tail of 4");
-
-    let (loaded, _truncated) = persist::load_session(&session_path).expect("load");
-    assert_eq!(
-        loaded.messages.len(),
-        session.messages.len(),
-        "the persisted file must reflect the compacted session, not the pre-compaction one"
-    );
-    assert_eq!(loaded.messages[0].content, session.messages[0].content);
-}
-
-/// A v2 session already holds every message in its own append-only
-/// log, and nothing appends to the legacy path for it. Writing the
-/// summarised list there anyway leaves a second `.jsonl` that
-/// `/resume` lists beside the intact session — same conversation,
-/// prefix replaced by a summary, no way to tell which is which.
-#[tokio::test]
-#[cfg(unix)]
-async fn manual_compaction_does_not_write_a_legacy_log_for_a_v2_session() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let data_root = tempfile::tempdir().expect("temp dir");
-    let session_path = dir.path().join("s.jsonl");
-
-    let big_reply = "x".repeat(polaris_core::compaction::MIN_TOKENS_TO_SUMMARIZE * 10);
-    let mut session = Session::default();
-    let persistence = polaris_core::session_store::PersistedSession::create(
-        data_root.path(),
-        &data_root.path().join("memory.sqlite3"),
-        "p",
-        polaris_core::conversation_state::HistoryMode::Legacy,
-        None,
-    )
-    .expect("v2 session");
-    session.attach(persistence).expect("attach");
-    session.push_user("turn 1");
-    session.push_assistant(&big_reply, vec![]);
-    session.push_user("turn 2");
-    session.push_assistant("reply 2", vec![]);
-    session.push_user("turn 3");
-    session.push_assistant("reply 3", vec![]);
-
-    let mut status = Status::Idle;
-    handle_compact(
-        &Summarizer,
-        &mut session,
-        &session_path,
-        &mut status,
-        &mut polaris_provider::Usage::default(),
-    )
-    .await;
-
-    assert!(
-        matches!(&status, Status::Notice(s) if s.contains("compacted")),
-        "compaction did not run, so this proves nothing"
-    );
-    assert_eq!(session.messages.len(), 5, "1 summary + kept tail of 4");
-    assert!(
-        !session_path.exists(),
-        "a summarised legacy log was written beside an intact v2 session"
-    );
-}
-
-#[tokio::test]
-async fn handle_compact_reports_when_there_is_nothing_to_compact() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let session_path = dir.path().join("s.jsonl");
-    let mut session = Session::default();
-    session.push_user("only turn");
-    let mut status = Status::Idle;
-
-    handle_compact(
-        &Summarizer,
-        &mut session,
-        &session_path,
-        &mut status,
-        &mut polaris_provider::Usage::default(),
-    )
-    .await;
-
-    assert!(
-        matches!(&status, Status::Notice(s) if s.contains("nothing")),
-        "expected a 'nothing to compact' notice"
-    );
-    assert_eq!(session.messages.len(), 1, "must not have been touched");
-}
-
 /// Feeds a fixed, pre-scripted sequence of key codes — the same
 /// approach `approver`'s own tests use, so a picker-driving test
 /// doesn't need a real terminal or a live keyboard.
@@ -6232,6 +5997,83 @@ fn an_unknown_command_names_itself_in_the_notice() {
         Status::Notice(n) => assert!(n.contains("frobnicate")),
         _ => panic!("expected a Notice"),
     }
+}
+
+#[test]
+fn compact_answers_that_compaction_is_automatic_and_touches_nothing() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let session_path = dir.path().join("session.jsonl");
+    for line in ["/compact", "/compact threshold 5000"] {
+        let mut session = Session::default();
+        session.push_user("turn 1");
+        session.push_assistant(
+            &"x".repeat(polaris_core::compaction::MIN_TOKENS_TO_SUMMARIZE * 10),
+            vec![],
+        );
+        session.push_user("turn 2");
+        session.push_assistant("reply 2", vec![]);
+        session.push_user("turn 3");
+        session.push_assistant("reply 3", vec![]);
+        let before = serde_json::to_string(&session.messages).unwrap();
+        let mut status = Status::Idle;
+        let mut local_lines = Vec::new();
+
+        call(
+            slash::parse(line).expect("a slash command"),
+            &mut session,
+            &session_path,
+            &mut status,
+            &[],
+            dir.path(),
+            &mut local_lines,
+        );
+
+        match status {
+            Status::Notice(notice) => assert!(notice.contains("automatic"), "{notice}"),
+            _ => panic!("expected a Notice for {line}"),
+        }
+        assert!(local_lines.is_empty(), "the answer is one line: {line}");
+        assert_eq!(serde_json::to_string(&session.messages).unwrap(), before);
+        assert!(!session_path.exists(), "nothing is persisted: {line}");
+    }
+}
+
+#[test]
+fn the_context_window_setting_reaches_local_providers_only() {
+    for local in ["ollama", "lmstudio", "llamacpp"] {
+        assert_eq!(context_window_for(local, Some(8192)), Some(8192), "{local}");
+        assert_eq!(context_window_for(local, None), None, "{local}");
+    }
+    // A cloud model given a local window would compact almost every turn.
+    for cloud in ["codex", "openai", ""] {
+        assert_eq!(context_window_for(cloud, Some(8192)), None, "{cloud:?}");
+    }
+}
+
+#[test]
+fn help_lists_no_compaction_command() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut session = Session::default();
+    let mut status = Status::Idle;
+    let mut local_lines = Vec::new();
+
+    call(
+        slash::Action::Help,
+        &mut session,
+        &dir.path().join("session.jsonl"),
+        &mut status,
+        &[],
+        dir.path(),
+        &mut local_lines,
+    );
+
+    assert!(local_lines.len() > 1, "the list is there");
+    assert!(
+        local_lines
+            .iter()
+            .all(|line| !line.to_string().to_lowercase().contains("compact")),
+        "{local_lines:?}"
+    );
 }
 
 /// A `Provider` whose only job is recording what `set_model` was last

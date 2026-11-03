@@ -28,6 +28,24 @@ pub fn floor(model: &str) -> Option<&'static str> {
     }
 }
 
+/// Models whose context window, in tokens, is published. Automatic compaction
+/// starts at a share of it. Nothing is listed yet: no model's window is written
+/// down in this repository, and a guessed figure could put the threshold past
+/// the real limit. A model that is not listed has no known window.
+const WINDOWS: &[(&str, usize)] = &[
+    // A name no real model has, so the tests can give a model a window.
+    #[cfg(test)]
+    ("window-400k", 400_000),
+];
+
+/// The context window of `model`, when it is published.
+pub fn context_window(model: &str) -> Option<usize> {
+    WINDOWS
+        .iter()
+        .find(|(name, _)| *name == model)
+        .map(|(_, window)| *window)
+}
+
 /// `effort` raised to `model`'s floor; the flag says whether it was.
 pub fn at_least_floor(model: &str, effort: &str) -> (String, bool) {
     let rank = |name: &str| EFFORTS.iter().position(|known| *known == name);
@@ -391,6 +409,14 @@ mod tests {
             Some("high"),
             "astra's floor"
         );
+    }
+
+    #[test]
+    fn a_window_is_found_by_the_exact_model_name_and_unlisted_models_have_none() {
+        assert_eq!(context_window("window-400k"), Some(400_000));
+        for model in ["window-400k-2", "Window-400k", "window-400", ""] {
+            assert_eq!(context_window(model), None, "{model:?}");
+        }
     }
 
     #[test]

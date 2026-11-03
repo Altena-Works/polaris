@@ -109,9 +109,16 @@ struct Args {
     #[arg(long, requires = "tool_memory_embedding_url")]
     tool_memory_embedding_model: Option<String>,
 
-    /// Estimated token threshold for automatic compaction; defaults to 200,000.
-    #[arg(long, value_parser = clap::value_parser!(u32).range(1000..))]
-    compact_at: Option<u32>,
+    /// Removed: compaction is automatic. Accepted only to fail with the reason.
+    #[arg(
+        long = "compact-at",
+        hide = true,
+        value_name = "N",
+        num_args = 0..=1,
+        default_missing_value = "",
+        value_parser = removed_compact_at
+    )]
+    _compact_at: Option<String>,
 
     /// Hosted web search. cached/live are refused until the endpoint capability contract is verified.
     #[arg(long, value_enum, default_value_t = WebSearchArg::Disabled)]
@@ -321,6 +328,10 @@ enum PhaseArg {
     Review,
     Verify,
     Deliver,
+}
+
+fn removed_compact_at(_: &str) -> Result<String, String> {
+    Err("this option was removed; compaction is automatic and starts at 70% of the model's context window (200,000 tokens when the window is unknown). For a local model, set `context_window` in config.toml".into())
 }
 
 fn parse_prompt_profile(name: &str) -> Result<polaris_core::prompt::Profile, String> {
@@ -3357,6 +3368,8 @@ async fn run_native_turn(args: Args, tool_memory_embedding: Option<(String, Stri
             session.input_preparation = input_preparation;
             session.disable_files_md_auto_regenerate = !config.files_md_auto_regenerate;
             session.approval_auto = config.approval_auto;
+            session.context_window =
+                polaris_tui::context_window_for(&provider_name, config.context_window);
             session.tier_decider = tier_decider.clone();
             session.decider = decider.clone();
             // The same independently constructed selector the MCP catalogue
@@ -3585,7 +3598,6 @@ async fn run_native_turn(args: Args, tool_memory_embedding: Option<(String, Stri
                 }
                 return ExitCode::FAILURE;
             }
-            session.compaction_threshold = args.compact_at.map(|n| n as usize);
             let session_id = format!(
                 "exec-{}-{}",
                 std::process::id(),
@@ -4171,7 +4183,7 @@ async fn run_native_turn(args: Args, tool_memory_embedding: Option<(String, Stri
                 remember: args.remember,
                 tool_memory: args.tool_memory.retention(),
                 tool_memory_embedding,
-                compact_at: args.compact_at.map(|n| n as usize),
+                context_window: config.context_window,
                 sandbox,
                 helper,
                 approval_policy,

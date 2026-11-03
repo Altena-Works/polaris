@@ -98,10 +98,6 @@ impl ConversationViewState {
         self.history_wrap_cache.invalidate();
     }
 
-    pub(super) fn mark_messages_printed(&mut self, count: usize) {
-        self.printed_messages = count;
-    }
-
     pub(super) fn observe_compaction(&mut self, messages_before: usize, messages_after: usize) {
         self.printed_messages = self
             .printed_messages

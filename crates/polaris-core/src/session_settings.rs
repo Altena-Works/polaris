@@ -80,7 +80,15 @@ pub struct SavedSessionSettingsV1 {
     pub remember: bool,
     pub tool_memory: ToolMemoryModeV1,
     pub tool_memory_embedding: Option<SavedToolEmbeddingV1>,
-    pub compact_threshold: Option<usize>,
+    /// Manual compaction thresholds no longer exist. Files written before
+    /// that still carry the key: it is read and discarded, and not written back.
+    #[serde(
+        default,
+        rename = "compact_threshold",
+        skip_serializing,
+        deserialize_with = "discard"
+    )]
+    _compact_threshold: Discarded,
     pub provider: String,
     pub model: String,
     pub effort: String,
@@ -97,7 +105,7 @@ impl SavedSessionSettingsV1 {
             remember: false,
             tool_memory: ToolMemoryModeV1::Off,
             tool_memory_embedding: None,
-            compact_threshold: None,
+            _compact_threshold: Discarded,
             provider,
             model,
             effort,
@@ -117,9 +125,6 @@ impl SavedSessionSettingsV1 {
             || self.model.chars().any(char::is_control)
             || (!matches!(self.effort.as_str(), "" | "auto")
                 && !crate::desktop_store::EFFORTS.contains(&self.effort.as_str()))
-            || self
-                .compact_threshold
-                .is_some_and(|threshold| threshold < 1000)
         {
             return Err(invalid("Invalid session settings"));
         }
@@ -149,6 +154,15 @@ impl SavedSessionSettingsV1 {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+/// What a key that is read and thrown away leaves behind: nothing, so two
+/// settings never differ by it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Discarded;
+
+fn discard<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Discarded, D::Error> {
+    serde::de::IgnoredAny::deserialize(deserializer).map(|_| Discarded)
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -189,9 +203,6 @@ pub enum SessionSettingsCommandV1 {
     EmbeddingModel {
         embedding: Option<SavedToolEmbeddingV1>,
     },
-    CompactThreshold {
-        threshold: Option<usize>,
-    },
     Configure {
         expected_revision: u64,
         provider: String,
@@ -219,7 +230,6 @@ impl SessionSettingsCommandV1 {
             Self::ToolMemory { .. } => "F07",
             Self::EmbeddingEndpoint { .. } => "F08",
             Self::EmbeddingModel { .. } => "F09",
-            Self::CompactThreshold { .. } => "F10",
             Self::Configure { .. } => "D18",
             Self::History { .. } => "F16",
             Self::Draft { .. } => "D17",

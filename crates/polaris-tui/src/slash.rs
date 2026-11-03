@@ -1,7 +1,7 @@
 //! Slash commands: local, client-side commands recognized when the input
 //! buffer starts with `/`. Most dispatch to local owners rather than becoming
-//! conversation messages. `Review` expands into a normal model turn; compact
-//! and input-admission commands can also request model work through their
+//! conversation messages. `Review` expands into a normal model turn;
+//! input-admission commands can also request model work through their
 //! owners. Local configuration and management commands may persist state.
 //!
 //! Typing opens an autocomplete popup and submission dispatches the selected
@@ -132,10 +132,6 @@ pub const COMMANDS: &[SlashCommand] = &[
         description: "erase this conversation's saved history",
     },
     SlashCommand {
-        name: "compact",
-        description: "summarize older history now to free up context",
-    },
-    SlashCommand {
         name: "init",
         description: "create an AGENTS.md file with instructions for polaris",
     },
@@ -239,10 +235,9 @@ pub enum Action {
     /// have) and swaps the active session in place on selection.
     Resume,
     Clear,
-    /// Not handled by `apply_slash_action` — needs a real `&dyn Provider`
-    /// reference and an async LLM call, which `apply_slash_action` (sync,
-    /// display-strings-only) doesn't have. The caller in `lib.rs`
-    /// intercepts this the same way it does `Model`.
+    /// Removed: compaction is automatic. Still parsed, with or without the
+    /// old `threshold` argument, so that typing it gets an answer instead of
+    /// "unknown command". It is not listed in `COMMANDS` and starts nothing.
     Compact,
     Init,
     /// Same interception story as `Permissions` — the caller shows a
@@ -295,6 +290,7 @@ impl Action {
             | Self::Pwd
             | Self::Diff
             | Self::Compare(_)
+            | Self::Compact
             | Self::Quit
             | Self::Unknown(_) => true,
             Self::Account(value) | Self::Decided(value) | Self::Mcp(value) => {
@@ -381,7 +377,6 @@ impl Action {
             Self::New
             | Self::Resume
             | Self::Clear
-            | Self::Compact
             | Self::Init
             | Self::Fork
             | Self::Export(_)
@@ -446,9 +441,6 @@ pub fn parse(line: &str) -> Option<Action> {
         "new" => Action::New,
         "resume" => Action::Resume,
         "clear" => Action::Clear,
-        "compact" if extra.starts_with("threshold ") => {
-            Action::SessionControl(format!("compact {extra}"))
-        }
         "compact" => Action::Compact,
         "init" => Action::Init,
         "mcp" => Action::Mcp(extra),
@@ -488,7 +480,6 @@ mod tests {
             "/goal set finish",
             "/memory configure on",
             "/tool-memory endpoint http://127.0.0.1:8080/v1 embed",
-            "/compact threshold 1000",
         ] {
             let action = parse(command).unwrap();
             assert!(
@@ -699,10 +690,16 @@ mod tests {
     }
 
     #[test]
-    fn compact_is_a_known_command() {
-        assert!(matches!(parse("/compact"), Some(Action::Compact)));
-        assert!(matches!(action_for("compact"), Action::Compact));
-        assert!(COMMANDS.iter().any(|c| c.name == "compact"));
+    fn compact_is_answered_but_not_offered() {
+        for line in ["/compact", "/compact threshold 5000", "/COMPACT now"] {
+            let action = parse(line).unwrap();
+            assert!(matches!(action, Action::Compact), "{line}");
+            assert!(!action.needs_management_clearance(), "{line}");
+            assert!(action.allowed_without_mutation_owner(), "{line}");
+        }
+        assert!(!COMMANDS.iter().any(|c| c.name == "compact"));
+        assert!(matching("compact").is_empty());
+        assert!(matching("com").iter().all(|c| c.name != "compact"));
     }
 
     #[test]

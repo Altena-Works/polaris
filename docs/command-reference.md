@@ -73,10 +73,9 @@ profileは`node`・`nextjs`・`react`・`vue`・`svelte`・`astro`・`nuxt`・`a
 | `/new` | 元会話を残し、空の会話を始める。 | 会話画面をresetして待機状態へ戻る。新しいIDは`/session`で確認できる。 |
 | `/resume` | 保存会話を選んで開く。 | `resume a conversation`と、経過時間・message数・previewの一覧。↑↓で移動、Enterで選択、Escで取消。候補1件なら選択位置は変わらない。 |
 | `/fork` | 現在の履歴を別の会話IDへ複製する。 | `v2セッションへ分岐しました: <ID>`。 |
-| `/session`、`/session current` | 会話IDと現在・保存済みの設定を確認する。 | `会話: <ID> / 世代 <n>`、`現在provider: ... / model: ...`、保存provider/model/effort、履歴・remember・tool-memory・compact等。 |
+| `/session`、`/session current` | 会話IDと現在・保存済みの設定を確認する。 | `会話: <ID> / 世代 <n>`、`現在provider: ... / model: ...`、保存provider/model/effort、履歴・remember・tool-memory等。 |
 | `/history [offset]` | 保存した原文履歴を読む。offsetはmessage単位の整数。 | `原文履歴 <開始>..<終了> / <総数> messages`とrole/turn/本文。1回最大20messages・64KiB。 |
 | `/clear` | 確認後、会話の現在の区間（epoch）を消去する。 | `T08 complete`。過去の証拠は保持されるため、全履歴ファイルの削除とは異なる。 |
-| `/compact` | 確認後、モデルに古い会話を要約させる。原文は保持する。 | `compacting...`→`compacted <前> messages → <後> (<前tok> tok → <後tok> tok)`。短い会話なら`nothing old enough to compact yet`。 |
 | `/review [追加指示]` | 現在の未コミット変更のレビューをモデルへ依頼する。 | 通常のモデル応答とツールの実行状況。追加指示をレビューpromptに含める。 |
 | `/export [path]` | 確認後、会話原文のeventをMarkdownへ新規保存する。 | `T17 完了: <path>`。省略時は`polaris-export-<時刻>.md`。既存ファイルは上書きせず、上限16MiB。 |
 | `/copy` | 確認後、最後の本文があるassistant返答をclipboardへコピーする。 | `T19 完了`。 |
@@ -84,6 +83,8 @@ profileは`node`・`nextjs`・`react`・`vue`・`svelte`・`astro`・`nuxt`・`a
 | `/quit`、`/exit`、`/q` | TUIを終了する。 | 保存会話があれば`Resume this session with: polaris --resume <ID>`。未処理入力や下書きがあれば終了を拒否する場合がある。 |
 
 `/resume`で会話を開いても、現在の作業ファイルと保存状態が一致しない場合は閲覧のみになる。`/new`・`/fork`・`/resume`は別の操作であり、IDは`/session current`で確認できる。
+
+履歴の圧縮は自動で行い、手動で起動するコマンドとオプションはない。閾値の決め方は[コンテキスト効率化](context-efficiency.md#圧縮と履歴保存)にある。
 
 ログイン画面・ダイアログ・実行中も、可視文字をドラッグして離すと選択範囲を直接clipboardへコピーする。非表示の秘密値は対象外で、追加の確認画面は表示しない。リンクはCtrl-click、端末が通知する場合はCmd-clickで開く。通常のクリック・ドラッグでは開かない。Terminal.appのCmd＋単クリックは未対応であり、Ctrl-clickを使う。
 
@@ -111,7 +112,6 @@ macOSの端末へファイルをD&Dすると、入力欄に`[ファイル名]`�
 | `/tool-memory off\|history\|retrieval` | ツール結果の保存・参照方式を変更する。 | F07の保存結果。 |
 | `/tool-memory endpoint off`、`/tool-memory endpoint <URL> <MODEL>` | ツール記憶の埋め込み接続を無効化、または接続先とモデルを保存する。 | F08の保存結果。 |
 | `/tool-memory model <MODEL>` | 設定済みの埋め込みモデルを変更する。 | F09の保存結果。先にendpoint設定が必要。 |
-| `/compact threshold off\|<整数>` | 自動圧縮の閾値を変更する。 | F10の保存結果。整数は1000以上。 |
 | `/goal`、`/goal current` | 保存したgoalを見る。 | `goal revision <n> / 有効 on / 停止 off`と本文。未設定なら`No saved goal`。 |
 | `/goal set <文章>`、`/goal clear` | goalを設定、または消去する。 | 確認後、D20の保存結果とgoal表示。 |
 | `/goal stop`、`/goal resume` | 保存goalを停止、または再開する。 | 確認後、D20の保存結果と停止状態。 |
@@ -282,7 +282,6 @@ Rustの既存Command Line Toolsを使う場合は、起動時に`POLARIS_ENVKIT_
 | `--remember` | 圧縮前履歴を保存し、project別の検索索引を作る。 |
 | `--tool-memory off\|history\|retrieval` | 大きなツール結果の保存・参照方式。既定off。 |
 | `--tool-memory-embedding-url <URL>`、`--tool-memory-embedding-model <ID>` | ツール記憶の埋め込み接続先とモデル。必ず組で指定。 |
-| `--compact-at <n>` | 自動圧縮を始める推定token数。指定時は1000以上。 |
 | `--history-mode legacy\|strict10\|structured10` | 会話履歴の方式。strict10には固定したローカル埋め込み設定が必要。 |
 | `--resume <ID>`、`--fork <ID>` | 保存会話を再開、または別UUIDへ分岐する。同時指定不可。 |
 | `--workflow-mode manual\|adaptive\|off` | workflowの実行方式を指定。 |

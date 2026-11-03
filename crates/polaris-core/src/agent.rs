@@ -239,6 +239,19 @@ pub async fn run_desktop(
     }
 }
 
+/// The estimated request size at which this session's history is compacted.
+/// A threshold set on the session wins. Otherwise it follows the model's
+/// context window: the published figure for the model's name, then the
+/// session's `context_window` for a model with none (a local one).
+fn compaction_threshold(session: &Session, provider: &dyn Provider, fixed: usize) -> usize {
+    session.compaction_threshold.unwrap_or_else(|| {
+        let published = provider
+            .model()
+            .and_then(|model| crate::effort_plan::context_window(&model));
+        crate::compaction::threshold(published.or(session.context_window), fixed)
+    })
+}
+
 pub(crate) fn check_event_delivery(
     events: Option<&crate::desktop_events::EventSink>,
 ) -> Result<(), AgentError> {
@@ -1627,21 +1640,23 @@ pub(crate) async fn run_loop(
             .as_ref()
             .and_then(|prompt| prompt.project_reference())
             .map(polaris_provider::Message::user);
-        let total_tokens = crate::budget::always_on_tokens(&sending_system, &sending_tools)
+        let fixed = crate::budget::always_on_tokens(&sending_system, &sending_tools)
             + project_reference
                 .as_ref()
                 .map_or(0, |message| crate::budget::count_tokens(&message.content))
-            + crate::compaction::session_tokens(&session.examples)
+            + crate::compaction::session_tokens(&session.examples);
+        let total_tokens = fixed
             // The memory evidence is deliberately absent. It exists only
             // under strict10/structured10, and compaction is disabled under
             // exactly those modes, so whenever this decision runs the
             // evidence is None. Counting it would be unreachable.
             + crate::compaction::session_tokens(&sending_messages);
+        // Legacy history only. strict10 and structured10 keep their history
+        // down in their own way, and turn-only sends one turn at a time, so a
+        // summary of the saved history would be work nothing reads.
         if !strict_history
-            && total_tokens
-                >= session
-                    .compaction_threshold
-                    .unwrap_or(crate::compaction::COMPACTION_THRESHOLD)
+            && turn_only.is_none()
+            && total_tokens >= compaction_threshold(session, provider, fixed)
         {
             let input_before_compaction = session.input_source.clone();
             let message_count_before_compaction = session.messages.len();
@@ -1694,10 +1709,10 @@ pub(crate) async fn run_loop(
                     // transient error) must not block the turn itself —
                     // send this turn's full history rather than
                     // permanently bricking every subsequent turn on the
-                    // same failure (session.messages stays over
-                    // COMPACTION_THRESHOLD, so without this every future
-                    // turn — including `/compact` itself — would retry
-                    // and fail the same way until `/clear`/`/new`).
+                    // same failure (session.messages stays over the
+                    // threshold, so without this every future turn
+                    // would retry and fail the same way until
+                    // `/clear`/`/new`).
                 }
             }
         }

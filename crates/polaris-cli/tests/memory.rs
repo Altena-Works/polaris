@@ -85,7 +85,7 @@ fn import_search_get_and_forget_preserve_project_boundary() {
 }
 
 #[test]
-fn search_does_not_create_memory_and_invalid_threshold_is_rejected() {
+fn search_does_not_create_memory() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     assert!(
@@ -94,15 +94,28 @@ fn search_does_not_create_memory_and_invalid_threshold_is_rejected() {
             .success()
     );
     assert!(!home.path().join(".polaris").exists());
-    assert!(
-        !run(
-            home.path(),
-            project.path(),
-            &["--compact-at", "0", "doctor"]
-        )
-        .status
-        .success()
-    );
+}
+
+#[test]
+fn compact_at_is_refused_with_its_reason_even_for_a_value_that_used_to_be_valid() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let forms: [&[&str]; 4] = [
+        &["--compact-at", "60000", "doctor"],
+        &["--compact-at", "0", "doctor"],
+        &["--compact-at=60000", "doctor"],
+        // No value at all must give the same reason, not clap's own error.
+        &["--compact-at"],
+    ];
+    for args in forms {
+        let refused = run(home.path(), project.path(), args);
+        assert!(!refused.status.success(), "{args:?}");
+        let message = String::from_utf8_lossy(&refused.stderr);
+        assert!(
+            message.contains("--compact-at") && message.contains("compaction is automatic"),
+            "{message}"
+        );
+    }
 }
 
 #[test]

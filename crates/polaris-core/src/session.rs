@@ -146,8 +146,14 @@ pub struct Session {
     pub routine_change_authorization: Option<RoutineChangeAuthorizationV1>,
     /// Saves the full original history before a valid summary replaces it.
     pub before_compact: Option<std::sync::Arc<crate::compaction::ArchiveHook>>,
-    /// Optional local override; no model window is inferred.
+    /// Fixes the compaction threshold: tests lower it, and a desktop run
+    /// raises it to switch compaction off. No setting reaches it; otherwise
+    /// the threshold comes from the model's context window.
     pub compaction_threshold: Option<usize>,
+    /// The context window, in tokens, of a model that has no published figure
+    /// (a local one), from the `context_window` setting. A published figure
+    /// for the model takes precedence.
+    pub context_window: Option<usize>,
     /// Automatic retry watermark; transient and not persisted with history.
     pub compaction_retry_tokens: Option<usize>,
     /// Explicitly configured durable tool-result storage; never serialized as credentials.
