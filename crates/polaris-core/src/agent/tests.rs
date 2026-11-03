@@ -6316,19 +6316,46 @@ async fn a_failed_compaction_call_does_not_block_the_turn() {
     );
 }
 
+/// Reasoning whose encrypted_content weighs exactly `tokens` under
+/// o200k_base.
+fn sealed_reasoning(tokens: usize) -> Vec<polaris_provider::ReasoningItem> {
+    if tokens == 0 {
+        return Vec::new();
+    }
+    vec![polaris_provider::ReasoningItem {
+        id: "r".into(),
+        encrypted_content: vec!["the"; tokens].join(" "),
+    }]
+}
+
 /// Answers every request with a short reply, keeps each one, and reports
-/// `model` as its model.
+/// `model` as its model. A reply can also claim `reported` input tokens as its
+/// usage, nine tenths of them read from the cache as in a real long session,
+/// and carry `sealed` tokens of reasoning ciphertext.
 struct Named {
     model: Option<&'static str>,
     sent: Mutex<Vec<CompletionRequest>>,
+    reported: Mutex<Option<u32>>,
+    sealed: usize,
 }
 
 impl Named {
     fn new(model: Option<&'static str>) -> Arc<Self> {
+        Self::replying(model, None, 0)
+    }
+
+    fn replying(model: Option<&'static str>, reported: Option<u32>, sealed: usize) -> Arc<Self> {
         Arc::new(Self {
             model,
             sent: Mutex::new(Vec::new()),
+            reported: Mutex::new(reported),
+            sealed,
         })
+    }
+
+    /// Every request seen since the last call.
+    fn taken(&self) -> Vec<CompletionRequest> {
+        std::mem::take(&mut *self.sent.lock().expect("lock"))
     }
 }
 
@@ -6341,6 +6368,15 @@ impl Provider for Named {
         self.sent.lock().expect("lock").push(req);
         Ok(CompletionResponse {
             text: "reply".into(),
+            reasoning: sealed_reasoning(self.sealed),
+            usage: self.reported.lock().expect("lock").map(|input_tokens| {
+                polaris_provider::Usage {
+                    input_tokens,
+                    // The cached share is part of the input, not taken from it.
+                    cached_tokens: input_tokens / 10 * 9,
+                    ..Default::default()
+                }
+            }),
             ..Default::default()
         })
     }
@@ -6611,6 +6647,176 @@ async fn strict10_and_structured10_do_not_compact_where_legacy_does() {
         let sent = requests_over_long_turns(Some(mode)).await;
         assert_eq!(summaries(&sent), 0, "{mode:?}");
     }
+}
+
+const SECOND_QUESTION: &str = "second question";
+
+/// A conversation worth compacting: a first question that weighs `old`
+/// tokens, an answer that carries `sealed` tokens of ciphertext, and a later
+/// question and answer, so the oldest turn is what a summary replaces.
+fn resumed(old: usize, sealed: usize) -> Session {
+    use polaris_provider::Message;
+    let mut session = Session::new();
+    session.quality = Some(crate::quality::Gates::default());
+    session.messages = vec![
+        Message::user(vec!["the"; old].join(" ")),
+        Message::assistant("noted").with_reasoning(sealed_reasoning(sealed)),
+        Message::user("recent question"),
+        Message::assistant("noted"),
+    ];
+    session
+}
+
+async fn ask(provider: &dyn Provider, session: &mut Session, question: &str) {
+    session.push_user(question);
+    run_once(provider, session).await;
+}
+
+/// Two questions put to a `resumed(old, 0)` conversation. The replies claim
+/// `reported` input tokens and carry `sealed` tokens of ciphertext, so the
+/// second question is decided over a history that holds the first reply.
+/// Returns every request the provider saw.
+async fn two_questions(reported: Option<u32>, sealed: usize, old: usize) -> Vec<CompletionRequest> {
+    let named = Named::replying(None, reported, sealed);
+    let mut session = resumed(old, 0);
+    ask(&*named, &mut session, "first question").await;
+    ask(&*named, &mut session, SECOND_QUESTION).await;
+    named.taken()
+}
+
+#[tokio::test]
+async fn a_report_under_the_threshold_keeps_an_estimate_over_ciphertext_from_compacting() {
+    // A measured run: the provider counted 34,696 input tokens, o200k over
+    // the encrypted reasoning read the request as 205,761, and the threshold
+    // was 200,000.
+    let plain = two_questions(None, 0, 2_000).await;
+    let sealed = 205_761 - counted(plain.last().expect("a request"));
+    let sent = two_questions(Some(34_696), sealed, 2_000).await;
+    assert_eq!(summaries(&sent), 0, "compacted for nothing");
+    assert_eq!(
+        counted(sent.last().expect("a request")),
+        205_761,
+        "what an estimate over the ciphertext reads for this request"
+    );
+    // The same conversation is compacted once the provider counts more than
+    // the threshold.
+    let over = two_questions(Some(250_000), sealed, 2_000).await;
+    assert_eq!(summaries(&over), 1);
+}
+
+#[tokio::test]
+async fn a_report_and_what_was_added_since_decide_at_the_threshold() {
+    use polaris_provider::Message;
+    let threshold = crate::compaction::COMPACTION_THRESHOLD;
+    // What the second question adds that the report did not cover: the first
+    // reply and the question itself.
+    let added = crate::compaction::readable_tokens(&[
+        Message::assistant("reply"),
+        Message::user(SECOND_QUESTION),
+    ]);
+    let at = two_questions(Some((threshold - added) as u32), 0, 2_000).await;
+    assert_eq!(summaries(&at), 1);
+    let below = two_questions(Some((threshold - added - 1) as u32), 0, 2_000).await;
+    assert_eq!(summaries(&below), 0);
+}
+
+#[tokio::test]
+async fn without_a_report_the_estimate_leaves_the_ciphertext_out() {
+    // A conversation read back from storage, so its first request has no
+    // report. One answer carries ciphertext that o200k reads as 250,000
+    // tokens; its readable text is only a few thousand.
+    let named = Named::new(None);
+    let mut session = resumed(2_000, 250_000);
+    ask(&*named, &mut session, "latest question").await;
+    let sent = named.taken();
+    assert_eq!(summaries(&sent), 0, "compacted for ciphertext");
+    assert!(
+        counted(sent.last().expect("a request")) >= crate::compaction::COMPACTION_THRESHOLD,
+        "an estimate over the ciphertext is over the threshold"
+    );
+    // Without a report the readable text still decides.
+    let named = Named::new(None);
+    let mut session = resumed(crate::compaction::COMPACTION_THRESHOLD, 0);
+    ask(&*named, &mut session, "latest question").await;
+    assert_eq!(summaries(&named.taken()), 1);
+}
+
+#[tokio::test]
+async fn the_loop_keeps_the_count_of_the_last_request_only() {
+    use crate::compaction::ReportedInput;
+    let named = Named::replying(None, Some(100_000), 0);
+    let mut session = resumed(2_000, 0);
+    ask(&*named, &mut session, "first question").await;
+    assert_eq!(
+        session.reported_input,
+        Some(ReportedInput {
+            tokens: 100_000,
+            messages: 5
+        }),
+        "the four messages and the question that the request carried"
+    );
+    *named.reported.lock().expect("lock") = Some(120_000);
+    ask(&*named, &mut session, SECOND_QUESTION).await;
+    assert_eq!(
+        session.reported_input,
+        Some(ReportedInput {
+            tokens: 120_000,
+            messages: 7
+        })
+    );
+    // A reply with no count, or a count of zero, leaves none: the last one is
+    // not the count of this request.
+    for unusable in [None, Some(0)] {
+        *named.reported.lock().expect("lock") = Some(120_000);
+        ask(&*named, &mut session, "a counted question").await;
+        assert!(session.reported_input.is_some());
+        *named.reported.lock().expect("lock") = unusable;
+        ask(&*named, &mut session, "an uncounted question").await;
+        assert_eq!(session.reported_input, None, "{unusable:?}");
+    }
+    assert_eq!(
+        summaries(&named.taken()),
+        0,
+        "nothing was over the threshold"
+    );
+    // A turn-only request carries one turn, not the history, so what it was
+    // counted at is not a count of the history.
+    *named.reported.lock().expect("lock") = Some(120_000);
+    let mut turn_only = resumed(2_000, 0);
+    turn_only.turn_memory = Some(Default::default());
+    ask(&*named, &mut turn_only, "first question").await;
+    assert_eq!(turn_only.reported_input, None);
+}
+
+#[tokio::test]
+async fn a_report_does_not_outlive_the_history_it_counted() {
+    use crate::compaction::ReportedInput;
+    let named = Named::replying(None, Some(250_000), 0);
+    let mut session = Session::new();
+    session.quality = Some(crate::quality::Gates::default());
+    ask(&*named, &mut session, "before the clear").await;
+    assert_eq!(
+        session.reported_input,
+        Some(ReportedInput {
+            tokens: 250_000,
+            messages: 1
+        })
+    );
+    named.taken();
+    session.clear_history().expect("cleared");
+    // A new conversation that is worth compacting and far under the
+    // threshold on its own.
+    session.messages = resumed(2_000, 0).messages;
+    ask(&*named, &mut session, "latest question").await;
+    assert_eq!(
+        summaries(&named.taken()),
+        0,
+        "the count of the cleared history was believed"
+    );
+    // Its own request was counted at the same 250,000, which is over the
+    // threshold for this history, and that does compact it.
+    ask(&*named, &mut session, SECOND_QUESTION).await;
+    assert_eq!(summaries(&named.taken()), 1);
 }
 
 #[tokio::test]

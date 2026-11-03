@@ -2818,7 +2818,7 @@ fn keep_or_roll_back(
     {
         return session.recover_interrupted_tools();
     }
-    session.messages.truncate(checkpoint);
+    session.truncate_history(checkpoint);
     Ok(())
 }
 
@@ -11659,7 +11659,7 @@ fn apply_slash_action(
             let cleared = if session.persistence.is_some() {
                 session.clear_history()
             } else {
-                session.messages.clear();
+                session.truncate_history(0);
                 persist::clear_session(session_path)
             };
             match cleared {

@@ -1,7 +1,8 @@
-//! Automatic history summarization. Fires when the estimated size of a
-//! request crosses a share of the model's context window, or a fixed ceiling
-//! when the window is unknown. Keeps recent user turns, or the original
-//! instruction and recent complete tool groups in a single turn.
+//! Automatic history summarization. Fires when the size of a request, as the
+//! provider last counted it or else as estimated, crosses a share of the
+//! model's context window, or a fixed ceiling when the window is unknown.
+//! Keeps recent user turns, or the original instruction and recent complete
+//! tool groups in a single turn.
 
 use crate::budget::count_tokens;
 #[cfg(test)]
@@ -29,7 +30,7 @@ use polaris_provider::{CompletionRequest, Message, Provider, ProviderError, Role
 /// late. That is why a known window decides the threshold instead.
 pub const COMPACTION_THRESHOLD: usize = 200_000;
 
-/// The estimated size of a request at which the history is compacted: 70% of
+/// The size of a request, in tokens, at which the history is compacted: 70% of
 /// the model's context window, or [`COMPACTION_THRESHOLD`] when the window is
 /// not known.
 ///
@@ -39,6 +40,28 @@ pub const COMPACTION_THRESHOLD: usize = 200_000;
 /// is pinned: the result never depends on it.
 pub fn threshold(window: Option<usize>, _fixed: usize) -> usize {
     window.map_or(COMPACTION_THRESHOLD, |window| window.saturating_mul(7) / 10)
+}
+
+/// What the provider counted for the last completed request over a history:
+/// its `input_tokens`, which is the whole input with cached tokens included,
+/// and how many of the session's messages that request carried.
+///
+/// The compaction decision starts from it instead of an estimate. It
+/// describes one history, so the session drops it whenever that history is
+/// replaced or shrunk, and it is never compared with a different one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReportedInput {
+    pub tokens: usize,
+    pub messages: usize,
+}
+
+impl ReportedInput {
+    /// The size of `messages` now: what was reported, plus an estimate of the
+    /// messages added since. `None` when `messages` is shorter than what the
+    /// report covers, which a report of the same history never is.
+    pub fn size_over(&self, messages: &[Message]) -> Option<usize> {
+        Some(self.tokens + readable_tokens(messages.get(self.messages..)?))
+    }
 }
 
 /// How many of the most recent user turns survive compaction verbatim.
@@ -77,6 +100,19 @@ const COMPACTION_SYSTEM_PROMPT: &str = "You are summarizing a coding \
 /// items' encrypted_content — the same bytes that ride the wire on
 /// replay, even though the content itself is opaque.
 pub fn session_tokens(messages: &[Message]) -> usize {
+    readable_tokens(messages)
+        + messages
+            .iter()
+            .flat_map(|m| &m.reasoning)
+            .map(|r| count_tokens(&r.encrypted_content))
+            .sum::<usize>()
+}
+
+/// [`session_tokens`] without the reasoning items' encrypted_content. o200k
+/// over that ciphertext is not what the provider counts: it read one request
+/// as 205,761 tokens where the provider reported 34,696. This is the estimate
+/// the compaction decision uses.
+pub fn readable_tokens(messages: &[Message]) -> usize {
     messages
         .iter()
         .map(|m| {
@@ -84,9 +120,6 @@ pub fn session_tokens(messages: &[Message]) -> usize {
             for c in &m.tool_calls {
                 total += count_tokens(&c.arguments.to_string());
                 total += count_tokens(&c.name);
-            }
-            for r in &m.reasoning {
-                total += count_tokens(&r.encrypted_content);
             }
             total
         })
@@ -583,6 +616,84 @@ mod tests {
             with_reasoning > without_reasoning,
             "a large encrypted_content blob must count toward the total"
         );
+    }
+
+    fn sealed(tokens: usize) -> Vec<polaris_provider::ReasoningItem> {
+        vec![polaris_provider::ReasoningItem {
+            id: "r1".into(),
+            encrypted_content: vec!["the"; tokens].join(" "),
+        }]
+    }
+
+    #[test]
+    fn readable_tokens_are_session_tokens_without_the_ciphertext() {
+        let reasoned = Message::assistant("done").with_reasoning(sealed(5_000));
+        assert_eq!(
+            readable_tokens(std::slice::from_ref(&reasoned)),
+            session_tokens(&[Message::assistant("done")]),
+            "only the ciphertext is left out"
+        );
+        assert_eq!(
+            session_tokens(&[reasoned]) - readable_tokens(&[Message::assistant("done")]),
+            5_000,
+            "session_tokens still counts every token of it"
+        );
+    }
+
+    #[test]
+    fn a_report_is_extended_by_an_estimate_of_the_messages_added_after_it() {
+        let history = [
+            user("question"),
+            Message::assistant("answer"),
+            user("another question"),
+            Message::assistant("another answer").with_reasoning(sealed(5_000)),
+        ];
+        let added = readable_tokens(&history[2..]);
+        assert!(added > 0);
+        let reported = ReportedInput {
+            tokens: 34_696,
+            messages: 2,
+        };
+        assert_eq!(reported.size_over(&history), Some(34_696 + added));
+        assert_eq!(reported.size_over(&history[..2]), Some(34_696));
+        assert_eq!(
+            reported.size_over(&history[..1]),
+            None,
+            "a history shorter than the report covers is not the one it counted"
+        );
+    }
+
+    #[tokio::test]
+    async fn compacting_the_history_forgets_what_was_reported_for_it() {
+        let report = ReportedInput {
+            tokens: 250_000,
+            messages: 3,
+        };
+        // Nothing to summarize: the history stays as it was, and so does the
+        // count of it.
+        let mut kept = crate::session::Session::new();
+        kept.messages = compactable_history();
+        kept.messages.pop();
+        kept.reported_input = Some(report);
+        assert!(
+            kept.compact_automatically(&MeasuredSummary("summary"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(kept.reported_input, Some(report));
+        // Replaced by a summary: the count was of the history before it.
+        let mut replaced = crate::session::Session::new();
+        replaced.messages = compactable_history();
+        replaced.reported_input = Some(report);
+        assert!(
+            replaced
+                .compact_automatically(&MeasuredSummary("summary"))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(replaced.reported_input, None);
     }
 
     #[test]

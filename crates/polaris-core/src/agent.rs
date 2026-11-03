@@ -239,8 +239,8 @@ pub async fn run_desktop(
     }
 }
 
-/// The estimated request size at which this session's history is compacted.
-/// A threshold set on the session wins. Otherwise it follows the model's
+/// The request size at which this session's history is compacted. A
+/// threshold set on the session wins. Otherwise it follows the model's
 /// context window: the published figure for the model's name, then the
 /// session's `context_window` for a model with none (a local one).
 fn compaction_threshold(session: &Session, provider: &dyn Provider, fixed: usize) -> usize {
@@ -1336,6 +1336,12 @@ pub(crate) async fn run_loop(
         prepared_input = prepared;
     }
     let strict_history = session.uses_strict_history()?;
+    // Legacy history only. strict10 and structured10 keep their history down
+    // in their own way, and turn-only sends one turn at a time, so a summary
+    // of the saved history would be work nothing reads. For the same reason
+    // only here does a request carry the whole history, which is what a
+    // provider's count of it can stand for.
+    let may_compact = !strict_history && turn_only.is_none();
     let child_workflow = session
         .workflow
         .as_ref()
@@ -1525,6 +1531,10 @@ pub(crate) async fn run_loop(
         }
 
         if let Some(memory) = session.tool_memory.clone() {
+            // ponytail: retention shrinks old results in place and
+            // `reported_input` is not told, so until the next response
+            // replaces it, it counts them in full (compacts early, never
+            // late). Drop it here if that ever compacts for nothing.
             let report = memory
                 .retain(
                     &mut session.messages,
@@ -1645,19 +1655,26 @@ pub(crate) async fn run_loop(
                 .as_ref()
                 .map_or(0, |message| crate::budget::count_tokens(&message.content))
             + crate::compaction::session_tokens(&session.examples);
-        let total_tokens = fixed
-            // The memory evidence is deliberately absent. It exists only
-            // under strict10/structured10, and compaction is disabled under
-            // exactly those modes, so whenever this decision runs the
-            // evidence is None. Counting it would be unreachable.
-            + crate::compaction::session_tokens(&sending_messages);
-        // Legacy history only. strict10 and structured10 keep their history
-        // down in their own way, and turn-only sends one turn at a time, so a
-        // summary of the saved history would be work nothing reads.
-        if !strict_history
-            && turn_only.is_none()
-            && total_tokens >= compaction_threshold(session, provider, fixed)
-        {
+        // What the provider counted for the last request over this history,
+        // plus an estimate of what was added since, replaces an estimate of
+        // the whole request: over the encrypted reasoning, that read 205,761
+        // tokens where the provider counted 34,696. Without a count (the
+        // first request, a provider that reports no usage, a history that
+        // was just replaced) it is the estimate, which leaves that
+        // ciphertext out.
+        let total_tokens = session
+            .reported_input
+            .and_then(|reported| reported.size_over(&session.messages))
+            .unwrap_or_else(|| {
+                fixed
+                    // The memory evidence is deliberately absent. It exists
+                    // only under strict10/structured10, and compaction is
+                    // disabled under exactly those modes, so whenever this
+                    // decision runs the evidence is None. Counting it would
+                    // be unreachable.
+                    + crate::compaction::readable_tokens(&sending_messages)
+            });
+        if may_compact && total_tokens >= compaction_threshold(session, provider, fixed) {
             let input_before_compaction = session.input_source.clone();
             let message_count_before_compaction = session.messages.len();
             match session.compact_automatically(provider).await {
@@ -1843,6 +1860,17 @@ pub(crate) async fn run_loop(
             });
         }
         let res = res?;
+        // What the provider counted for this request is where the next
+        // compaction decision starts. A response with no count (or a zero,
+        // which no request over a history can have) leaves nothing to start
+        // from, so it clears the last one rather than keeping a stale one.
+        session.reported_input = res
+            .usage
+            .filter(|usage| may_compact && usage.input_tokens > 0)
+            .map(|usage| crate::compaction::ReportedInput {
+                tokens: usage.input_tokens as usize,
+                messages: session.messages.len(),
+            });
 
         if res.tool_calls.is_empty() {
             let display_text = res.display_text();

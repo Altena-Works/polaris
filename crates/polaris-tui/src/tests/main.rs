@@ -2357,6 +2357,32 @@ fn a_failed_turn_keeps_possible_mcp_sends_as_unknown_and_rolls_back_others() {
     assert_eq!(bash.messages.len(), 1);
 }
 
+#[test]
+fn a_failed_turn_does_not_leave_the_providers_count_of_the_longer_history() {
+    use polaris_core::compaction::ReportedInput;
+    use polaris_provider::{Message, ToolCall};
+    // Both ways a failed turn ends: rolled back, and kept with its calls
+    // closed as unknown (read back from storage).
+    for name in ["bash", "mcp_fixture__tool"] {
+        let mut session = polaris_core::session::Session::new();
+        session.push_user("request");
+        session.messages.push(Message::assistant_with_tool_calls(
+            "",
+            vec![ToolCall {
+                id: "call".into(),
+                name: name.into(),
+                arguments: serde_json::json!({}),
+            }],
+        ));
+        session.reported_input = Some(ReportedInput {
+            tokens: 250_000,
+            messages: 2,
+        });
+        keep_or_roll_back(&mut session, 1).unwrap();
+        assert_eq!(session.reported_input, None, "{name}");
+    }
+}
+
 use super::*;
 use approver::KeyReader;
 use polaris_core::conversation_memory::{
@@ -4463,6 +4489,32 @@ fn clear_empties_the_session_and_the_persisted_file_in_place() {
         "the persisted file should be emptied too, not just the in-memory session"
     );
     assert!(matches!(status, Status::Idle));
+}
+
+#[cfg(unix)]
+#[test]
+fn clear_forgets_the_providers_count_of_the_cleared_conversation() {
+    let mut session = Session::default();
+    session.push_user("something from before");
+    session.reported_input = Some(polaris_core::compaction::ReportedInput {
+        tokens: 250_000,
+        messages: 1,
+    });
+    let mut status = Status::Idle;
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    call(
+        slash::Action::Clear,
+        &mut session,
+        &dir.path().join("session.jsonl"),
+        &mut status,
+        &[],
+        dir.path(),
+        &mut Vec::new(),
+    );
+
+    assert!(session.messages.is_empty());
+    assert_eq!(session.reported_input, None);
 }
 
 #[cfg(unix)]

@@ -156,6 +156,10 @@ pub struct Session {
     pub context_window: Option<usize>,
     /// Automatic retry watermark; transient and not persisted with history.
     pub compaction_retry_tokens: Option<usize>,
+    /// What the provider counted for the last request over this history; the
+    /// compaction decision starts from it. Dropped whenever the history is
+    /// replaced or shrunk, and never persisted.
+    pub reported_input: Option<crate::compaction::ReportedInput>,
     /// Explicitly configured durable tool-result storage; never serialized as credentials.
     pub tool_memory: Option<crate::tool_memory::ToolMemory>,
     /// Which end-of-turn checks the root runs. `None` reads `POLARIS_QUALITY`;
@@ -851,6 +855,7 @@ impl Session {
         if matches!(outcome.result, Ok(Some(_))) {
             // This summarizer does not carry raw identities across its rewrite.
             self.input_source = None;
+            self.reported_input = None;
         }
         let usage = outcome.usage_report;
         if usage.reported_responses == 0
@@ -1031,6 +1036,7 @@ impl Session {
         if !pending.is_empty() {
             self.messages = messages;
             self.input_source = None;
+            self.reported_input = None;
         }
         for id in pending {
             self.push_tool_result(&id, "The outcome is unknown due to interruption. Check external effects before continuing. No automatic retry was attempted.");
@@ -1194,6 +1200,7 @@ impl Session {
     ) -> std::io::Result<()> {
         let snapshot = persistence.snapshot()?;
         self.input_source = None;
+        self.reported_input = None;
         self.messages = snapshot
             .events
             .into_iter()
@@ -1213,7 +1220,16 @@ impl Session {
         self.messages.clear();
         self.input_source = None;
         self.compaction_retry_tokens = None;
+        self.reported_input = None;
         Ok(())
+    }
+
+    /// Cuts the history back to its first `len` messages, as when a failed
+    /// turn is rolled back. What the provider reported described the longer
+    /// history.
+    pub fn truncate_history(&mut self, len: usize) {
+        self.messages.truncate(len);
+        self.reported_input = None;
     }
 
     pub fn uses_strict_history(&self) -> std::io::Result<bool> {
@@ -2025,5 +2041,96 @@ mod read_dedupe_tests {
             run(&mut session, &read("c4", "memory://abc", None), &long),
             long
         );
+    }
+}
+
+#[cfg(test)]
+mod reported_input_tests {
+    //! A provider's count of a request describes the history it was asked
+    //! about, so it goes with that history.
+    use super::*;
+    use crate::compaction::ReportedInput;
+    use crate::conversation_state::HistoryMode;
+
+    fn count(messages: usize) -> Option<ReportedInput> {
+        Some(ReportedInput {
+            tokens: 250_000,
+            messages,
+        })
+    }
+
+    fn saved(root: &std::path::Path) -> crate::session_store::PersistedSession {
+        crate::session_store::PersistedSession::create(
+            root,
+            &root.join("memory.sqlite3"),
+            "p",
+            HistoryMode::Legacy,
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn clearing_the_history_forgets_the_count() {
+        let mut session = Session::new();
+        session.push_user("question");
+        session.push_assistant("answer", vec![]);
+        session.reported_input = count(1);
+        session.clear_history().unwrap();
+        assert!(session.messages.is_empty());
+        assert_eq!(session.reported_input, None);
+    }
+
+    #[test]
+    fn cutting_the_history_back_forgets_the_count() {
+        let mut session = Session::new();
+        for text in ["a", "b", "c"] {
+            session.push_user(text);
+        }
+        session.reported_input = count(3);
+        session.truncate_history(1);
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.reported_input, None);
+    }
+
+    #[test]
+    fn attaching_another_conversation_forgets_the_count() {
+        let root = tempfile::tempdir().unwrap();
+        let earlier = saved(root.path());
+        earlier
+            .append(Message::user("an earlier conversation"), true, None)
+            .unwrap();
+        let mut session = Session::new();
+        session.push_user("this conversation");
+        session.reported_input = count(1);
+        session.attach(earlier).unwrap();
+        assert_eq!(session.messages[0].content, "an earlier conversation");
+        assert_eq!(session.reported_input, None);
+    }
+
+    #[test]
+    fn closing_calls_from_the_saved_history_forgets_the_count_only_when_it_replaces_the_history() {
+        let call = ToolCall {
+            id: "a".into(),
+            name: "write".into(),
+            arguments: serde_json::json!({}),
+        };
+        // An unanswered call: the history is read back from storage and
+        // closed, so it is not the one that was counted.
+        let root = tempfile::tempdir().unwrap();
+        let mut open = Session::new();
+        open.attach(saved(root.path())).unwrap();
+        open.push_user("work");
+        open.push_assistant_tool_calls("", vec![call], Vec::new());
+        open.reported_input = count(1);
+        open.recover_interrupted_tools().unwrap();
+        assert_eq!(open.messages.len(), 3);
+        assert_eq!(open.reported_input, None);
+        // Nothing to close: the history is the one that was counted.
+        let mut settled = Session::new();
+        settled.push_user("work");
+        settled.reported_input = count(1);
+        settled.recover_interrupted_tools().unwrap();
+        assert_eq!(settled.reported_input, count(1));
     }
 }

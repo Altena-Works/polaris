@@ -76,16 +76,16 @@ crate 14件、依存 47件。名前の`polaris-`は省いた。開発用の依�
 呼び出し側 31件。
 
 - `crates/polaris-cli/src/agents_wrap.rs:38`
-- `crates/polaris-core/src/agent.rs:1792`
-- `crates/polaris-core/src/agent.rs:1834`
-- `crates/polaris-core/src/agent.rs:1837`
+- `crates/polaris-core/src/agent.rs:1809`
+- `crates/polaris-core/src/agent.rs:1851`
+- `crates/polaris-core/src/agent.rs:1854`
 - `crates/polaris-core/src/agent/skill_catalog.rs:45`
 - `crates/polaris-core/src/audit/arbitration.rs:76`
 - `crates/polaris-core/src/audit/arbitration.rs:77`
 - `crates/polaris-core/src/audit/arbitration.rs:80`
 - `crates/polaris-core/src/audit/arbitration.rs:197`
 - `crates/polaris-core/src/audit/arbitration.rs:200`
-- `crates/polaris-core/src/compaction.rs:247`
+- `crates/polaris-core/src/compaction.rs:280`
 - `crates/polaris-core/src/decision_policy.rs:60`
 - `crates/polaris-core/src/local_execution.rs:162`
 - `crates/polaris-core/src/mcp/preselection.rs:346`
