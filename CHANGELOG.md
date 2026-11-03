@@ -31,6 +31,7 @@ macOS arm64のTUIを配布対象として準備する。GUIと他OSのソース�
 - TUIの`/sync`と`/sync status`の先頭に、表示がこの端末の記録であり、remoteを観測していないことを示す行を足す。
 - macOSのTUIの一覧と`/help`から、macOSでは動かない`/setting`を外す。`/sync`の説明から、TUIでは参加を確定できない`join`を外す。
 - TUIの`/pwd`・`/sandbox`・`/instruction`・`/input`・`/roles`・`/compare`・`/run`・`/history`を廃止する。入力しても何も実行せず、廃止した旨と代わりの操作を1行で答える。代わりは、`/pwd`と`/sandbox`が`/status`（`Project root`行を追加）、`/instruction`が実行中に入力した文章の待ち行列、`/input`がEsc、`/roles`が`agents/<型名>/SKILL.md`、`/compare`が`polaris compare`、`/run`が`/subagents`と起動時の`--max-turns`、`/history`が画面のスクロールと`/export`である。CLIの`polaris compare`・`polaris sandbox`・`--max-turns`は保持する。
+- TUIの入力欄の灰色の背景をやめ、入力行の上下を灰色の罫線にする。会話履歴の自分の発言の灰色の背景は変えない。モデルの行の右端にworkflowの段階（`workflow: implement`）、その下の行にsubagentの集計（`subagents 2/4 done · 1 running · 1 failed`）を表示する。幅が足りないときは段階を省き、subagentのないrunでは集計の行を出さない。
 
 ### 修正
 

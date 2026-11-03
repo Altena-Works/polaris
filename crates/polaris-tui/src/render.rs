@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 
+use polaris_core::workflow::Phase;
 use polaris_core::{AgentEvent, DiffLine};
 use polaris_provider::Role;
 use ratatui::Frame;
@@ -953,6 +954,80 @@ pub struct HeaderInfo<'a> {
     pub cwd_short: &'a str,
 }
 
+/// Subagents counted from the `Spawn*` events of the current or most recent
+/// run; the caller starts a fresh count with each run.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SubagentSummary {
+    pub done: usize,
+    pub running: usize,
+    pub failed: usize,
+}
+
+impl SubagentSummary {
+    fn total(&self) -> usize {
+        self.done + self.running + self.failed
+    }
+
+    /// The summary line, and the footer row under it, exist only while there
+    /// is something to report.
+    pub fn is_shown(&self) -> bool {
+        self.total() > 0
+    }
+
+    /// A child dropped together with its turn (Esc, an error) never sends
+    /// `SpawnFinished`; settle it as failed instead of leaving it "running"
+    /// after the run is over.
+    pub fn end_run(&mut self) {
+        self.failed += std::mem::take(&mut self.running);
+    }
+
+    /// `subagents 2/4 done · 1 running · 1 failed`; counts of zero are left
+    /// out, except the total.
+    fn line(&self) -> String {
+        let mut line = format!("subagents {}/{} done", self.done, self.total());
+        for (count, label) in [(self.running, "running"), (self.failed, "failed")] {
+            if count > 0 {
+                line.push_str(&format!(" \u{b7} {count} {label}"));
+            }
+        }
+        line
+    }
+}
+
+/// The live run state the footer shows next to `HeaderInfo`'s model and path:
+/// the workflow stage and the subagent summary. Between runs the caller reads
+/// the stage from the session; while a run is in flight `observe` keeps both
+/// current from its events, since the session is borrowed by the turn then.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FooterLive {
+    /// `None` while the workflow is off, which leaves the stage out.
+    pub workflow: Option<Phase>,
+    pub subagents: SubagentSummary,
+}
+
+impl FooterLive {
+    pub fn observe(&mut self, event: &AgentEvent) {
+        match event {
+            AgentEvent::WorkflowResolved { phase, .. } => {
+                if let Ok(phase) = phase.parse() {
+                    self.workflow = Some(phase);
+                }
+            }
+            AgentEvent::SpawnStarted { .. } => self.subagents.running += 1,
+            AgentEvent::SpawnFinished { ok, .. } => {
+                let subagents = &mut self.subagents;
+                subagents.running = subagents.running.saturating_sub(1);
+                if *ok {
+                    subagents.done += 1;
+                } else {
+                    subagents.failed += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Builds the header box's unbordered content lines — a bold title line,
 /// then dim-labeled `model:`/`directory:`/`tokens:` rows (no border; see
 /// `header_history_lines` for the bordered version actually seeded into
@@ -1069,6 +1144,10 @@ pub const HEADER_HEIGHT: u16 = 7;
 /// scrollable history region above it can.
 pub const MAX_DISPLAYED_SUGGESTIONS: usize = 8;
 
+/// The fewest blank columns kept between the footer's path and the workflow
+/// stage at its right end; with less room the stage is left out.
+const STAGE_GAP: usize = 2;
+
 /// How many rows the suggestions popup alone needs for `suggestion_count`
 /// live matches — `0` when there are none (the popup collapses away
 /// entirely), otherwise the shown rows (capped at
@@ -1099,17 +1178,19 @@ fn suggestions_popup_height(suggestion_count: usize) -> u16 {
 /// `area_height_for_history` in `lib.rs`) call this too, so both stay in
 /// sync with what this frame's `render_footer` call actually renders.
 ///
-/// Always `5 + suggestions_popup_height(suggestion_count)`: status(1) +
-/// suggestions popup + input pad-above(1) + input(1) + input
-/// pad-below(1) + footer/model-line(1).
-pub fn footer_height(suggestion_count: usize) -> u16 {
-    5 + suggestions_popup_height(suggestion_count)
+/// Always `5 + suggestions_popup_height(suggestion_count)`, plus one when
+/// `subagent_line` is set (`SubagentSummary::is_shown`): status(1) +
+/// suggestions popup + rule above the input(1) + input(1) + rule below
+/// the input(1) + footer/model-line(1) + subagent line(1, optional).
+pub fn footer_height(suggestion_count: usize, subagent_line: bool) -> u16 {
+    5 + suggestions_popup_height(suggestion_count) + u16::from(subagent_line)
 }
 
 fn footer_areas(
     area: ratatui::layout::Rect,
     suggestion_count: usize,
-) -> [ratatui::layout::Rect; 6] {
+    subagent_line: bool,
+) -> [ratatui::layout::Rect; 7] {
     Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(suggestions_popup_height(suggestion_count)),
@@ -1117,6 +1198,7 @@ fn footer_areas(
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
+        Constraint::Length(u16::from(subagent_line)),
     ])
     .flex(Flex::End)
     .areas(area)
@@ -1145,13 +1227,14 @@ fn composer_cursor_position(
 pub(crate) fn composer_geometry(
     frame_area: ratatui::layout::Rect,
     suggestion_count: usize,
+    subagent_line: bool,
     input: &str,
     cursor: usize,
 ) -> Option<(ratatui::layout::Rect, Position)> {
-    let footer_height = footer_height(suggestion_count);
+    let footer_height = footer_height(suggestion_count, subagent_line);
     let [_, footer_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(footer_height)]).areas(frame_area);
-    let [_, _, _, input_area, _, _] = footer_areas(footer_area, suggestion_count);
+    let [_, _, _, input_area, _, _, _] = footer_areas(footer_area, suggestion_count, subagent_line);
     (input_area.width > 0 && input_area.height > 0).then(|| {
         (
             input_area,
@@ -1162,10 +1245,12 @@ pub(crate) fn composer_geometry(
 
 /// Everything redrawn every frame: the suggestions popup (while typing a
 /// `/command`), the status row (idle / thinking-with-shimmer / error /
-/// notice), the input line, and the footer (`model effort · cwd`). This is
-/// the footer region of `draw_frame`'s (`lib.rs`) fullscreen layout split —
-/// the fixed-height bottom slice below the scrollable history region, which
-/// renders `history` separately via `render_history_into`. Replaces the old
+/// notice), the input line between its two rules, the footer (`model
+/// effort · cwd`, the workflow stage at its right end) and, while there are
+/// subagents to report, their summary line. This is the footer region of
+/// `draw_frame`'s (`lib.rs`) fullscreen layout split — the fixed-height
+/// bottom slice below the scrollable history region, which renders
+/// `history` separately via `render_history_into`. Replaces the old
 /// `render_chat`, which drew the header and full history inline with
 /// everything else on every frame; splitting it out is what makes the
 /// header/history scrollable as their own region instead of being
@@ -1191,6 +1276,7 @@ pub fn render_footer(
         suggestions,
         selected_suggestion,
         false,
+        &FooterLive::default(),
     );
 }
 
@@ -1205,6 +1291,7 @@ pub(crate) fn render_footer_with_mode(
     suggestions: &[&crate::slash::SlashCommand],
     selected_suggestion: usize,
     read_only: bool,
+    live: &FooterLive,
 ) {
     let dim = Style::default().add_modifier(Modifier::DIM);
     // Zero height when there's nothing to show, so the layout collapses
@@ -1213,25 +1300,27 @@ pub(crate) fn render_footer_with_mode(
     // `footer_height` (see its doc) so the two can never disagree about
     // how tall the popup is this frame.
     let shown = suggestions.len().min(MAX_DISPLAYED_SUGGESTIONS);
-    // `area` is `draw_frame`'s `footer_height(suggestions.len())`
-    // reservation — normally an exact fit for what this frame actually
-    // needs, but `Flex::End` is kept regardless: it costs nothing when
-    // `area` is already an exact fit, and it's what makes the standalone
+    // `area` is `draw_frame`'s `footer_height` reservation for this
+    // frame's suggestions and subagent line — normally an exact fit for
+    // what this frame actually needs, but `Flex::End` is kept regardless:
+    // it costs nothing when `area` is already an exact fit, and it's what
+    // makes the standalone
     // `the_input_row_reaches_the_true_bottom_of_the_footer_reservation`
     // regression test meaningful (an artificially oversized `area`, to
     // pin down this bottom-anchoring behavior independent of how
     // `draw_frame` sizes the area it passes in). Without it, the default
-    // `Flex::Start` would stack these six rows at `area`'s *top* and leave
+    // `Flex::Start` would stack these rows at `area`'s *top* and leave
     // any leftover as blank space below the input box instead of above
     // `status_area`.
     let [
         status_area,
         suggestions_area,
-        input_pad_top_area,
+        rule_above_area,
         input_area,
-        input_pad_bottom_area,
+        rule_below_area,
         footer_area,
-    ] = footer_areas(area, suggestions.len());
+        subagents_area,
+    ] = footer_areas(area, suggestions.len(), live.subagents.is_shown());
 
     let status_line = match status {
         Status::Idle => Line::from(""),
@@ -1304,11 +1393,8 @@ pub(crate) fn render_footer_with_mode(
 
     // No box around the input line — a bare `\u{203a} ` prompt, matching
     // codex's own composer, with a dim placeholder while empty instead of
-    // an empty bordered box. The whole row is shaded gray (via the
-    // `Paragraph`'s own `.style()`, which fills its entire render area —
-    // not just the styled Spans' own cells), matching codex's own
-    // input-box styling and how a submitted line looks once it's printed
-    // into history (`HistoryLine::shaded`, set for `Role::User`).
+    // an empty bordered box. The row has no background; the rules drawn
+    // above and below it set it off.
     let input_line = if input.is_empty() {
         Line::from(vec![
             Span::styled(
@@ -1343,27 +1429,13 @@ pub(crate) fn render_footer_with_mode(
         spans.push(Span::raw(sanitize(&input[after..])));
         Line::from(spans)
     };
-    // Paint the composer as one solid three-row surface before adding its
-    // text. Rendering three independent paragraphs allowed a terminal's
-    // incremental redraw to retain the default background across the unused
-    // suffix of the middle row while typing, visually shortening the field.
-    let composer_area = ratatui::layout::Rect::new(
-        input_area.x,
-        input_pad_top_area.y,
-        input_area.width,
-        input_pad_top_area
-            .height
-            .saturating_add(input_area.height)
-            .saturating_add(input_pad_bottom_area.height),
-    );
-    let composer_style = Style::default().bg(Color::DarkGray);
-    frame.render_widget(Block::default().style(composer_style), composer_area);
-    frame.render_widget(Paragraph::new(input_line).style(composer_style), input_area);
-    // A few terminal backends clear the unused suffix of a redrawn Paragraph
-    // even though its base style has a background. Patch the final frame
-    // buffer after text rendering so typing cannot punch a default-background
-    // gap into the right side of the composer.
-    frame.buffer_mut().set_style(composer_area, composer_style);
+    // A background color renders differently from one terminal to the next,
+    // so the composer is set off by a dim rule across the full width above
+    // and below the input row instead of a fill.
+    let rule = || Block::default().borders(Borders::TOP).border_style(dim);
+    frame.render_widget(rule(), rule_above_area);
+    frame.render_widget(Paragraph::new(input_line), input_area);
+    frame.render_widget(rule(), rule_below_area);
 
     // Places the real terminal cursor at `cursor`'s position within the
     // typed text, right after the "\u{203a} " prompt. Terminal emulators
@@ -1394,7 +1466,7 @@ pub(crate) fn render_footer_with_mode(
             sanitize(header.effort_name)
         )
     };
-    let footer_line = Line::from(vec![
+    let mut footer_spans = vec![
         Span::styled(
             model_and_effort,
             Style::default().fg(Color::Rgb(246, 226, 183)),
@@ -1404,8 +1476,27 @@ pub(crate) fn render_footer_with_mode(
             sanitize(header.cwd_short),
             Style::default().fg(Color::Rgb(171, 223, 167)),
         ),
-    ]);
-    frame.render_widget(Paragraph::new(footer_line), footer_area);
+    ];
+    // The workflow stage takes the right end of the line. Unless at least
+    // `STAGE_GAP` blank columns are left between it and the path it is
+    // dropped — never clipped, overlapped or wrapped.
+    if let Some(phase) = live.workflow {
+        let stage = format!("workflow: {phase}");
+        let used: usize = footer_spans.iter().map(Span::width).sum();
+        let spare = usize::from(footer_area.width).saturating_sub(used);
+        if spare >= STAGE_GAP + stage.width() {
+            footer_spans.push(Span::raw(" ".repeat(spare - stage.width())));
+            footer_spans.push(Span::styled(stage, dim));
+        }
+    }
+    frame.render_widget(Paragraph::new(Line::from(footer_spans)), footer_area);
+
+    if live.subagents.is_shown() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(live.subagents.line(), dim)),
+            subagents_area,
+        );
+    }
 }
 
 /// Renders the `/resume` picker: every saved conversation, grouped by

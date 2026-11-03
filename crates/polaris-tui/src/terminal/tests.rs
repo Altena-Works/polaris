@@ -261,6 +261,7 @@ fn actual_onboarding_picker_approval_and_main_frames_are_copyable() {
                     &[],
                     0,
                     &None,
+                    &crate::render::FooterLive::default(),
                 );
             }),
             "input 日本語",

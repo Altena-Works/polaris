@@ -2297,6 +2297,27 @@ fn judged_effort_replaces_the_undecided_footer_value() {
     assert_eq!(effort, "extra high");
 }
 
+#[test]
+fn only_a_session_with_an_enabled_workflow_has_a_footer_stage() {
+    use polaris_core::workflow::{Phase, SessionWorkflow, WorkflowConfig};
+    let with = |enabled: bool| {
+        let mut session = polaris_core::session::Session::new();
+        session.workflow = Some(SessionWorkflow::new(WorkflowConfig {
+            enabled,
+            initial_phase: Phase::Review,
+            ..Default::default()
+        }));
+        session
+    };
+    assert_eq!(
+        footer_workflow_phase(&polaris_core::session::Session::new()),
+        None
+    );
+    assert_eq!(footer_workflow_phase(&with(true)), Some(Phase::Review));
+    // Switched off with `/workflow off`: the phase is still held, not shown.
+    assert_eq!(footer_workflow_phase(&with(false)), None);
+}
+
 #[cfg(unix)]
 #[test]
 fn working_turn_accepts_and_queues_prompts_and_commands_in_order() {
@@ -3333,6 +3354,7 @@ fn draw_frame_puts_the_footer_in_the_bottom_inline_viewport_height_rows() {
                 &[],
                 0,
                 &None,
+                &render::FooterLive::default(),
             )
         })
         .expect("draw");
@@ -3346,9 +3368,9 @@ fn draw_frame_puts_the_footer_in_the_bottom_inline_viewport_height_rows() {
         .collect();
     assert!(rows[0].contains("line from history"));
     // The footer's placeholder text lands in the bottom
-    // `render::footer_height(0)` rows (no suggestions here), not the
+    // `render::footer_height(0, false)` rows (no suggestions here), not the
     // top history region.
-    let footer_start = 30 - render::footer_height(0) as usize;
+    let footer_start = 30 - render::footer_height(0, false) as usize;
     assert!(
         rows[footer_start..]
             .iter()
@@ -3393,7 +3415,7 @@ fn chat_draw_repairs_an_ime_cleared_cjk_composer_suffix() {
         "日本語を繰り返して入力する長い文です。日本語を繰り返して入力する長い文です。",
     ] {
         let cursor = input.len();
-        draw_chat_frame(&mut terminal, input, cursor, 0, |frame| {
+        draw_chat_frame(&mut terminal, input, cursor, 0, false, |frame| {
             draw_frame(
                 frame,
                 &history,
@@ -3406,12 +3428,13 @@ fn chat_draw_repairs_an_ime_cleared_cjk_composer_suffix() {
                 &[],
                 0,
                 &None,
+                &render::FooterLive::default(),
             );
         })
         .expect("initial chat draw");
 
         let (input_area, cursor_position) =
-            render::composer_geometry(terminal.backend().buffer().area, 0, input, cursor)
+            render::composer_geometry(terminal.backend().buffer().area, 0, false, input, cursor)
                 .expect("input row");
         let before_damage = terminal.backend().buffer().clone();
         let suffix_width = input_area.width.min(21);
@@ -3427,13 +3450,13 @@ fn chat_draw_repairs_an_ime_cleared_cjk_composer_suffix() {
             .backend_mut()
             .draw(before.diff(&cleared).into_iter())
             .expect("simulate IME clearing the real terminal suffix");
-        assert_ne!(
-            terminal.backend().buffer()[(damaged_area.x, damaged_area.y)].bg,
-            Color::DarkGray,
+        assert!(
+            (damaged_area.left()..damaged_area.right())
+                .all(|x| terminal.backend().buffer()[(x, damaged_area.y)].symbol() == " "),
             "the simulated IME damage must reach the real terminal"
         );
 
-        draw_chat_frame(&mut terminal, input, cursor, 0, |frame| {
+        draw_chat_frame(&mut terminal, input, cursor, 0, false, |frame| {
             draw_frame(
                 frame,
                 &history,
@@ -3446,6 +3469,7 @@ fn chat_draw_repairs_an_ime_cleared_cjk_composer_suffix() {
                 &[],
                 0,
                 &None,
+                &render::FooterLive::default(),
             );
         })
         .expect("unchanged chat draw repairs the IME damage");
@@ -3463,7 +3487,7 @@ fn chat_draw_repairs_an_ime_cleared_cjk_composer_suffix() {
                 before_damage[(x, input_area.y)],
                 "composer cell was not restored at {x} for {input:?}"
             );
-            assert_eq!(buffer[(x, input_area.y)].bg, Color::DarkGray);
+            assert_eq!(buffer[(x, input_area.y)].bg, Color::Reset);
             // TestBackend stores each draw command independently. A real
             // terminal also paints a wide glyph's continuation column,
             // while Buffer::diff correctly omits that separate command.
@@ -3475,6 +3499,66 @@ fn chat_draw_repairs_an_ime_cleared_cjk_composer_suffix() {
                 .collect::<String>()
                 .contains("history must remain visible"),
             "replaying the composer row must not clear adjacent history"
+        );
+    }
+}
+
+#[test]
+fn chat_draw_puts_the_caret_after_the_typed_text_with_and_without_the_subagent_line() {
+    let header = render::HeaderInfo {
+        provider_name: "openai",
+        model_name: "test",
+        usage: polaris_provider::Usage::default(),
+        cwd: "/tmp",
+        cwd_short: "~",
+        effort_name: "low",
+    };
+    let input = "日本語";
+    for subagent_line in [false, true] {
+        let live = render::FooterLive {
+            subagents: render::SubagentSummary {
+                running: usize::from(subagent_line),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 14)).unwrap();
+        let mut cache = render::HistoryWrapCache::default();
+        draw_chat_frame(
+            &mut terminal,
+            input,
+            input.len(),
+            0,
+            subagent_line,
+            |frame| {
+                draw_frame(
+                    frame,
+                    &[],
+                    &mut cache,
+                    0,
+                    input,
+                    input.len(),
+                    &Status::Idle,
+                    &header,
+                    &[],
+                    0,
+                    &None,
+                    &live,
+                );
+            },
+        )
+        .expect("chat draw");
+
+        let buffer = terminal.backend().buffer();
+        let input_row = (0..buffer.area.height)
+            .find(|&y| buffer[(0, y)].symbol() == "\u{203a}")
+            .expect("the prompt is on screen");
+        // "› " is 2 columns and each of the 3 wide characters takes 2.
+        assert_eq!(
+            terminal.backend_mut().get_cursor_position().unwrap(),
+            ratatui::layout::Position::new(2 + 6, input_row),
+            "subagent_line={subagent_line}"
         );
     }
 }
@@ -3526,6 +3610,7 @@ fn submission_preview_is_drawn_without_committing_and_is_removed_afterward() {
                         &[],
                         0,
                         &None,
+                        &render::FooterLive::default(),
                     )
                 }).map(|_| ())
             },
@@ -3575,6 +3660,7 @@ fn submission_preview_is_drawn_without_committing_and_is_removed_afterward() {
                 &[],
                 0,
                 &None,
+                &render::FooterLive::default(),
             )
         })
         .expect("redraw after preflight failure");
@@ -3702,6 +3788,7 @@ fn draw_frame_wraps_a_history_line_wider_than_a_narrow_window_instead_of_clippin
                 &[],
                 0,
                 &None,
+                &render::FooterLive::default(),
             )
         })
         .expect("draw");
@@ -3728,7 +3815,7 @@ fn draw_frame_wraps_a_history_line_wider_than_a_narrow_window_instead_of_clippin
 
 #[test]
 fn draw_frame_highlights_an_active_selection() {
-    // Tall enough that `render::footer_height(0)` doesn't eat the whole
+    // Tall enough that `render::footer_height(0, false)` doesn't eat the whole
     // viewport and leave zero rows for the history area (matches the
     // height the other `draw_frame` tests in this module use).
     let backend = ratatui::backend::TestBackend::new(40, 20);
@@ -3770,6 +3857,7 @@ fn draw_frame_highlights_an_active_selection() {
                 &[],
                 0,
                 &sel,
+                &render::FooterLive::default(),
             )
         })
         .expect("draw");
@@ -3789,7 +3877,7 @@ fn draw_frame_highlights_an_active_selection() {
 /// Regression test for the *elimination*, not just relocation, of the
 /// blank gap between the last conversation-history row and the footer
 /// block — proves `history_area` actually grows to use every row
-/// `footer_height(0)` doesn't need, rather than always leaving the
+/// `footer_height(0, false)` doesn't need, rather than always leaving the
 /// difference between a fixed worst-case reservation and the popup's
 /// actual height (9 rows, `14 - 5`) as unused blank space whenever the
 /// suggestions popup isn't showing (the common case).
@@ -3836,6 +3924,7 @@ fn draw_frame_leaves_no_blank_gap_between_history_and_the_footer() {
                 &[],
                 0,
                 &None,
+                &render::FooterLive::default(),
             )
         })
         .expect("draw");
@@ -3849,7 +3938,7 @@ fn draw_frame_leaves_no_blank_gap_between_history_and_the_footer() {
         .collect();
     // 0 suggestions here, so this must match what `draw_frame` itself
     // just used to size `footer_area`.
-    let expected_history_height = 20 - render::footer_height(0) as usize;
+    let expected_history_height = 20 - render::footer_height(0, false) as usize;
     assert!(
         rows[expected_history_height - 1].contains("history line"),
         "the row immediately above the footer must still be real \
@@ -3876,13 +3965,26 @@ fn draw_frame_leaves_no_blank_gap_between_history_and_the_footer() {
 /// contiguous rows from the top actually got that marker drawn into
 /// them — the true observable size of `history_area`, straight from
 /// the rendered buffer. That count must equal
-/// `area_height_for_history(render::footer_height(n), terminal_height)`
-/// for both a representative suggestion count with no popup (`0`) and
-/// one at the popup's display cap (`MAX_DISPLAYED_SUGGESTIONS`).
+/// `area_height_for_history(render::footer_height(n, subagent_line),
+/// terminal_height)` for both a representative suggestion count with no
+/// popup (`0`) and one at the popup's display cap
+/// (`MAX_DISPLAYED_SUGGESTIONS`), each with and without the subagent line.
 #[test]
 fn area_height_for_history_matches_draw_frames_actual_history_area_height() {
-    for &suggestion_count in &[0usize, render::MAX_DISPLAYED_SUGGESTIONS] {
+    for &(suggestion_count, subagent_line) in &[
+        (0usize, false),
+        (render::MAX_DISPLAYED_SUGGESTIONS, false),
+        (0, true),
+        (render::MAX_DISPLAYED_SUGGESTIONS, true),
+    ] {
         let terminal_height: u16 = 20;
+        let live = render::FooterLive {
+            subagents: render::SubagentSummary {
+                running: usize::from(subagent_line),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let suggestions: Vec<&slash::SlashCommand> =
             slash::COMMANDS.iter().take(suggestion_count).collect();
         assert_eq!(
@@ -3921,6 +4023,7 @@ fn area_height_for_history_matches_draw_frames_actual_history_area_height() {
                     &suggestions,
                     0,
                     &None,
+                    &live,
                 )
             })
             .expect("draw");
@@ -3928,12 +4031,15 @@ fn area_height_for_history_matches_draw_frames_actual_history_area_height() {
         let actual_history_rows = (0..buffer.area.height)
             .take_while(|&y| (0..buffer.area.width).any(|x| buffer[(x, y)].symbol() == "H"))
             .count() as u16;
-        let via_helper =
-            area_height_for_history(render::footer_height(suggestion_count), terminal_height);
+        let via_helper = area_height_for_history(
+            render::footer_height(suggestion_count, subagent_line),
+            terminal_height,
+        );
         assert_eq!(
             actual_history_rows, via_helper,
-            "suggestion_count={suggestion_count}: area_height_for_history \
-                 must stay in sync with what draw_frame actually renders"
+            "suggestion_count={suggestion_count} subagent_line={subagent_line}: \
+                 area_height_for_history must stay in sync with what draw_frame \
+                 actually renders"
         );
     }
 }

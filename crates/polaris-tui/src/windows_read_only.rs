@@ -161,6 +161,7 @@ impl ReadOnlyView {
                     self.selected,
                     &None,
                     true,
+                    &render::FooterLive::default(),
                 );
             })
             .map(|_| ())

@@ -2180,6 +2180,19 @@ pub fn context_window_for(provider_name: &str, setting: Option<usize>) -> Option
     setting.filter(|_| is_local_provider(provider_name))
 }
 
+/// The phase the footer shows as the workflow stage: only an enabled
+/// workflow has one. A disabled workflow keeps its last phase, which is not
+/// shown.
+fn footer_workflow_phase(
+    session: &polaris_core::session::Session,
+) -> Option<polaris_core::workflow::Phase> {
+    session
+        .workflow
+        .as_ref()
+        .filter(|workflow| workflow.config.enabled)
+        .map(|workflow| workflow.state().phase)
+}
+
 fn update_effort_from_event(event: &polaris_core::AgentEvent, effort_name: &mut String) {
     match event {
         polaris_core::AgentEvent::EffortJudging => *effort_name = "judging".to_string(),
@@ -2866,11 +2879,12 @@ fn show_startup_workflow_confirmation_checked(
 }
 
 /// Splits `frame.area()` into the scrollable history region (top) and the
-/// footer region (bottom, `render::footer_height(suggestions.len())` rows —
-/// sized fresh each frame for exactly what this frame's footer content
-/// needs, not a fixed worst-case reservation, so `history_area` naturally
-/// grows to fill whatever the footer isn't using and the footer sits flush
-/// against the bottom with no leftover gap above it), renders the current
+/// footer region (bottom, `render::footer_height` rows for the suggestions
+/// and the subagent line — sized fresh each frame for exactly what this
+/// frame's footer content needs, not a fixed worst-case reservation, so
+/// `history_area` naturally grows to fill whatever the footer isn't using
+/// and the footer sits flush against the bottom with no leftover gap above
+/// it), renders the current
 /// `visible_history_window` slice of `history` into the first, and calls
 /// `render_footer` with the second. This is the one draw routine every
 /// redraw point in `run()` shares — see this plan's Task 6.
@@ -2887,6 +2901,7 @@ fn draw_frame(
     suggestions: &[&crate::slash::SlashCommand],
     selected_suggestion: usize,
     selection: &Option<selection::Selection>,
+    live: &render::FooterLive,
 ) {
     draw_frame_with_mode(
         frame,
@@ -2901,6 +2916,7 @@ fn draw_frame(
         selected_suggestion,
         selection,
         false,
+        live,
     );
 }
 
@@ -2918,9 +2934,10 @@ fn draw_frame_with_mode(
     selected_suggestion: usize,
     selection: &Option<selection::Selection>,
     read_only: bool,
+    live: &render::FooterLive,
 ) {
     let area = frame.area();
-    let footer_height = render::footer_height(suggestions.len());
+    let footer_height = render::footer_height(suggestions.len(), live.subagents.is_shown());
     let [history_area, footer_area] = ratatui::layout::Layout::vertical([
         ratatui::layout::Constraint::Min(0),
         ratatui::layout::Constraint::Length(footer_height),
@@ -2948,6 +2965,7 @@ fn draw_frame_with_mode(
         suggestions,
         selected_suggestion,
         read_only,
+        live,
     );
 }
 
@@ -2962,12 +2980,17 @@ fn draw_chat_frame<B: Backend>(
     input: &str,
     cursor: usize,
     suggestion_count: usize,
+    subagent_line: bool,
     draw: impl FnOnce(&mut ratatui::Frame),
 ) -> io::Result<()> {
     let completed = terminal.draw(draw)?;
-    let Some((input_area, cursor_position)) =
-        render::composer_geometry(completed.area, suggestion_count, input, cursor)
-    else {
+    let Some((input_area, cursor_position)) = render::composer_geometry(
+        completed.area,
+        suggestion_count,
+        subagent_line,
+        input,
+        cursor,
+    ) else {
         return Ok(());
     };
 
@@ -3007,8 +3030,8 @@ fn terminal_height(terminal: &RefCell<crate::terminal::DefaultTerminal>) -> u16 
 /// Constraint::Length(footer_height)])` split without needing a `Frame`
 /// to do it (mouse-event handling runs outside the `draw` closure). Callers
 /// pass `render::footer_height(...)` for `footer_height`, computed from
-/// whatever suggestion count this call site's `draw_frame` calls actually
-/// use — see the four call sites below.
+/// whatever suggestion count and subagent line the frame on screen was
+/// drawn with — see the call sites below.
 ///
 /// Duplicates a layout `draw_frame` already computes inline — a future
 /// refactor could have `draw_frame` itself call these helpers, but that's
@@ -3852,11 +3875,20 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
         // one-shot and must happen before the footer draw so the newly
         // printed lines appear above it, not interleaved mid-frame.
         conversation_view.append_new_history(&session, &local_lines);
+        // Read fresh each iteration: `/phase`, `/workflow`, a session switch
+        // or the last turn's own transition may have moved it.
+        conversation_view.footer.workflow = footer_workflow_phase(&session);
+        // The footer drawn now is the one the mouse handlers below hit-test.
+        let footer_height = render::footer_height(
+            suggestions.len(),
+            conversation_view.footer.subagents.is_shown(),
+        );
         if draw_chat_frame(
             &mut terminal.borrow_mut(),
             &input_buffer,
             input_cursor,
             suggestions.len(),
+            conversation_view.footer.subagents.is_shown(),
             |f| {
                 draw_frame(
                     f,
@@ -3877,6 +3909,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                     &suggestions,
                     selected_suggestion,
                     &conversation_view.selection,
+                    &conversation_view.footer,
                 )
             },
         )
@@ -3965,10 +3998,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                             0,
                             0,
                             terminal_width(&terminal),
-                            area_height_for_history(
-                                render::footer_height(suggestions.len()),
-                                terminal_height(&terminal),
-                            ),
+                            area_height_for_history(footer_height, terminal_height(&terminal)),
                         ),
                     ) {
                         status = notice;
@@ -3998,10 +4028,8 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                                 .saturating_sub(MOUSE_SCROLL_LINES);
                         }
                         MouseEventKind::Down(ratatui::crossterm::event::MouseButton::Left) => {
-                            let history_area_height = area_height_for_history(
-                                render::footer_height(suggestions.len()),
-                                terminal_height(&terminal),
-                            );
+                            let history_area_height =
+                                area_height_for_history(footer_height, terminal_height(&terminal));
                             if mouse.row < history_area_height {
                                 let width = terminal_width(&terminal);
                                 let wrapped =
@@ -4030,7 +4058,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                                 && sel.dragging
                             {
                                 let history_area_height = area_height_for_history(
-                                    render::footer_height(suggestions.len()),
+                                    footer_height,
                                     terminal_height(&terminal),
                                 );
                                 let width = terminal_width(&terminal);
@@ -5801,6 +5829,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
         // succeeds.
         let preview_suggestions = slash_suggestions(&input_buffer, &input_history, false);
         let preview_selection = conversation_view.selection.clone();
+        let preview_footer = conversation_view.footer;
         if draw_submission_preview(
             &mut conversation_view,
             &mut status,
@@ -5811,6 +5840,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                     &input_buffer,
                     input_cursor,
                     preview_suggestions.len(),
+                    preview_footer.subagents.is_shown(),
                     |f| {
                         draw_frame(
                             f,
@@ -5831,6 +5861,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                             &preview_suggestions,
                             selected_suggestion,
                             &preview_selection,
+                            &preview_footer,
                         )
                     },
                 )
@@ -6393,6 +6424,9 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
         status = Status::Thinking {
             elapsed: Duration::ZERO,
         };
+        // The footer summarises the subagents of the current or most recent
+        // run, so each run starts from none.
+        conversation_view.footer.subagents = render::SubagentSummary::default();
         // Print the user's own message immediately — otherwise it wouldn't
         // appear until the *next* top-of-loop print, which only happens
         // after the assistant's reply finishes too, making the user's own
@@ -6402,12 +6436,16 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
         if selected_suggestion >= suggestions.len() {
             selected_suggestion = 0;
         }
-        let mut rendered_suggestion_count = suggestions.len();
+        let mut rendered_footer_height = render::footer_height(
+            suggestions.len(),
+            conversation_view.footer.subagents.is_shown(),
+        );
         if draw_chat_frame(
             &mut terminal.borrow_mut(),
             &input_buffer,
             input_cursor,
             suggestions.len(),
+            conversation_view.footer.subagents.is_shown(),
             |f| {
                 draw_frame(
                     f,
@@ -6428,6 +6466,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                     &suggestions,
                     selected_suggestion,
                     &conversation_view.selection,
+                    &conversation_view.footer,
                 )
             },
         )
@@ -6788,6 +6827,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                             &input_buffer,
                             input_cursor,
                             suggestions.len(),
+                            conversation_view.footer.subagents.is_shown(),
                             |f| {
                                 draw_frame(
                                     f,
@@ -6808,6 +6848,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                                     &suggestions,
                                     selected_suggestion,
                                     &conversation_view.selection,
+                                    &conversation_view.footer,
                                 )
                             },
                         )
@@ -6815,7 +6856,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                         {
                             break TurnOutcome::Fatal;
                         }
-                        rendered_suggestion_count = suggestions.len();
+                        rendered_footer_height = render::footer_height(suggestions.len(), conversation_view.footer.subagents.is_shown());
                     }
                     maybe_event = event_stream.next() => {
                         let maybe_event = maybe_event.map(|event| event.and_then(crate::terminal::filter_event));
@@ -6831,7 +6872,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                                 &args.cwd,
                                 ratatui::layout::Rect::new(
                                     0, 0, terminal_width(&terminal),
-                                    area_height_for_history(render::footer_height(rendered_suggestion_count), terminal_height(&terminal)),
+                                    area_height_for_history(rendered_footer_height, terminal_height(&terminal)),
                                 ),
                             ) {
                                 status = notice;
@@ -6922,6 +6963,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                                             &input_buffer,
                                             input_cursor,
                                             suggestions.len(),
+                                            conversation_view.footer.subagents.is_shown(),
                                             |f| {
                                                 draw_frame(
                                                     f,
@@ -6942,6 +6984,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                                                     &suggestions,
                                                     selected_suggestion,
                                                     &conversation_view.selection,
+                                                    &conversation_view.footer,
                                                 )
                                             },
                                         )
@@ -6949,7 +6992,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                                         {
                                             break TurnOutcome::Fatal;
                                         }
-                                        rendered_suggestion_count = suggestions.len();
+                                        rendered_footer_height = render::footer_height(suggestions.len(), conversation_view.footer.subagents.is_shown());
                                     }
                                     #[cfg(unix)]
                                     KeyCode::Enter if input_buffer.starts_with("/subagents") => {
@@ -7034,7 +7077,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                                     // Input may change before the next ticker redraw.
                                     // Hit-test the footer that is actually on screen.
                                     let history_area_height = area_height_for_history(
-                                        render::footer_height(rendered_suggestion_count),
+                                        rendered_footer_height,
                                         terminal_height(&terminal),
                                     );
                                     if mouse.row < history_area_height {
@@ -7072,7 +7115,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                                         && sel.dragging
                                     {
                                         let history_area_height = area_height_for_history(
-                                            render::footer_height(rendered_suggestion_count),
+                                            rendered_footer_height,
                                             terminal_height(&terminal),
                                         );
                                         let width = terminal_width(&terminal);
@@ -7131,6 +7174,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                                                 &input_buffer,
                                                 input_cursor,
                                                 suggestions.len(),
+                                                conversation_view.footer.subagents.is_shown(),
                                                 |f| {
                                                     draw_frame(
                                                         f,
@@ -7151,6 +7195,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                                                         &suggestions,
                                                         selected_suggestion,
                                                         &conversation_view.selection,
+                                                        &conversation_view.footer,
                                                     )
                                                 },
                                             )
@@ -7158,7 +7203,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                                             {
                                                 break TurnOutcome::Fatal;
                                             }
-                                            rendered_suggestion_count = suggestions.len();
+                                            rendered_footer_height = render::footer_height(suggestions.len(), conversation_view.footer.subagents.is_shown());
                                         }
                                     }
                                 }
@@ -7202,6 +7247,9 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
             }
             turn_outcome
         };
+        // Whatever the outcome, nothing is still running: a child cut off
+        // with the turn never reported back.
+        conversation_view.footer.subagents.end_run();
         #[cfg(target_os = "linux")]
         let shutdown_reason = match &outcome {
             TurnOutcome::Shutdown(reason) => Some(*reason),

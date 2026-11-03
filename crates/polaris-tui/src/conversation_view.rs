@@ -15,6 +15,9 @@ pub(super) struct ConversationViewState {
     #[cfg(target_os = "macos")]
     pub(super) file_click: crate::file_reveal::FileClick,
     activity_rows: AgentActivityRows,
+    /// The footer's workflow stage and subagent summary, kept from the same
+    /// live events as `activity_rows`.
+    pub(super) footer: render::FooterLive,
 }
 
 impl ConversationViewState {
@@ -29,6 +32,7 @@ impl ConversationViewState {
             #[cfg(target_os = "macos")]
             file_click: crate::file_reveal::FileClick::default(),
             activity_rows: AgentActivityRows::default(),
+            footer: render::FooterLive::default(),
         }
     }
 
@@ -70,9 +74,13 @@ impl ConversationViewState {
         #[cfg(target_os = "macos")]
         self.file_click.cancel();
         self.activity_rows = AgentActivityRows::default();
+        // The previous conversation's subagents are not this one's. The
+        // workflow stage is read again from the session before each draw.
+        self.footer.subagents = render::SubagentSummary::default();
     }
 
     pub(super) fn append_live_event(&mut self, event: &polaris_core::AgentEvent) {
+        self.footer.observe(event);
         let appended = append_live_event_parts(event, &mut self.history, &mut self.activity_rows);
         self.history_wrap_cache.invalidate();
         if self.scroll_offset > 0 {
@@ -283,6 +291,44 @@ mod tests {
             detail: "Cargo.toml".to_string(),
         });
         assert!(view.history.len() > render::header_history_lines(&header(), 80).len());
+    }
+
+    #[test]
+    fn live_events_feed_the_footer_and_a_reset_forgets_the_old_conversations_subagents() {
+        let mut view = ConversationViewState::new(&header(), 80);
+        let started = |display_name: &str| polaris_core::AgentEvent::SpawnStarted {
+            display_name: display_name.to_string(),
+            agent_type: "file-reader".to_string(),
+            task: "private".to_string(),
+        };
+        view.append_live_event(&polaris_core::AgentEvent::WorkflowResolved {
+            phase: "implement".to_string(),
+            skill_ids: Vec::new(),
+            changed_skill_ids: Vec::new(),
+            manifest_hash: "hash".to_string(),
+        });
+        view.append_live_event(&started("Sirius"));
+        view.append_live_event(&started("Antares"));
+        view.append_live_event(&polaris_core::AgentEvent::SpawnFinished {
+            display_name: "Sirius".to_string(),
+            agent_type: "file-reader".to_string(),
+            ok: true,
+        });
+        assert_eq!(
+            view.footer.workflow,
+            Some(polaris_core::workflow::Phase::Implement)
+        );
+        assert_eq!(
+            view.footer.subagents,
+            render::SubagentSummary {
+                done: 1,
+                running: 1,
+                failed: 0
+            }
+        );
+
+        view.reset(&header(), 80);
+        assert_eq!(view.footer.subagents, render::SubagentSummary::default());
     }
 
     #[test]
