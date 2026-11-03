@@ -46,8 +46,6 @@ mod role_commands;
 mod runtime_commands;
 #[cfg(unix)]
 mod runtime_effects;
-#[cfg(unix)]
-mod sandbox_commands;
 mod session_activation;
 #[cfg(unix)]
 mod session_commands;
@@ -494,177 +492,14 @@ fn active_saved_session_id(
         .map_err(|e| e.to_string())
 }
 
+/// `/subagents` is the only runtime control `slash::parse` produces.
 #[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
 async fn handle_runtime_command(
     request: &str,
     control: Option<&Arc<RootDelegationControlV1>>,
-    saved: Option<&polaris_core::session_store::PersistedSession>,
-    state_dir: &Path,
-    roles: &[polaris_skills::AgentType],
-    sandbox: &SandboxPolicy,
-    approval: ApprovalPolicy,
-    next_max_turns: &mut u32,
-    startup_max_turns: u32,
-    activity: &conversation_view::ConversationViewState,
 ) -> Result<Vec<String>, String> {
-    let (verb, extra) = request.split_once(' ').unwrap_or((request, ""));
-    match verb {
-        "subagents" => runtime_commands::subagents(control, extra, None).await,
-        "roles" => runtime_commands::roles(roles, extra),
-        "run" if extra == "details" => {
-            runtime_commands::run_details(control)
-                .await
-                .map(|mut lines| {
-                    lines.extend(activity.tool_detail_lines());
-                    lines
-                })
-        }
-        "run" => runtime_commands::run_settings(extra, next_max_turns, startup_max_turns),
-        "sandbox" => runtime_commands::sandbox(extra, sandbox, approval),
-        "input" => {
-            let words = extra.split_whitespace().collect::<Vec<_>>();
-            let ["status", id] = words.as_slice() else {
-                return Err(
-                    "/input status <admission-id>. Press Esc to cancel a running task.".into(),
-                );
-            };
-            let saved = saved.ok_or("Admission records require a v2 conversation")?;
-            let snapshot = saved.snapshot().map_err(|e| e.to_string())?;
-            let current = polaris_core::session_manager::SessionId::new(snapshot.state.session_id)
-                .map_err(|e| e.to_string())?;
-            if !state_dir.join("tui-admissions-v1").exists() {
-                return Err("No admission records saved in this conversation".into());
-            }
-            let manager = polaris_core::desktop_store::SessionManagerStore::inspect_family_owned(
-                &state_dir.join("tui-admissions-v1"),
-                &current,
-            )
-            .map_err(|e| e.to_string())?
-            .ok_or("No admission records saved in this conversation")?;
-            let id =
-                polaris_core::session_manager::AdmissionId::new(*id).map_err(|e| e.to_string())?;
-            let admitted = manager.status(&id).map_err(|e| e.to_string())?;
-            use polaris_core::session_manager::AdmissionState;
-            let destination = match &admitted.state {
-                AdmissionState::DestinationReady { session_id, .. }
-                | AdmissionState::InputAppended { session_id }
-                | AdmissionState::RunQueued { session_id, .. }
-                | AdmissionState::Running { session_id, .. }
-                | AdmissionState::Terminal {
-                    session_id: Some(session_id),
-                    ..
-                } => Some(session_id),
-                _ => None,
-            };
-            if admitted.parent_session != current && destination != Some(&current) {
-                return Err("This admission record does not belong to this conversation".into());
-            }
-            Ok(vec![render::sanitize(&format!(
-                "Input {} / revision {} / state {:?}",
-                admitted.id.as_str(),
-                admitted.revision,
-                admitted.state
-            ))])
-        }
-        "instruction" => Err(
-            "The persistent owner of the running instruction is connected. Use normal input".into(),
-        ),
-        _ => Err(
-            "Specify /subagents, /roles, /run settings|details, /sandbox, or /input status".into(),
-        ),
-    }
-}
-
-#[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
-fn handle_queued_control<B: ratatui::backend::Backend, R: approver::KeyReader>(
-    request: &str,
-    terminal: &RefCell<ratatui::Terminal<B>>,
-    reader: &mut R,
-    session: &polaris_core::session::Session,
-    workspace: &polaris_core::rewind_workspace::WorkspaceOwner,
-    effects: &polaris_core::management_effect::ManagementEffectStoreV1,
-    state_dir: &Path,
-    queue: &mut VecDeque<instruction_commands::QueuedInstructionV1>,
-    active: &mut Option<instruction_commands::QueuedInstructionV1>,
-) -> Option<Result<Vec<String>, String>> {
-    let receive = request.strip_prefix("instruction send ");
-    let cancel = request.strip_prefix("input cancel ");
-    if receive.is_none() && cancel.is_none() {
-        return None;
-    }
-    Some((|| {
-        let saved = session
-            .persistence
-            .as_ref()
-            .ok_or("A saved v2 conversation is required")?;
-        let snapshot = saved.snapshot().map_err(|e| e.to_string())?;
-        let current =
-            polaris_core::session_manager::SessionId::new(snapshot.state.session_id.clone())
-                .map_err(|e| e.to_string())?;
-        let activity = workspace
-            .try_activity_quiescent()
-            .map_err(|e| e.to_string())?;
-        let (store, mut manager) = open_tui_admission_owner(state_dir, &current)?;
-        if let Some(text) = receive {
-            let handle = instruction_commands::receive(
-                &store,
-                &mut manager,
-                saved,
-                effects,
-                &activity,
-                polaris_core::management_effect::ManagementOperationIdV1::random()
-                    .map_err(|e| e.to_string())?,
-                text,
-            )?;
-            let id = handle.admission_id().as_str().to_owned();
-            queue.push_back(handle);
-            return Ok(vec![format!(
-                "Instruction admission ID: {id}. Applied at the next run boundary"
-            )]);
-        }
-        let id = polaris_core::session_manager::AdmissionId::new(cancel.expect("cancel"))
-            .map_err(|e| e.to_string())?;
-        let position = queue.iter().position(|item| item.admission_id() == &id);
-        let is_active = active
-            .as_ref()
-            .is_some_and(|item| item.admission_id() == &id);
-        if position.is_none() && !is_active {
-            return Err("This is not a queued input ID for this conversation".into());
-        }
-        if !account::confirm(
-            terminal,
-            reader,
-            "Cancel queued input",
-            id.as_str(),
-            "Cancel only the unexecuted instruction with this ID.",
-        ) {
-            let context = runtime_commands::RuntimeMutationContext {
-                effects,
-                lease: &activity,
-                session_id: &snapshot.state.session_id,
-                generation: snapshot.state.generation,
-                accepted: false,
-            };
-            runtime_effects::begin(&context, "D10", id.as_str().as_bytes())?;
-            return Ok(vec!["Cancellation request cancelled".into()]);
-        }
-        let handle = if is_active {
-            active.take().expect("active")
-        } else {
-            queue.remove(position.expect("position")).expect("queued")
-        };
-        instruction_commands::cancel_queue(
-            &store,
-            &mut manager,
-            saved,
-            effects,
-            &activity,
-            handle,
-        )?;
-        Ok(vec![format!("Input {} cancelled", id.as_str())])
-    })())
+    let (_, extra) = request.split_once(' ').unwrap_or((request, ""));
+    runtime_commands::subagents(control, extra, None).await
 }
 
 /// Everything `run()` needs, already built by `polaris-cli::main()` the
@@ -3761,7 +3596,6 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
     let mut refresh_saved_settings = true;
     #[cfg(unix)]
     let mut draft_autosave = draft::DraftAutosave::new();
-    let mut next_max_turns = args.max_turns;
     #[cfg(unix)]
     let mut last_submission_was_local = false;
     #[cfg(target_os = "linux")]
@@ -4626,89 +4460,9 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                         }
                         #[cfg(unix)]
                         slash::Action::RuntimeControl(request) => {
-                            if let Some(result) = handle_queued_control(
-                                &request,
-                                &terminal,
-                                &mut key_reader,
-                                &session,
-                                rewind_workspace.as_ref().expect("startup owner"),
-                                &management_effects,
-                                &args.state_dir,
-                                &mut queued_instructions,
-                                &mut active_instruction,
-                            ) {
-                                match result {
-                                    Ok(lines) => {
-                                        local_lines.extend(
-                                            lines.into_iter().map(ratatui::text::Line::from),
-                                        );
-                                        status = Status::Notice(
-                                            "Admitted input result displayed".into(),
-                                        );
-                                    }
-                                    Err(error) => {
-                                        queued_inputs_paused = true;
-                                        status = Status::Error(error);
-                                    }
-                                }
-                                continue;
-                            }
-
-                            if request == "roles" || request.starts_with("roles ") {
-                                match role_commands::handle(
-                                    &request,
-                                    &terminal,
-                                    &mut key_reader,
-                                    &session,
-                                    &initial_saved_settings,
-                                    rewind_workspace.as_ref().expect("startup owner"),
-                                    &management_effects,
-                                    args.provider.as_ref(),
-                                    &effective_agent_types,
-                                    has_pending_inputs,
-                                ) {
-                                    Ok(lines) => {
-                                        local_lines.extend(lines);
-                                        refresh_saved_settings = true;
-                                        status =
-                                            Status::Notice("Role binding result displayed".into());
-                                    }
-                                    Err(error) => status = Status::Error(error),
-                                }
-                                continue;
-                            }
-                            if request.starts_with("sandbox ") && request != "sandbox status" {
-                                match sandbox_commands::handle(
-                                    &request,
-                                    &terminal,
-                                    &mut key_reader,
-                                    &session,
-                                    rewind_workspace.as_ref().expect("startup owner"),
-                                    &management_effects,
-                                    &args.sandbox,
-                                    has_pending_inputs,
-                                ) {
-                                    Ok(lines) => {
-                                        local_lines.extend(lines);
-                                        status = Status::Notice(
-                                            "Sandbox execution result displayed".into(),
-                                        );
-                                    }
-                                    Err(error) => status = Status::Error(error),
-                                }
-                                continue;
-                            }
                             let result = handle_runtime_command(
                                 &request,
                                 session.delegation_control.as_ref(),
-                                session.persistence.as_ref(),
-                                &args.state_dir,
-                                &effective_agent_types,
-                                &args.sandbox,
-                                approval_policy,
-                                &mut next_max_turns,
-                                args.max_turns,
-                                &conversation_view,
                             )
                             .await;
                             match result {
@@ -5537,86 +5291,8 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                 }
                 #[cfg(unix)]
                 Some(slash::Action::RuntimeControl(request)) => {
-                    if let Some(result) = handle_queued_control(
-                        &request,
-                        &terminal,
-                        &mut key_reader,
-                        &session,
-                        rewind_workspace.as_ref().expect("startup owner"),
-                        &management_effects,
-                        &args.state_dir,
-                        &mut queued_instructions,
-                        &mut active_instruction,
-                    ) {
-                        match result {
-                            Ok(lines) => {
-                                local_lines
-                                    .extend(lines.into_iter().map(ratatui::text::Line::from));
-                                status = Status::Notice("Admitted input result displayed".into());
-                            }
-                            Err(error) => {
-                                queued_inputs_paused = true;
-                                status = Status::Error(error);
-                            }
-                        }
-                        continue;
-                    }
-
-                    if request == "roles" || request.starts_with("roles ") {
-                        match role_commands::handle(
-                            &request,
-                            &terminal,
-                            &mut key_reader,
-                            &session,
-                            &initial_saved_settings,
-                            rewind_workspace.as_ref().expect("startup owner"),
-                            &management_effects,
-                            args.provider.as_ref(),
-                            &effective_agent_types,
-                            has_pending_inputs,
-                        ) {
-                            Ok(lines) => {
-                                local_lines.extend(lines);
-                                refresh_saved_settings = true;
-                                status = Status::Notice("Role binding result displayed".into());
-                            }
-                            Err(error) => status = Status::Error(error),
-                        }
-                        continue;
-                    }
-                    if request.starts_with("sandbox ") && request != "sandbox status" {
-                        match sandbox_commands::handle(
-                            &request,
-                            &terminal,
-                            &mut key_reader,
-                            &session,
-                            rewind_workspace.as_ref().expect("startup owner"),
-                            &management_effects,
-                            &args.sandbox,
-                            has_pending_inputs,
-                        ) {
-                            Ok(lines) => {
-                                local_lines.extend(lines);
-                                status =
-                                    Status::Notice("Sandbox execution result displayed".into());
-                            }
-                            Err(error) => status = Status::Error(error),
-                        }
-                        continue;
-                    }
-                    let result = handle_runtime_command(
-                        &request,
-                        session.delegation_control.as_ref(),
-                        session.persistence.as_ref(),
-                        &args.state_dir,
-                        &effective_agent_types,
-                        &args.sandbox,
-                        approval_policy,
-                        &mut next_max_turns,
-                        args.max_turns,
-                        &conversation_view,
-                    )
-                    .await;
+                    let result =
+                        handle_runtime_command(&request, session.delegation_control.as_ref()).await;
                     match result {
                         Ok(lines) => {
                             local_lines.extend(lines.into_iter().map(ratatui::text::Line::from));
@@ -6868,7 +6544,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
         if let Some(active) = tui_admission.as_ref() {
             conversation_view.push_history_line(render::HistoryLine {
                 line: ratatui::text::Line::from(format!(
-                    "Admission ID: {} (/input status|cancel)",
+                    "Admission ID: {}",
                     active.admission_id.as_str()
                 )),
                 shaded: true,
@@ -6911,7 +6587,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
             binding
         };
         let outcome = {
-            let mut stop = StopTracker::new(next_max_turns);
+            let mut stop = StopTracker::new(args.max_turns);
             let mut gate = Gate::new(approval_policy);
             let approver = TuiApprover {
                 terminal: &terminal,
@@ -7276,73 +6952,16 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                                         rendered_suggestion_count = suggestions.len();
                                     }
                                     #[cfg(unix)]
-                                    KeyCode::Enter if input_buffer.starts_with("/instruction ") => {
-                                        let request=std::mem::take(&mut input_buffer);input_cursor=0;
-                                        let result=(||->Result<String,String>{
-                                            let text=request.strip_prefix("/instruction send ").ok_or("Usage: /instruction send <instruction-for-next-run>")?;
-                                            let active=tui_admission.as_mut().ok_or("No saved admission owner")?;
-                                            let saved=runtime_persistence.as_ref().ok_or("A saved v2 conversation is required")?;
-                                            let handle=instruction_commands::receive(&active.store,&mut active.manager,saved,&management_effects,&_project_activity,polaris_core::management_effect::ManagementOperationIdV1::random().map_err(|e|e.to_string())?,text)?;
-                                            let id=handle.admission_id().as_str().to_owned();queued_instructions.push_back(handle);Ok(id)
-                                        })();
-                                        match result {Ok(id)=>{conversation_view.push_history_line(render::HistoryLine{line:ratatui::text::Line::from(format!("Instruction admission ID: {id}. Applied at this conversation's next run boundary")),shaded:true});status=Status::Notice("Instruction saved for the next run".into());},Err(error)=>status=Status::Error(error)}
-                                        mid_turn_notice_until=Some(Instant::now()+MID_TURN_NOTICE_DURATION);
-                                    }
-                                    #[cfg(unix)]
-                                    KeyCode::Enter if input_buffer.starts_with("/input ") => {
-                                        let request=std::mem::take(&mut input_buffer);input_cursor=0;
-                                        let result=(|| -> Result<(bool,String),String> {
-                                            let words=request.split_whitespace().collect::<Vec<_>>();
-                                            let ["/input",verb,id]=words.as_slice() else {return Err("Usage: /input status|cancel <admission-id>".into());};
-                                            let active=tui_admission.as_ref().ok_or("This run has no saved admission ID")?;
-                                            let id=polaris_core::session_manager::AdmissionId::new(*id).map_err(|e|e.to_string())?;
-                                            let receipt=active.manager.status(&id).map_err(|e|e.to_string())?;
-                                            if *verb=="status" {return Ok((false,render::sanitize(&format!("Input {} / revision {} / state {:?}",receipt.id.as_str(),receipt.revision,receipt.state))));}
-                                            if *verb!="cancel" {return Err("Usage: /input status|cancel <admission-id>".into());}
-                                            if id!=active.admission_id {
-                                                let position=queued_instructions.iter().position(|item|item.admission_id()==&id).ok_or("This is not an active or queued input ID for this conversation")?;
-                                                #[cfg(target_os="linux")] let mut reader=LinuxSignalAwareKeyReader;
-                                                #[cfg(not(target_os="linux"))] let mut reader=approver::CrosstermKeyReader;
-                                                if !account::confirm(&terminal,&mut reader,"Cancel queued input",id.as_str(),"Cancel only the unexecuted instruction with this ID.") {
-                                                    let context=runtime_commands::RuntimeMutationContext{effects:&management_effects,lease:&_project_activity,session_id:&durable_session_id,generation:runtime_generation,accepted:false};
-                                                    runtime_effects::begin(&context,"D10",id.as_str().as_bytes())?;
-                                                    return Ok((false,"Cancellation request cancelled".into()));
-                                                }
-                                                let instruction=queued_instructions.remove(position).expect("queued");
-                                                let active=tui_admission.as_mut().ok_or("No stored admission owner")?;
-                                                instruction_commands::cancel_queue(&active.store,&mut active.manager,runtime_persistence.as_ref().ok_or("A v2 conversation is required")?,&management_effects,&_project_activity,instruction)?;
-                                                return Ok((false,format!("Input {} cancelled",id.as_str())));
-                                            }
-                                            #[cfg(target_os="linux")]
-                                            let mut reader=LinuxSignalAwareKeyReader;
-                                            #[cfg(not(target_os="linux"))]
-                                            let mut reader=approver::CrosstermKeyReader;
-                                            let accepted=account::confirm(&terminal,&mut reader,"Request input stop",id.as_str(),"Stop this input's run and verify termination of its owned children and MCP runtime.");
-                                            let context=runtime_commands::RuntimeMutationContext{effects:&management_effects,lease:&_project_activity,session_id:&durable_session_id,generation:runtime_generation,accepted};
-                                            interruption_effect=runtime_effects::begin(&context,"D10",id.as_str().as_bytes())?;
-                                            Ok((accepted,if accepted {"Input stop requested".into()}else{"Stop request cancelled".into()}))
-                                        })();
-                                        match result {
-                                            Ok((true,_))=>break TurnOutcome::Interrupted,
-                                            Ok((false,line))=>{conversation_view.push_history_line(render::HistoryLine{line:ratatui::text::Line::from(line),shaded:false});status=Status::Notice("Input state displayed".into());},
-                                            Err(error)=>status=Status::Error(error),
-                                        }
-                                        mid_turn_notice_until=Some(Instant::now()+MID_TURN_NOTICE_DURATION);
-                                    }
-                                    #[cfg(unix)]
-                                    KeyCode::Enter if input_buffer.starts_with("/subagents") || input_buffer.starts_with("/run details") => {
+                                    KeyCode::Enter if input_buffer.starts_with("/subagents") => {
                                         let request=std::mem::take(&mut input_buffer);
                                         input_cursor=0;
-                                        let result = if let Some(extra)=request.strip_prefix("/subagents") {
-                                            #[cfg(target_os="linux")]
-                                            let mut cancellation_reader=LinuxSignalAwareKeyReader;
-                                            #[cfg(not(target_os="linux"))]
-                                            let mut cancellation_reader=approver::CrosstermKeyReader;
-                                            let accepted = !extra.trim().starts_with("cancel ") || account::confirm(&terminal,&mut cancellation_reader,"Request subagent stop",extra.trim(),"Send a stop request only to the current child/attempt. Verify termination with wait.");
-                                            runtime_commands::subagents(Some(&turn_control),extra.trim(),Some(runtime_commands::RuntimeMutationContext{effects:&management_effects,lease:&_project_activity,session_id:&durable_session_id,generation:runtime_generation,accepted})).await
-                                        } else {
-                                            runtime_commands::run_details(Some(&turn_control)).await.map(|mut lines| { lines.extend(conversation_view.tool_detail_lines()); lines })
-                                        };
+                                        let extra=request.strip_prefix("/subagents").unwrap_or_default();
+                                        #[cfg(target_os="linux")]
+                                        let mut cancellation_reader=LinuxSignalAwareKeyReader;
+                                        #[cfg(not(target_os="linux"))]
+                                        let mut cancellation_reader=approver::CrosstermKeyReader;
+                                        let accepted = !extra.trim().starts_with("cancel ") || account::confirm(&terminal,&mut cancellation_reader,"Request subagent stop",extra.trim(),"Send a stop request only to the current child/attempt. Verify termination with wait.");
+                                        let result = runtime_commands::subagents(Some(&turn_control),extra.trim(),Some(runtime_commands::RuntimeMutationContext{effects:&management_effects,lease:&_project_activity,session_id:&durable_session_id,generation:runtime_generation,accepted})).await;
                                         match result {
                                             Ok(lines)=>{conversation_view.extend_text_lines(lines);status=Status::Notice("Execution state displayed".into());},
                                             Err(error)=>status=Status::Error(error),
@@ -11591,76 +11210,6 @@ fn decided_read_lines(cwd: &std::path::Path) -> Result<Vec<ratatui::text::Line<'
     Ok(lines)
 }
 
-fn compare_read_lines(
-    cwd: &std::path::Path,
-    request: &str,
-) -> Result<Vec<ratatui::text::Line<'static>>, String> {
-    use polaris_core::similarity::{self, Suggestion};
-    const USAGE: &str = "/compare <folder1> | <folder2> [| <folder3> ...]";
-    if request.is_empty() {
-        return Ok(vec![ratatui::text::Line::from(USAGE)]);
-    }
-    if request.len() > 2048 || request.chars().any(char::is_control) {
-        return Err("Specify folders to compare as one line within 2048 bytes".into());
-    }
-    let folders = request.split('|').map(str::trim).collect::<Vec<_>>();
-    if !(2..=8).contains(&folders.len()) || folders.iter().any(|path| path.is_empty()) {
-        return Err(format!("{USAGE} (2–8 folders)"));
-    }
-    let mut samples = Vec::with_capacity(folders.len());
-    let mut lines = Vec::new();
-    for raw in folders {
-        let path = std::path::Path::new(raw);
-        let full = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            cwd.join(path)
-        };
-        let id = full.display().to_string();
-        let sampled = similarity::sample::folder(&id, &full)
-            .map_err(|error| format!("Cannot read {}: {error}", render::sanitize(&id)))?;
-        if sampled.truncated {
-            lines.push(ratatui::text::Line::from(render::sanitize(&format!(
-                "{id}: partial comparison. A low similarity result is not conclusive"
-            ))));
-        }
-        samples.push(sampled.folder);
-    }
-    let graph = similarity::graph(&samples);
-    if graph.omitted > 0 {
-        lines.push(ratatui::text::Line::from(format!(
-            "{} items were not compared because of the limit",
-            graph.omitted
-        )));
-    }
-    if graph.edges.is_empty() {
-        lines.push(ratatui::text::Line::from("No similar folders found"));
-    }
-    for edge in graph.edges {
-        lines.push(ratatui::text::Line::from(render::sanitize(&format!(
-            "{} / {}: similarity {}, {} shared items",
-            edge.left,
-            edge.right,
-            edge.similarity,
-            edge.shared.len()
-        ))));
-    }
-    for proposal in graph.proposals {
-        let why = match proposal.suggestion {
-            Suggestion::SameWorkInTwoPlaces => "The same work may exist in two locations",
-            Suggestion::SharedPart => "A shared component may be extractable",
-        };
-        lines.push(ratatui::text::Line::from(render::sanitize(&format!(
-            "Suggestion: {} / {}: {why}. {}",
-            proposal.left, proposal.right, proposal.because
-        ))));
-    }
-    lines.push(ratatui::text::Line::from(
-        "Suggestions are investigation leads. Nothing is moved or deleted.",
-    ));
-    Ok(lines)
-}
-
 fn clear_mcp_prompt_on_session_change(
     previous: &std::path::Path,
     current: &std::path::Path,
@@ -11852,16 +11401,6 @@ fn apply_slash_action(
             }
             SlashOutcome::Continue
         }
-        slash::Action::Compare(requested) => {
-            match compare_read_lines(cwd, &requested) {
-                Ok(lines) => {
-                    local_lines.extend(lines);
-                    *status = Status::Notice("Folder comparison displayed".into());
-                }
-                Err(error) => *status = Status::Error(error),
-            }
-            SlashOutcome::Continue
-        }
         #[cfg(target_os = "linux")]
         slash::Action::Apply(_) => {
             *status = Status::Error(
@@ -11931,14 +11470,6 @@ fn apply_slash_action(
                     }
                 }
             }
-            SlashOutcome::Continue
-        }
-        slash::Action::Pwd => {
-            *status = Status::Notice(
-                polaris_core::project::resolve_root(cwd)
-                    .display()
-                    .to_string(),
-            );
             SlashOutcome::Continue
         }
         slash::Action::Mcp(requested) => {
@@ -12085,6 +11616,10 @@ fn apply_slash_action(
             *status = Status::Notice(
                 "Compaction is automatic. /compact and /compact threshold were removed.".into(),
             );
+            SlashOutcome::Continue
+        }
+        slash::Action::Removed(notice) => {
+            *status = Status::Notice(notice.into());
             SlashOutcome::Continue
         }
         slash::Action::Logout => {

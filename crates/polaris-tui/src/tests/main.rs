@@ -407,67 +407,6 @@ fn decided_read_is_bounded_and_marks_old_entries_as_history() {
 }
 
 #[test]
-fn readonly_acceptance_compare_folders_and_errors_preserve_source() {
-    let root = tempfile::tempdir().unwrap();
-    let left = root.path().join("left");
-    let right = root.path().join("right");
-    std::fs::create_dir(&left).unwrap();
-    std::fs::create_dir(&right).unwrap();
-    for path in [&left, &right] {
-        std::fs::write(path.join("same.txt"), "contents stay in place").unwrap();
-    }
-    let mut session = Session::default();
-    let mut status = Status::Idle;
-    let mut local_lines = Vec::new();
-    let session_path = root.path().join("session.jsonl");
-    let outcome = call(
-        slash::parse("/compare left | right").unwrap(),
-        &mut session,
-        &session_path,
-        &mut status,
-        &[],
-        root.path(),
-        &mut local_lines,
-    );
-    assert!(matches!(outcome, SlashOutcome::Continue));
-    assert!(matches!(status, Status::Notice(_)));
-    let lines = local_lines
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(lines.contains("similarity"), "{lines}");
-    assert!(lines.contains("Nothing is moved or deleted"), "{lines}");
-    for command in [
-        "/compare left | missing".to_owned(),
-        format!("/compare {} | right", "x".repeat(2049)),
-    ] {
-        let before = local_lines.clone();
-        call(
-            slash::parse(&command).unwrap(),
-            &mut session,
-            &session_path,
-            &mut status,
-            &[],
-            root.path(),
-            &mut local_lines,
-        );
-        assert!(matches!(status, Status::Error(_)));
-        assert_eq!(local_lines, before);
-    }
-    assert!(session.messages.is_empty());
-    assert!(!session_path.exists());
-    assert_eq!(
-        std::fs::read_to_string(left.join("same.txt")).unwrap(),
-        "contents stay in place"
-    );
-    assert_eq!(
-        std::fs::read_to_string(right.join("same.txt")).unwrap(),
-        "contents stay in place"
-    );
-}
-
-#[test]
 fn mcp_prompt_selection_is_typed_and_rejects_ambiguous_arguments() {
     let choice = mcp_prompt_choice("prompt files/review path=src/lib.rs depth=2").unwrap();
     assert_eq!(choice.server, "files");
@@ -1697,99 +1636,6 @@ async fn distinct_tui_input_uses_an_empty_durable_sidechat_and_terminal_receipt(
         }
     ));
     drop(_store);
-
-    fn admission_files(root: &Path) -> std::collections::BTreeMap<PathBuf, Option<Vec<u8>>> {
-        let mut files = std::collections::BTreeMap::new();
-        for entry in std::fs::read_dir(root).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                files.insert(path.clone(), None);
-                files.extend(admission_files(&path));
-            } else {
-                files.insert(path.clone(), Some(std::fs::read(&path).unwrap()));
-            }
-        }
-        files
-    }
-    let admissions_root = state_dir.join("tui-admissions-v1");
-    let before_status = admission_files(&admissions_root);
-    let sandbox = SandboxPolicy::new(polaris_sandbox::SandboxMode::ReadOnly, &[]).unwrap();
-    let activity = conversation_view::ConversationViewState::new(
-        &render::HeaderInfo {
-            provider_name: "test",
-            model_name: "test",
-            usage: Default::default(),
-            cwd: "test",
-            cwd_short: "test",
-            effort_name: "auto",
-        },
-        80,
-    );
-    let mut max_turns = 1;
-    let command = format!("input status {}", admission_id.as_str());
-    let lines = handle_runtime_command(
-        &command,
-        None,
-        session.persistence.as_ref(),
-        &state_dir,
-        &[],
-        &sandbox,
-        ApprovalPolicy::Never,
-        &mut max_turns,
-        1,
-        &activity,
-    )
-    .await
-    .unwrap();
-    assert!(lines[0].contains(admission_id.as_str()));
-    assert!(lines[0].contains("Completed"));
-    let unrelated =
-        PersistedSession::create(root.path(), &database, "project", HistoryMode::Legacy, None)
-            .unwrap();
-    assert!(
-        handle_runtime_command(
-            &command,
-            None,
-            Some(&unrelated),
-            &state_dir,
-            &[],
-            &sandbox,
-            ApprovalPolicy::Never,
-            &mut max_turns,
-            1,
-            &activity,
-        )
-        .await
-        .is_err()
-    );
-    assert_eq!(admission_files(&admissions_root), before_status);
-    let index = admissions_root.join("family-index.v1.json");
-    let original_index = std::fs::read(&index).unwrap();
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(&index)
-        .unwrap()
-        .set_len(2 * 1024 * 1024 + 1)
-        .unwrap();
-    let oversized = admission_files(&admissions_root);
-    assert!(
-        handle_runtime_command(
-            &command,
-            None,
-            session.persistence.as_ref(),
-            &state_dir,
-            &[],
-            &sandbox,
-            ApprovalPolicy::Never,
-            &mut max_turns,
-            1,
-            &activity,
-        )
-        .await
-        .is_err()
-    );
-    assert_eq!(admission_files(&admissions_root), oversized);
-    std::fs::write(&index, original_index).unwrap();
 
     let denied = admit_tui_input(
         &mut session,
@@ -6223,6 +6069,263 @@ fn help_lists_no_compaction_command() {
     );
 }
 
+/// The eight commands removed from the TUI, written out here rather than read
+/// back from `slash`, each with a form that carries the old arguments.
+const REMOVED_TUI_COMMANDS: [(&str, &str); 8] = [
+    ("/pwd", "/pwd now"),
+    ("/sandbox", "/sandbox status"),
+    ("/instruction", "/instruction send do the next thing"),
+    ("/input", "/input cancel input-id"),
+    ("/roles", "/roles bind worker subgiant"),
+    ("/compare", "/compare left | right"),
+    ("/run", "/run settings max-turns 5"),
+    ("/history", "/history 20"),
+];
+
+#[test]
+fn help_lists_none_of_the_removed_tui_commands_and_still_lists_status() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut session = Session::default();
+    let mut status = Status::Idle;
+    let mut local_lines = Vec::new();
+
+    call(
+        slash::Action::Help,
+        &mut session,
+        &dir.path().join("session.jsonl"),
+        &mut status,
+        &[],
+        dir.path(),
+        &mut local_lines,
+    );
+
+    let help: Vec<String> = local_lines.iter().map(ToString::to_string).collect();
+    for (name, _) in REMOVED_TUI_COMMANDS {
+        assert!(
+            help.iter()
+                .all(|line| !line.starts_with(&format!("{name} "))),
+            "{name} is listed: {help:?}"
+        );
+    }
+    // The positive control: the same lines do list a command that stays.
+    assert!(
+        help.iter().any(|line| line.starts_with("/status ")),
+        "{help:?}"
+    );
+    assert!(
+        help.iter().any(|line| line.starts_with("/subagents ")),
+        "{help:?}"
+    );
+}
+
+#[test]
+fn removed_tui_commands_answer_one_notice_and_change_nothing() {
+    use polaris_core::{conversation_state::HistoryMode, session_store::PersistedSession};
+
+    fn project_files(
+        dir: &std::path::Path,
+    ) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+        let mut files = std::collections::BTreeMap::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files.extend(project_files(&path));
+            } else {
+                files.insert(path.clone(), std::fs::read(&path).unwrap());
+            }
+        }
+        files
+    }
+
+    let root = tempfile::tempdir().expect("temp dir");
+    let project = root.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(project.join("notes.txt"), "unchanged").unwrap();
+    let persisted = PersistedSession::create(
+        root.path(),
+        &root.path().join("memory.sqlite3"),
+        "project",
+        HistoryMode::Legacy,
+        None,
+    )
+    .unwrap();
+    let mut session = Session::default();
+    session.attach(persisted.clone()).unwrap();
+    session.push_user("an earlier question");
+    session.push_assistant("an earlier answer", vec![]);
+    let messages = serde_json::to_string(&session.messages).unwrap();
+    let saved = persisted.snapshot().unwrap();
+    let files = project_files(&project);
+    let session_path = project.join("session.jsonl");
+
+    for (bare, with_arguments) in REMOVED_TUI_COMMANDS {
+        for line in [bare, with_arguments] {
+            let mut status = Status::Idle;
+            let mut local_lines = Vec::new();
+
+            let outcome = call(
+                slash::parse(line).expect("a slash command"),
+                &mut session,
+                &session_path,
+                &mut status,
+                &[],
+                &project,
+                &mut local_lines,
+            );
+
+            assert!(matches!(outcome, SlashOutcome::Continue), "{line}");
+            match status {
+                Status::Notice(notice) => {
+                    assert!(
+                        notice.starts_with(&format!("{bare} was removed.")),
+                        "{notice}"
+                    );
+                    assert!(!notice.contains('\n'), "one line: {notice:?}");
+                }
+                _ => panic!("expected a Notice for {line}"),
+            }
+            assert!(local_lines.is_empty(), "the answer is one line: {line}");
+        }
+    }
+
+    assert_eq!(serde_json::to_string(&session.messages).unwrap(), messages);
+    assert!(!session_path.exists(), "nothing is persisted");
+    assert_eq!(project_files(&project), files);
+    let after = persisted.snapshot().unwrap();
+    assert_eq!(after.state, saved.state);
+    assert_eq!(after.events.len(), saved.events.len());
+}
+
+/// `/subagents` is the one runtime command left. The handler gets the whole
+/// request, name included, and passes on only the words after the name, along
+/// with the run's owner. With no run there is no owner, and the answer says so.
+#[cfg(unix)]
+#[tokio::test]
+async fn subagents_request_passes_its_arguments_and_the_run_owner_on() {
+    for request in ["subagents", "subagents list"] {
+        assert_eq!(
+            handle_runtime_command(request, None).await,
+            Ok(vec!["The current run has no subagent owner".to_owned()]),
+            "{request}"
+        );
+    }
+    let error = handle_runtime_command("subagents wait child attempt", None)
+        .await
+        .unwrap_err();
+    assert!(error.contains("no subagent owner"), "{error}");
+
+    let sandbox = SandboxPolicy::new(polaris_sandbox::SandboxMode::ReadOnly, &[]).unwrap();
+    let mut session = Session::default();
+    let control = install_tui_root_control(
+        &mut session,
+        TuiRootControlArgs {
+            session_id: "subagents-session",
+            turn: 1,
+            sandbox: &sandbox,
+            approval: ApprovalPolicy::Never,
+            mcp_available: false,
+            tool_names: &[],
+            model: "gpt-6-astra",
+            effort: "xhigh",
+        },
+    )
+    .unwrap();
+    let lines = handle_runtime_command("subagents list", Some(&control))
+        .await
+        .unwrap();
+    assert!(lines.iter().any(|line| line == "No subagents"), "{lines:?}");
+}
+
+/// What `/status` shows now that `/pwd` is gone, and the positive control for
+/// the removed-command tests: `/status` itself is still a live command.
+#[cfg(unix)]
+#[test]
+fn status_shows_the_canonical_project_root_next_to_the_other_identity_rows() {
+    use polaris_core::rewind_workspace::{RewindLimits, WorkspaceOwner};
+
+    assert!(matches!(
+        slash::parse("/status"),
+        Some(slash::Action::Status)
+    ));
+    assert!(
+        slash::COMMANDS
+            .iter()
+            .any(|command| command.name == "status")
+    );
+
+    let root = tempfile::tempdir().unwrap();
+    // The run started below a symlink into the project, as `args.cwd` can.
+    let project = root.path().join("real-project");
+    std::fs::create_dir_all(project.join(".polaris")).unwrap();
+    std::fs::create_dir(project.join("sub")).unwrap();
+    std::os::unix::fs::symlink(&project, root.path().join("linked")).unwrap();
+    let canonical = project.canonicalize().unwrap();
+    let project_root = polaris_core::project::resolve_root(&root.path().join("linked/sub"));
+    assert_eq!(project_root, canonical);
+
+    let state_dir = root.path().join("state");
+    std::fs::create_dir(&state_dir).unwrap();
+    let owner = WorkspaceOwner::open(
+        &canonical,
+        &state_dir.join("rewind-workspace"),
+        RewindLimits::default(),
+    )
+    .unwrap();
+    let lease = owner.try_mutation().unwrap();
+    let store = polaris_core::management_effect::ManagementEffectStoreV1::open_at_state_dir(
+        &canonical, &state_dir, &lease,
+    )
+    .unwrap();
+    drop(lease);
+    let sandbox = SandboxPolicy::new(polaris_sandbox::SandboxMode::ReadOnly, &[]).unwrap();
+    let session = Session::default();
+    let lines = status_lines(StatusSnapshot {
+        session: &session,
+        session_path: None,
+        accounts: Ok(Vec::new()),
+        binding: None,
+        provider_name: "openai",
+        model_name: "gpt-5.4",
+        usage_report: polaris_provider::UsageReport::default(),
+        sandbox: &sandbox,
+        approval: ApprovalPolicy::Never,
+        startup_approval: ApprovalPolicy::OnRequest,
+        mcp_external: false,
+        audit_path: None,
+        turn_authority_present: false,
+        fixed_effort: None,
+        answer_finalizer: None,
+        project_root: &project_root,
+        management_effects: &store,
+        recovery_issue: None,
+    });
+
+    let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
+    let at = |needle: &str| text.iter().position(|line| line.contains(needle));
+    let row = &text[at("Project root:").expect("a Project root row")];
+    assert!(row.ends_with(&canonical.display().to_string()), "{row}");
+    assert!(!row.contains("linked"), "{row}");
+    assert_eq!(
+        text.iter()
+            .filter(|line| line.contains("Project root:"))
+            .count(),
+        1
+    );
+    // It sits with the identity rows, ahead of the Account section.
+    let account = text.iter().position(|line| line == "Account").unwrap();
+    assert!(at("Session ID:").unwrap() < at("Project root:").unwrap());
+    assert!(at("Project root:").unwrap() < account);
+    // The rest of `/status` is untouched, including what `/sandbox` showed.
+    for needle in [
+        "Model:",
+        "sandbox:",
+        "Approval (current):",
+        "Approval (startup):",
+    ] {
+        assert!(text.iter().any(|line| line.contains(needle)), "{needle}");
+    }
+}
+
 /// A `Provider` whose only job is recording what `set_model` was last
 /// called with, so `handle_model` tests can confirm it actually
 /// reaches the provider (not just the display copy). `complete` is
@@ -7012,36 +7115,6 @@ fn confirmed_phase_change_records_effect_and_cancel_preserves_session() {
     assert!(matches!(status, Status::Error(_)));
     assert_eq!(persistence.snapshot().unwrap().state, disabled_state);
     assert_eq!(std::fs::read(&journal).unwrap(), disabled_journal);
-}
-
-#[test]
-fn pwd_reports_the_canonical_project_root() {
-    let mut session = Session::default();
-    let mut status = Status::Idle;
-    let dir = tempfile::tempdir().expect("temp dir");
-    let project = dir.path().join("project");
-    let nested = project.join("nested");
-    std::fs::create_dir_all(project.join(".git")).unwrap();
-    std::fs::create_dir_all(&nested).unwrap();
-    let session_path = dir.path().join("session.jsonl");
-    let mut local_lines = Vec::new();
-
-    call(
-        slash::Action::Pwd,
-        &mut session,
-        &session_path,
-        &mut status,
-        &[],
-        &nested,
-        &mut local_lines,
-    );
-
-    match status {
-        Status::Notice(n) => {
-            assert_eq!(n, project.canonicalize().unwrap().display().to_string())
-        }
-        _ => panic!("expected a Notice"),
-    }
 }
 
 /// The registry lives under `HOME`, not under the project, so "nothing is

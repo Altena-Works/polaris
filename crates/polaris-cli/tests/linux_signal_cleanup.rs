@@ -1342,7 +1342,7 @@ fn linux_tui_local_acceptance_commands_draft_refusal_and_clean_exit() {
             ("/help", "commands listed"),
             ("/status", "Status displayed"),
             ("/doctor", "Diagnostic results"),
-            ("/pwd", "project"),
+            ("/pwd", "removed"),
             ("/mcp", "External MCP"),
             ("/diff", "diff:"),
         ] {
@@ -1391,7 +1391,7 @@ fn linux_tui_local_acceptance_commands_draft_refusal_and_clean_exit() {
         case.marker(REPLY, SCREEN_DEADLINE)?;
         fixture.await_request()?;
         let offset = case.raw.len();
-        case.write_key(b"/run details\r")?;
+        case.write_key(b"/subagents list\r")?;
         case.marker_since(offset, "Execution state", SCREEN_DEADLINE)?;
         // Recall an older input while retaining the independent live draft.
         // Move to the start by byte-safe repeated Left on this ASCII fixture.

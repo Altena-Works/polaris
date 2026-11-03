@@ -52,7 +52,6 @@ fn windows_unavailable_owner_preserves_rejected_submission() {
         "/mcp prompt select fixture",
         "/sync apply",
         "/session configure fixture",
-        "/run settings max-turns 2",
         "/subagents cancel child attempt",
     ] {
         let mut buffer = text.to_owned();
@@ -76,12 +75,10 @@ fn windows_unavailable_owner_preserves_rejected_submission() {
 fn windows_read_only_slash_submission_remains_available() {
     for text in [
         "/help",
-        "/pwd",
         "/status",
         "/doctor",
         "/skills",
         "/diff",
-        "/compare saved",
         "/decided list",
         "/memory search fixture",
         "/memory get fixture",
@@ -90,7 +87,7 @@ fn windows_read_only_slash_submission_remains_available() {
         "/phase",
         "/workflow",
         "/session current",
-        "/run details",
+        "/subagents list",
         "/sync status",
         "/quit",
     ] {
@@ -131,12 +128,12 @@ fn windows_unavailable_owner_preserves_inflight_history_and_queue() {
     );
     assert_eq!((buffer.clone(), cursor, queue), before);
 
-    let mut queue = VecDeque::from(["/help".to_owned(), "/pwd".to_owned()]);
+    let mut queue = VecDeque::from(["/help".to_owned(), "/status".to_owned()]);
     let saved = promote_queued_input(&mut queue, false, &mut buffer, &mut cursor).unwrap();
     assert_eq!(saved, Some(("next instruction".to_owned(), 4)));
     assert_eq!(buffer, "/help");
     assert_eq!(cursor, 5);
-    assert_eq!(queue, VecDeque::from(["/pwd".to_owned()]));
+    assert_eq!(queue, VecDeque::from(["/status".to_owned()]));
 }
 
 #[tokio::test]
@@ -247,7 +244,10 @@ fn windows_read_only_slash_dispatch_preserves_project_and_session() {
     let messages = serde_json::to_vec(&session.messages).unwrap();
     let before = contents(root.path());
     let mut lines = Vec::new();
-    for action in [slash::Action::Help, slash::Action::Pwd] {
+    for action in [
+        slash::Action::Help,
+        slash::parse("/pwd").expect("a removed command still parses"),
+    ] {
         let mut status = Status::Idle;
         assert!(matches!(
             apply_slash_action(

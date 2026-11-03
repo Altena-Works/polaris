@@ -61,15 +61,7 @@ fn windows_read_only_loop_displays_commands_without_creating_state() {
     let mut view = ReadOnlyView::new(root.path().to_owned());
     let mut terminal = ratatui::Terminal::new(TestBackend::new(100, 32)).unwrap();
     let mut events = VecDeque::new();
-    for text in [
-        "/help",
-        "/status",
-        "/doctor",
-        "/pwd",
-        "/decided list",
-        "/compare",
-        "/quit",
-    ] {
+    for text in ["/help", "/status", "/doctor", "/decided list", "/quit"] {
         events.push_back(Event::Paste(text.into()));
         events.push_back(enter());
     }
@@ -102,7 +94,11 @@ fn windows_read_only_loop_displays_commands_without_creating_state() {
             .any(|line| line.contains("conversation, storage: not started"))
     );
     assert!(lines.iter().any(|line| line.contains("No records")));
-    assert!(lines.iter().any(|line| line.contains("folder1")));
+    let project_root = format!(
+        "Project root: {}",
+        polaris_core::project::resolve_root(root.path()).display()
+    );
+    assert!(lines.iter().any(|line| *line == project_root));
     assert_eq!(contents(root.path()), before);
 }
 
@@ -124,6 +120,9 @@ fn windows_read_only_loop_preserves_mutation_and_unavailable_reader_drafts() {
         "/sync apply",
         "/mcp list",
         "/memory search fixture",
+        "/pwd",
+        "/compare left | right",
+        "/run details",
     ] {
         view.buffer = text.into();
         view.cursor = text.chars().next().unwrap().len_utf8();

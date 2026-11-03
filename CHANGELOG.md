@@ -19,7 +19,7 @@ macOS arm64のTUIを配布対象として準備する。GUIと他OSのソース�
 - TUIの既定・推奨モデルをGPT-6.1 Solへ変更し、起動ヘッダにバージョンを表示する。
 - ファイルのD&Dをまとめて削除できる入力リンクとして扱い、出力されたファイルへのCtrl-click（端末対応時はCmd-click）からFinderで保存場所を表示する。範囲選択した文章は追加の確認画面なしでコピーする。
 - help・ログ・エラーを英語へ統一する。TUIのアカウント操作は`/login`・`/logout`・`/status`へ、remember設定は`/memory configure`へ集約する。CLIの`polaris account`は保持する。
-- 会話の再開・分岐・巻戻し、原文参照、workflowとskill、MCP・subagentをTUIから扱える。
+- 会話の再開・分岐・巻戻し、workflowとskill、MCP・subagentをTUIから扱える。
 - working中の補完と子タスク照会、入力受理ID、整理したstatus表示を提供する。
 - 判断backendの共通化と明示選択を追加し、Jev/SemIfを保持する。Clefは本番profile未登録のため通常利用できない。
 - 実装の流れと配布範囲を示すシステム構成図、コマンド参照、暫定リリース資料を整備する。
@@ -30,6 +30,7 @@ macOS arm64のTUIを配布対象として準備する。GUIと他OSのソース�
 - TUIの`/doctor`を、設定（Configured）・利用可能（Available）・観測（Observed）の3区分で示す。利用可能の区分に、read-onlyとworkspace-writeのsandboxの可否、providerの解決、判定の容量を足す。
 - TUIの`/sync`と`/sync status`の先頭に、表示がこの端末の記録であり、remoteを観測していないことを示す行を足す。
 - macOSのTUIの一覧と`/help`から、macOSでは動かない`/setting`を外す。`/sync`の説明から、TUIでは参加を確定できない`join`を外す。
+- TUIの`/pwd`・`/sandbox`・`/instruction`・`/input`・`/roles`・`/compare`・`/run`・`/history`を廃止する。入力しても何も実行せず、廃止した旨と代わりの操作を1行で答える。代わりは、`/pwd`と`/sandbox`が`/status`（`Project root`行を追加）、`/instruction`が実行中に入力した文章の待ち行列、`/input`がEsc、`/roles`が`agents/<型名>/SKILL.md`、`/compare`が`polaris compare`、`/run`が`/subagents`と起動時の`--max-turns`、`/history`が画面のスクロールと`/export`である。CLIの`polaris compare`・`polaris sandbox`・`--max-turns`は保持する。
 
 ### 修正
 

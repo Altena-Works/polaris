@@ -16,9 +16,6 @@ use polaris_provider::Provider;
 use ratatui::{Terminal, backend::Backend, text::Line};
 use std::cell::RefCell;
 
-const HISTORY_PAGE_MESSAGES: usize = 20;
-const MAX_VIEW_BYTES: usize = 64 * 1024;
-
 pub(crate) struct CommandResult {
     pub lines: Vec<Line<'static>>,
     pub settings_changed: bool,
@@ -103,10 +100,6 @@ pub(crate) fn handle<B: Backend, R: KeyReader>(
             "History mode: {}. Change it in a new, empty conversation.",
             history_name(snapshot.state.history_mode)
         ))]));
-    }
-    if request == "history" || request.starts_with("history ") {
-        return history_lines(&snapshot, request.strip_prefix("history").unwrap().trim())
-            .map(CommandResult::display);
     }
     if has_pending {
         return Err("Cannot change session settings while input is queued".into());
@@ -259,49 +252,6 @@ fn goal_lines(snapshot: &ConversationSnapshot) -> Vec<Line<'static>> {
         ],
         None => vec![line("No saved goal")],
     }
-}
-
-fn history_lines(
-    snapshot: &ConversationSnapshot,
-    offset: &str,
-) -> Result<Vec<Line<'static>>, String> {
-    let offset = if offset.is_empty() {
-        0
-    } else {
-        offset
-            .parse::<usize>()
-            .map_err(|_| "Specify /history [message offset]")?
-    };
-    if offset > snapshot.events.len() {
-        return Err("History offset exceeds the saved range".into());
-    }
-    let mut lines = vec![line(format!(
-        "Original history {}..{} / {} messages",
-        offset,
-        offset
-            .saturating_add(HISTORY_PAGE_MESSAGES)
-            .min(snapshot.events.len()),
-        snapshot.events.len()
-    ))];
-    let mut remaining = MAX_VIEW_BYTES - lines[0].to_string().len();
-    for event in snapshot
-        .events
-        .iter()
-        .skip(offset)
-        .take(HISTORY_PAGE_MESSAGES)
-    {
-        let role = format!("{:?}", event.message.role).to_lowercase();
-        let text = render::sanitize(&format!(
-            "[{role} / turn {}] {}",
-            event.turn_id, event.message.content
-        ));
-        if text.len() > remaining {
-            return Err("History page exceeds 64 KiB. Specify the next message offset".into());
-        }
-        remaining -= text.len();
-        lines.extend(text.lines().map(|part| Line::from(part.to_string())));
-    }
-    Ok(lines)
 }
 
 fn history_name(mode: HistoryMode) -> &'static str {

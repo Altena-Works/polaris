@@ -12,6 +12,10 @@
 //! interactive picker deliberately leaves reasoning effort to automatic
 //! routing; fixed noninteractive measurements can still use `--effort`.
 //!
+//! A removed command is not listed in `COMMANDS` but stays parseable
+//! (`REMOVED`, `Action::Removed`, `Action::Compact`): its name answers one
+//! line that names its replacement, and starts nothing.
+//!
 //! A command whose handler exists on one platform only carries the same `cfg`
 //! on its `COMMANDS` entry, its `Action` variant, and its `parse` arm. Where the
 //! handler is absent the command is not listed and is not recognized, so `/help`
@@ -41,36 +45,12 @@ pub const COMMANDS: &[SlashCommand] = &[
         description: "inspect or update the saved goal",
     },
     SlashCommand {
-        name: "history",
-        description: "inspect a bounded original transcript page",
-    },
-    SlashCommand {
-        name: "input",
-        description: "inspect an exact admitted input",
-    },
-    SlashCommand {
-        name: "instruction",
-        description: "submit through input admission",
-    },
-    SlashCommand {
         name: "tool-memory",
         description: "configure tool-result retention and loopback embedding",
     },
     SlashCommand {
         name: "subagents",
         description: "inspect or wait for an exact child attempt",
-    },
-    SlashCommand {
-        name: "roles",
-        description: "inspect role and tier bindings",
-    },
-    SlashCommand {
-        name: "run",
-        description: "inspect a run or change its next turn limit",
-    },
-    SlashCommand {
-        name: "sandbox",
-        description: "inspect the fixed startup authority",
     },
     SlashCommand {
         name: "help",
@@ -95,10 +75,6 @@ pub const COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "decided",
         description: "inspect recorded project decisions",
-    },
-    SlashCommand {
-        name: "compare",
-        description: "compare folder names and sizes without opening file contents",
     },
     #[cfg(target_os = "linux")]
     SlashCommand {
@@ -170,10 +146,6 @@ pub const COMMANDS: &[SlashCommand] = &[
         description: "export this conversation as markdown",
     },
     SlashCommand {
-        name: "pwd",
-        description: "show the project root",
-    },
-    SlashCommand {
         name: "copy",
         description: "copy the last reply to the clipboard",
     },
@@ -185,6 +157,39 @@ pub const COMMANDS: &[SlashCommand] = &[
         name: "quit",
         description: "exit polaris",
     },
+];
+
+/// Commands removed from the TUI, each with the one line its name still
+/// answers: what replaces it. `parse` keeps recognizing them, with or without
+/// arguments, so an old habit gets a pointer instead of "unknown command".
+/// None is listed in `COMMANDS`, and typing one starts nothing.
+const REMOVED: &[(&str, &str)] = &[
+    ("pwd", "/pwd was removed. /status shows the project root."),
+    (
+        "sandbox",
+        "/sandbox was removed. /status shows the sandbox and the approval policy.",
+    ),
+    (
+        "instruction",
+        "/instruction was removed. Text typed during a run is queued for the next turn.",
+    ),
+    ("input", "/input was removed. Esc stops the running turn."),
+    (
+        "roles",
+        "/roles was removed. Role definitions live in agents/<name>/SKILL.md.",
+    ),
+    (
+        "compare",
+        "/compare was removed. Run polaris compare <folder> <folder> in a shell.",
+    ),
+    (
+        "run",
+        "/run was removed. /subagents lists children; set --max-turns at launch.",
+    ),
+    (
+        "history",
+        "/history was removed. Scroll the conversation, or save it with /export.",
+    ),
 ];
 
 /// Commands whose name starts with `prefix` (case-insensitive, without the
@@ -210,7 +215,6 @@ pub enum Action {
     WorkspaceControl(String),
     RuntimeControl(String),
     Decided(String),
-    Compare(String),
     /// Apply is intercepted by the terminal handler; recovery never resends
     /// the source effect and requires the exact displayed operation key.
     Sync(String),
@@ -246,6 +250,10 @@ pub enum Action {
     /// old `threshold` argument, so that typing it gets an answer instead of
     /// "unknown command". It is not listed in `COMMANDS` and starts nothing.
     Compact,
+    /// A command removed from the TUI (see `REMOVED`): the carried text is
+    /// the one line its name still answers. Starts nothing and changes
+    /// nothing, whatever arguments followed the name.
+    Removed(&'static str),
     Init,
     /// Same interception story as `Permissions` — the caller shows a
     /// picker over the fixed model catalog and, on selection, both calls
@@ -274,7 +282,6 @@ pub enum Action {
     /// "pick a default path". Local — writes a file, never touches the
     /// model.
     Export(String),
-    Pwd,
     /// Copies the last reply's text to the system clipboard via an OSC 52
     /// escape sequence — no native clipboard crate, works over SSH/tmux the
     /// same way it does locally. Mirrors codex's own `/copy` (and its
@@ -294,10 +301,9 @@ impl Action {
             | Self::Status
             | Self::Doctor
             | Self::Skills
-            | Self::Pwd
             | Self::Diff
-            | Self::Compare(_)
             | Self::Compact
+            | Self::Removed(_)
             | Self::Quit
             | Self::Unknown(_) => true,
             Self::Account(value) | Self::Decided(value) | Self::Mcp(value) => {
@@ -310,26 +316,11 @@ impl Action {
             ),
             Self::SessionControl(value) => matches!(
                 value.as_str(),
-                "session"
-                    | "session current"
-                    | "session history"
-                    | "goal"
-                    | "goal current"
-                    | "history"
+                "session" | "session current" | "session history" | "goal" | "goal current"
             ),
-            Self::RuntimeControl(value) => matches!(
-                value.as_str(),
-                "subagents"
-                    | "subagents list"
-                    | "roles"
-                    | "roles current"
-                    | "roles list"
-                    | "run"
-                    | "run settings"
-                    | "run details"
-                    | "sandbox"
-                    | "sandbox status"
-            ),
+            Self::RuntimeControl(value) => {
+                matches!(value.as_str(), "subagents" | "subagents list")
+            }
             Self::Sync(value) => matches!(value.as_str(), "" | "status"),
             _ => false,
         }
@@ -340,12 +331,10 @@ impl Action {
     pub fn needs_management_clearance(&self) -> bool {
         match self {
             Self::Phase(value) | Self::Workflow(value) => !value.is_empty(),
-            Self::SessionControl(value) => {
-                !matches!(
-                    value.as_str(),
-                    "session" | "session current" | "session history" | "goal" | "goal current"
-                ) && !value.starts_with("history")
-            }
+            Self::SessionControl(value) => !matches!(
+                value.as_str(),
+                "session" | "session current" | "session history" | "goal" | "goal current"
+            ),
             #[cfg(target_os = "linux")]
             Self::WorkspaceControl(_) => false,
             Self::RuntimeControl(_) => false,
@@ -421,6 +410,9 @@ pub fn parse(line: &str) -> Option<Action> {
     let mut parts = trimmed.splitn(2, char::is_whitespace);
     let name = parts.next().unwrap_or("").to_ascii_lowercase();
     let extra = parts.next().unwrap_or("").trim().to_string();
+    if let Some(&(_, notice)) = REMOVED.iter().find(|(removed, _)| *removed == name) {
+        return Some(Action::Removed(notice));
+    }
     Some(match name.as_str() {
         "env" => Action::Environment(extra),
         "" | "help" => Action::Help,
@@ -431,16 +423,13 @@ pub fn parse(line: &str) -> Option<Action> {
             Action::SessionControl(format!("memory {extra}"))
         }
         "memory" => Action::Memory(extra),
-        "session" | "goal" | "history" | "tool-memory" => {
+        "session" | "goal" | "tool-memory" => {
             Action::SessionControl(format!("{name} {extra}").trim_end().to_owned())
         }
-        "input" | "instruction" | "subagents" | "roles" | "run" | "sandbox" => {
-            Action::RuntimeControl(format!("{name} {extra}").trim_end().to_owned())
-        }
+        "subagents" => Action::RuntimeControl(format!("{name} {extra}").trim_end().to_owned()),
         #[cfg(target_os = "linux")]
         "setting" => Action::WorkspaceControl(format!("{name} {extra}").trim_end().to_owned()),
         "decided" => Action::Decided(extra),
-        "compare" => Action::Compare(extra),
         "sync" => Action::Sync(extra),
         #[cfg(target_os = "linux")]
         "apply" => Action::Apply(extra),
@@ -460,7 +449,6 @@ pub fn parse(line: &str) -> Option<Action> {
         "permissions" => Action::Permissions,
         "fork" => Action::Fork,
         "export" => Action::Export(extra),
-        "pwd" => Action::Pwd,
         "copy" => Action::Copy,
         "logout" if extra.is_empty() => Action::Logout,
         "logout" => Action::Account(format!("unlink {extra}")),
@@ -497,17 +485,138 @@ mod tests {
             );
             assert!(action.needs_management_clearance());
         }
-        for command in [
-            "/session current",
-            "/goal",
-            "/history 20",
-            "/input status input-id",
-            "/subagents wait child attempt",
-            "/run details",
-        ] {
+        for command in ["/session current", "/goal", "/subagents wait child attempt"] {
             assert!(!parse(command).unwrap().needs_management_clearance());
         }
         assert!(matches!(parse("/model"), Some(Action::Model)));
+    }
+
+    #[test]
+    fn subagents_is_the_only_runtime_control_and_only_its_reads_need_no_owner() {
+        for command in ["/subagents", "/subagents list"] {
+            let action = parse(command).unwrap();
+            assert!(matches!(action, Action::RuntimeControl(_)), "{command}");
+            assert!(action.allowed_without_mutation_owner(), "{command}");
+        }
+        for command in [
+            "/subagents wait child attempt",
+            "/subagents cancel child attempt",
+        ] {
+            let action = parse(command).unwrap();
+            assert!(matches!(action, Action::RuntimeControl(_)), "{command}");
+            assert!(!action.allowed_without_mutation_owner(), "{command}");
+        }
+    }
+
+    /// The eight commands removed from the TUI. Names, argument forms and the
+    /// phrase that proves each replacement are written out here instead of
+    /// being read back from `REMOVED`, so dropping or rewording an entry fails.
+    const REMOVED_TUI_COMMANDS: [(&str, &str, &str); 8] = [
+        ("pwd", "/pwd now", "/status shows the project root"),
+        ("sandbox", "/sandbox status", "/status shows the sandbox"),
+        (
+            "instruction",
+            "/instruction send do the next thing",
+            "queued for the next turn",
+        ),
+        (
+            "input",
+            "/input cancel input-id",
+            "Esc stops the running turn",
+        ),
+        (
+            "roles",
+            "/roles bind worker subgiant",
+            "agents/<name>/SKILL.md",
+        ),
+        ("compare", "/compare a | b", "polaris compare"),
+        (
+            "run",
+            "/run settings max-turns 5",
+            "set --max-turns at launch",
+        ),
+        ("history", "/history 20", "save it with /export"),
+    ];
+
+    #[test]
+    fn removed_tui_commands_answer_one_line_naming_the_replacement() {
+        for (name, with_arguments, replacement) in REMOVED_TUI_COMMANDS {
+            for line in [
+                format!("/{name}"),
+                format!("/{}", name.to_uppercase()),
+                with_arguments.to_owned(),
+            ] {
+                let action = parse(&line).unwrap_or_else(|| panic!("{line} is not a command"));
+                let Action::Removed(notice) = &action else {
+                    panic!("{line} does not parse as a removed command");
+                };
+                assert!(
+                    notice.starts_with(&format!("/{name} was removed.")),
+                    "{line}: {notice}"
+                );
+                assert!(notice.contains(replacement), "{line}: {notice}");
+                assert!(!notice.contains('\n'), "{line}: one line, got {notice:?}");
+                assert!(!action.needs_management_clearance(), "{line}");
+                assert!(action.allowed_without_mutation_owner(), "{line}");
+            }
+        }
+    }
+
+    /// Columns a notice may take. The status row is one line that does not
+    /// wrap, and a new Terminal.app window is 80 columns wide; two stay spare.
+    /// Written out here, not read from the render code, so a longer notice fails.
+    const NOTICE_COLUMNS: usize = 78;
+
+    #[test]
+    fn removed_tui_commands_fit_the_status_row_of_an_80_column_terminal() {
+        use unicode_width::UnicodeWidthStr;
+
+        // Every entry of the table, so a ninth removed command is held to it too.
+        for &(name, _) in REMOVED {
+            let Some(Action::Removed(notice)) = parse(&format!("/{name}")) else {
+                panic!("/{name} does not parse as a removed command");
+            };
+            assert!(
+                notice.width() <= NOTICE_COLUMNS,
+                "/{name}: {} columns, cut off past {NOTICE_COLUMNS}: {notice}",
+                notice.width()
+            );
+        }
+    }
+
+    #[test]
+    fn removed_tui_commands_are_not_offered_by_the_catalog_or_the_popup() {
+        for (name, _, _) in REMOVED_TUI_COMMANDS {
+            assert!(!COMMANDS.iter().any(|c| c.name == name), "/{name} listed");
+            for end in 1..=name.len() {
+                assert!(
+                    matching(&name[..end]).iter().all(|c| c.name != name),
+                    "/{name} offered for {}",
+                    &name[..end]
+                );
+            }
+            assert!(matching(name).is_empty(), "/{name} offered as typed");
+        }
+    }
+
+    #[test]
+    fn commands_beside_the_removed_ones_are_still_listed_and_parse() {
+        for (line, name) in [
+            ("/status", "status"),
+            ("/status now", "status"),
+            ("/subagents list", "subagents"),
+            ("/session current", "session"),
+            ("/goal", "goal"),
+            ("/export notes.md", "export"),
+            ("/sync status", "sync"),
+        ] {
+            assert!(COMMANDS.iter().any(|c| c.name == name), "/{name} unlisted");
+            assert!(
+                !matches!(parse(line), Some(Action::Removed(_) | Action::Unknown(_))),
+                "{line}"
+            );
+        }
+        assert!(matches!(parse("/status now"), Some(Action::Status)));
     }
 
     #[test]
@@ -605,9 +714,6 @@ mod tests {
             matches!(parse("/memory search a"), Some(Action::Memory(value)) if value == "search a")
         );
         assert!(matches!(parse("/decided list"), Some(Action::Decided(value)) if value == "list"));
-        assert!(
-            matches!(parse("/compare a | b"), Some(Action::Compare(value)) if value == "a | b")
-        );
         assert!(matches!(parse("/phase"), Some(Action::Phase(value)) if value.is_empty()));
         assert!(matches!(parse("/decider"), Some(Action::Decider)));
         assert!(matches!(action_for("decider"), Action::Decider));
@@ -631,7 +737,6 @@ mod tests {
             Some(Action::Export(extra)) => assert!(extra.is_empty()),
             _ => panic!("expected Export"),
         }
-        assert!(matches!(parse("/pwd"), Some(Action::Pwd)));
         assert!(matches!(parse("/copy"), Some(Action::Copy)));
         assert!(matches!(parse("/logout"), Some(Action::Logout)));
         assert!(matches!(parse("/quit"), Some(Action::Quit)));

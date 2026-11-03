@@ -138,13 +138,7 @@ impl Fixture {
 fn only_committed_settings_changes_request_binding_refresh() {
     let mut fixture = Fixture::new();
     let before = fixture.snapshot().state;
-    for request in [
-        "session",
-        "session current",
-        "session history",
-        "goal",
-        "history",
-    ] {
+    for request in ["session", "session current", "session history", "goal"] {
         let result = fixture
             .call_result(request, KeyCode::Esc, true, None)
             .unwrap();
@@ -377,38 +371,8 @@ fn m3c_helper_history_requires_backend_and_initializes_only_empty_conversations(
 }
 
 #[test]
-fn m3c_helper_read_views_bound_history_and_report_range_or_size_errors() {
+fn m3c_helper_read_views_work_while_input_is_queued_and_the_transcript_page_is_gone() {
     let mut fixture = Fixture::new();
-    let saved = fixture.session.persistence.as_ref().unwrap().clone();
-    for n in 0..21 {
-        saved
-            .append(Message::user(format!("message-{n}")), true, None)
-            .unwrap();
-    }
-    let lines = fixture.call("history 0", KeyCode::Esc, true, None).unwrap();
-    assert_eq!(lines.len(), HISTORY_PAGE_MESSAGES + 1);
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.to_string().contains("message-19"))
-    );
-    assert!(
-        !lines
-            .iter()
-            .any(|line| line.to_string().contains("message-20"))
-    );
-    let tail = fixture
-        .call("history 20", KeyCode::Esc, true, None)
-        .unwrap();
-    assert!(
-        tail.iter()
-            .any(|line| line.to_string().contains("message-20"))
-    );
-    assert!(
-        fixture
-            .call("history 22", KeyCode::Esc, true, None)
-            .is_err()
-    );
     assert!(
         fixture
             .call("session current", KeyCode::Esc, true, None)
@@ -423,13 +387,9 @@ fn m3c_helper_read_views_bound_history_and_report_range_or_size_errors() {
             .to_string()
             .contains("No saved goal")
     );
-    saved
-        .append(Message::user("x".repeat(MAX_VIEW_BYTES + 1)), true, None)
-        .unwrap();
-    assert!(
-        fixture
-            .call("history 21", KeyCode::Esc, true, None)
-            .is_err()
-    );
+    // `/history` was removed from the TUI: no transcript page is served.
+    for request in ["history", "history 0", "history 20"] {
+        fixture.refuse(request);
+    }
     assert!(fixture.effects.effects().unwrap().is_empty());
 }
