@@ -934,6 +934,7 @@ UPDATE_FILEMAP=1 cargo test -p polaris-core --test filemap
 
 ## `crates/polaris-core/src/secret_screen`
 
+- `memory.rs` — The privacy screen for the turn-only memory, with rules of its own.
 - `mod.rs` — Remna's privacy filter. Pure logic that runs **before** a captured event
 
 ## `crates/polaris-core/src/session`
@@ -1073,6 +1074,10 @@ UPDATE_FILEMAP=1 cargo test -p polaris-core --test filemap
 
 - `tests.rs` — A local stub stands in for the service. No real endpoint is contacted.
 
+## `crates/polaris-core/src/turn_memory`
+
+- `screen_tests.rs` — Tests of the turn-only memory's screen, the verdicts it leaves and its gate.
+
 ## `crates/polaris-core/src/verification`
 
 - `adapters.rs` — Fixed-shape adapters for registered static checks and Rust test listing.
@@ -1113,6 +1118,7 @@ UPDATE_FILEMAP=1 cargo test -p polaris-core --test filemap
 - `isolated_execution.rs` — Synthetic end-to-end snapshot, confined execution, and source conflict tests.
 - `linux_apply_intent_restart.rs` — Local XFS restart acceptance. Phase fixtures use the public canonical wire
 - `linux_filesystem_acceptance.rs` — Explicit, disposable-root acceptance probe for Linux filesystem primitives.
+- `memory_screen.rs` — Pins how much of this repository's own code the turn-only memory's screen redacts.
 
 ## `crates/polaris-core/tests/support`
 

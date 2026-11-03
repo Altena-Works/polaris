@@ -4,10 +4,12 @@
 //! recall of exact strings fades over a long context (linear attention, for
 //! one). The memory has four layers, filled when a turn ends:
 //!
-//! 1. **Log**: the turn's text (input, tool results, answer) cut into
-//!    chunks, each with its offset in the conversation. About 1 MB is kept
-//!    (`POLARIS_TURN_ONLY_LOG_BYTES`); the oldest chunks go first. The saved
-//!    conversation itself is untouched and stays readable in full.
+//! 1. **Log**: each message of the turn (input, tool results, answer), after
+//!    the screen below, cut into chunks, each with its offset in the screened
+//!    conversation and where it came from (the person, the model, a tool).
+//!    About 1 MB is kept (`POLARIS_TURN_ONLY_LOG_BYTES`); the oldest chunks go
+//!    first. The saved conversation itself is untouched and stays readable in
+//!    full.
 //! 2. **Index**: the chunks, found by BM25 and, with a local embedder, by
 //!    vector; the two rankings are fused.
 //! 3. **Ledger**: one compressed line per turn citing its chunks
@@ -20,7 +22,7 @@
 //!    something checkable, everything it names must be in its cited chunks,
 //!    and the person must have said it or approved the answer that did. No
 //!    model judges this. Support is checked again at every recall: a fact
-//!    whose chunks have left the log is marked unsupported.
+//!    whose chunks have left the log or were withheld is marked unsupported.
 //!
 //! A request carries none of the earlier turns, only one framed quotation:
 //! facts, direction, the ten lines, dictionary entries its input names, and
@@ -31,14 +33,27 @@
 //! The memory belongs to one conversation and goes with it (`/clear`). The
 //! writer and the embedder do not: the host chooses them once and a session
 //! makes every memory it starts through a [`Factory`].
+//!
+//! **Secrets.** Each message is screened once, whole, before it is cut into
+//! chunks (`secret_screen::screen_for_memory`). The verdict (kept, redacted,
+//! dropped) goes on its chunks, and only the screened text is used from then
+//! on; a dropped message keeps its place in the numbering as a line that says
+//! `withheld`. A tool result that read a path reading is denied on becomes the
+//! one line `withheld: denied path`. The writer is called for a turn only if
+//! the person's input and the answer, which are all it is sent, came through
+//! unchanged; a tool result is never sent to it. Every string that leaves the
+//! memory, and every line it quotes, passes the one gate, `clean`; the gate
+//! redacts, and leaves the decision to send to the verdict recorded at intake.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 use polaris_provider::decision::{Decider, Question};
-use polaris_provider::{Message, Role};
+use polaris_provider::{Message, Role, ToolCall};
 
 use crate::conversation_memory::StrictEmbedder;
+use crate::secret_screen::{FilterResult, screen_for_memory};
 
 /// The quotation's allowance: facts, direction, ten lines, and what the input
 /// names or comes near.
@@ -54,6 +69,18 @@ const LOG_BYTES: usize = 1024 * 1024;
 /// A chunk stays well under the embedder's 512 tokenizer tokens.
 const CHUNK_CHARS: usize = 400;
 const CHUNKS_RECALLED: usize = 3;
+/// What the line writer is sent: the head of the input and of the answer,
+/// each within these sentences and characters, and the whole request within
+/// the last.
+const WRITER_SENTENCES: usize = 3;
+const WRITER_FIELD_CHARS: usize = 600;
+const WRITER_REQUEST_CHARS: usize = 1500;
+/// A path in `at=` or in the dictionary runs to this many characters.
+const PATH_CHARS: usize = 200;
+/// What the log keeps of a message the screen dropped, and of a tool result
+/// that read a path reading is denied on. Neither has a body.
+const WITHHELD: &str = "withheld";
+const WITHHELD_PATH: &str = "withheld: denied path";
 
 const LINE_SYSTEM: &str = "Compress one conversation turn into ONE line, in this notation: `topic=..; asked=..; did=..; chose=a > b; !x(reason); open=..; pref=..` (omit empty fields). `!` marks something rejected, `|` alternatives, `>` priority. Keep names, paths, numbers and identifiers exactly; add nothing the turn does not say. Output the line only.";
 const FOLD_SYSTEM: &str = "Merge the older ledger lines into the running direction of the conversation: ONE line in the same notation, keeping decisions, rejections, open questions and stated preferences, dropping detail. Keep names exactly; add nothing. Output the line only.";
@@ -121,6 +148,27 @@ impl Kind {
     }
 }
 
+/// What the memory's screen said about a message when it came in. It stays on
+/// the message's chunks, and the writer is called for a turn only if it said
+/// `Keep` of the input and the answer; the gate does not judge again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    Keep,
+    Redacted,
+    Drop,
+}
+
+/// Where a chunk came from. A tool's output is not the person's word and not
+/// the model's, so a quotation of it says so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    User,
+    Assistant,
+    Tool,
+    /// An old ledger line, which is the memory's own words.
+    Line,
+}
+
 /// A piece of the log, or an old ledger line (`offset: None`).
 struct Chunk {
     id: usize,
@@ -128,6 +176,8 @@ struct Chunk {
     offset: Option<usize>,
     text: String,
     vector: Option<Vec<f32>>,
+    origin: Origin,
+    verdict: Verdict,
 }
 
 /// A checked decision: what was chosen, and the chunks that support it.
@@ -217,49 +267,59 @@ impl TurnMemory {
 
     async fn absorb_turn(&mut self, finished: &[Message], decider: Option<&dyn Decider>) {
         let turn = self.turns + 1;
-        let input = finished.first().map(|m| m.content.as_str()).unwrap_or("");
-        let answer = finished
-            .iter()
-            .rev()
-            .find(|m| m.role == Role::Assistant && m.tool_calls.is_empty() && !m.content.is_empty())
-            .map(|m| m.content.as_str())
-            .unwrap_or("");
+        // Each message is screened once, whole, before it is cut into chunks.
+        // Nothing below sees the original text.
+        let taken = take_in(finished);
+        let answer_at = finished.iter().rposition(|m| {
+            m.role == Role::Assistant && m.tool_calls.is_empty() && !m.content.is_empty()
+        });
+        let input = taken.first().and_then(|t| t.as_ref());
+        let answer = answer_at.and_then(|at| taken[at].as_ref());
+        // Only what the writer is sent counts. A tool result never goes to
+        // it, so what the screen said of one does not matter here.
+        let writer_ok = [input, answer]
+            .into_iter()
+            .flatten()
+            .all(|t| t.verdict == Verdict::Keep);
+        let input = input.map_or("", |t| t.text.as_str());
+        let answer = answer.map_or("", |t| t.text.as_str());
 
         // Layer 1: the whole turn, tool results included, into the log.
-        let text = finished
+        let text = taken
             .iter()
-            .map(|m| m.content.as_str())
-            .filter(|t| !t.is_empty())
+            .flatten()
+            .map(|t| t.text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
         let first = self.next_chunk;
-        for (offset, piece) in pieces(&text) {
-            self.push_chunk(turn, Some(self.log_end + offset), piece.to_owned())
+        let mut at = self.log_end;
+        for part in taken.iter().flatten() {
+            for (offset, piece) in pieces(&part.text) {
+                self.push_chunk(
+                    turn,
+                    Some(at + offset),
+                    piece.to_owned(),
+                    part.origin,
+                    part.verdict,
+                )
                 .await;
+            }
+            at += part.text.len() + 1;
         }
         let cites = first..self.next_chunk;
 
-        // Layer 3: the line, citing its chunks and the files it names.
-        let source = format!("USER: {input}\nASSISTANT: {answer}");
-        let mut line = match write(self.writer.as_deref(), LINE_SYSTEM, &source, LINE_TOKENS).await
-        {
-            Some(line) => line,
-            None => plain_line(input, answer),
+        // Layer 3: the line, citing its chunks and the files it names. The
+        // writer is asked only for a turn the screen left as it was.
+        let request = writer_ok.then(|| request_text(input, answer));
+        let written = match &request {
+            Some(request) => write(self.writer.as_deref(), LINE_SYSTEM, request, LINE_TOKENS).await,
+            None => None,
         };
-        match cites.len() {
-            0 => {}
-            1 => line.push_str(&format!("; src=c{}", cites.start)),
-            _ => line.push_str(&format!("; src=c{}-c{}", cites.start, cites.end - 1)),
-        }
-        let files: Vec<String> = candidates(&text)
-            .into_iter()
-            .filter(|(_, kind)| *kind == Kind::Path)
-            .map(|(term, _)| term)
-            .take(3)
-            .collect();
-        if !files.is_empty() {
-            line.push_str(&format!("; at={}", files.join("|")));
-        }
+        let line = cited(
+            written.unwrap_or_else(|| plain_line(input, answer)),
+            &cites,
+            &text,
+        );
 
         // The turn is taken in from here. A call cut short before this point
         // leaves `turns` as it was, and the next call takes the turn in again
@@ -297,7 +357,9 @@ impl TurnMemory {
         text: &str,
         cites: std::ops::Range<usize>,
     ) {
-        let Some(choice) = field(line, "chose").filter(|choice| self.holds(choice, input, text))
+        let Some(choice) = field(line, "chose")
+            .filter(|choice| self.holds(choice, input, text))
+            .and_then(|choice| clean(&choice))
         else {
             return;
         };
@@ -347,10 +409,19 @@ impl TurnMemory {
         said || approved
     }
 
-    async fn push_chunk(&mut self, turn: usize, offset: Option<usize>, text: String) {
+    /// `text` is what the screen left, so what the embedder is sent is too. A
+    /// withheld line has nothing to find, and is not embedded.
+    async fn push_chunk(
+        &mut self,
+        turn: usize,
+        offset: Option<usize>,
+        text: String,
+        origin: Origin,
+        verdict: Verdict,
+    ) {
         let vector = match &self.embedder {
-            Some(embedder) => embedder.embed_passage(&text).await.ok(),
-            None => None,
+            Some(embedder) if verdict != Verdict::Drop => embedder.embed_passage(&text).await.ok(),
+            _ => None,
         };
         self.log_bytes += text.len();
         self.log.push_back(Chunk {
@@ -359,6 +430,8 @@ impl TurnMemory {
             offset,
             text,
             vector,
+            origin,
+            verdict,
         });
         self.next_chunk += 1;
         while self.log_bytes > self.log_limit && self.log.len() > 1 {
@@ -372,6 +445,7 @@ impl TurnMemory {
     async fn remember(&mut self, turn: usize, line: &str, decider: Option<&dyn Decider>) {
         let candidates: Vec<(String, Kind)> = candidates(line)
             .into_iter()
+            .filter_map(|(term, kind)| nameable(term, kind).map(|term| (term, kind)))
             .filter(|(term, _)| !self.dictionary.contains_key(term))
             .take(MAX_CANDIDATES)
             .collect();
@@ -392,7 +466,8 @@ impl TurnMemory {
         for term in known {
             self.note(&term, turn, line);
         }
-        self.push_chunk(turn, None, line.to_owned()).await;
+        self.push_chunk(turn, None, line.to_owned(), Origin::Line, Verdict::Keep)
+            .await;
     }
 
     /// `line` is a whole ledger line: short enough to keep as the context.
@@ -445,12 +520,27 @@ impl TurnMemory {
             .collect()
     }
 
+    /// Whether any of the chunks `cites` names was withheld.
+    fn withheld(&self, cites: &std::ops::Range<usize>) -> bool {
+        self.log
+            .iter()
+            .any(|chunk| cites.contains(&chunk.id) && chunk.verdict == Verdict::Drop)
+    }
+
     /// The one framed quotation for a turn whose input is `input`, or `None`
     /// when nothing earlier bears on it.
     pub async fn recall(&self, input: &str) -> Option<Message> {
+        // The person's words reach the index and the embedder through the
+        // gate too.
+        let input = clean(input).unwrap_or_default();
+        let input = input.as_str();
         let mut lines = Vec::new();
         let mut used = 0usize;
+        // A line the gate drops is not quoted, and costs nothing.
         let mut push = |line: String, lines: &mut Vec<String>| {
+            let Some(line) = clean(&line) else {
+                return true;
+            };
             let cost = crate::budget::count_tokens(&line);
             if used + cost > RECALL_TOKENS {
                 return false;
@@ -464,18 +554,15 @@ impl TurnMemory {
         facts.sort_by_key(|fact| fact.turn);
         for fact in facts {
             // Support is looked up again, not remembered.
-            let supported = fact.cites.start >= oldest;
+            let unsupported = if fact.cites.start < oldest {
+                "; its source left the log, unsupported"
+            } else if self.withheld(&fact.cites) {
+                "; its source was withheld, unsupported"
+            } else {
+                ""
+            };
             push(
-                format!(
-                    "fact (turn {}{}): {}",
-                    fact.turn,
-                    if supported {
-                        String::new()
-                    } else {
-                        "; its source left the log, unsupported".into()
-                    },
-                    fact.text
-                ),
+                format!("fact (turn {}{unsupported}): {}", fact.turn, fact.text),
                 &mut lines,
             );
         }
@@ -500,8 +587,14 @@ impl TurnMemory {
                 Some(offset) => format!("c{} turn {} @{offset}", chunk.id, chunk.turn),
                 None => format!("line of turn {}", chunk.turn),
             };
+            // What a tool printed is data, whoever asked for it.
+            let mark = if chunk.origin == Origin::Tool {
+                format!(" untrusted tool output (turn {}):", chunk.turn)
+            } else {
+                String::new()
+            };
             push(
-                format!("- [{place}] {}", chunk.text.replace('\n', " ⏎ ")),
+                format!("- [{place}]{mark} {}", chunk.text.replace('\n', " ⏎ ")),
                 &mut lines,
             );
         }
@@ -512,6 +605,205 @@ impl TurnMemory {
             ))
         })
     }
+}
+
+/// A message after the screen: where it came from, what the screen said, and
+/// the text kept in its place.
+struct Taken {
+    origin: Origin,
+    verdict: Verdict,
+    text: String,
+}
+
+/// The screen's verdict on `text`, and what stands for it from here on: the
+/// text itself, the text with its secrets replaced, or nothing but `withheld`.
+fn screened(text: &str) -> (Verdict, String) {
+    match screen_for_memory(text) {
+        FilterResult::Keep(text) => (Verdict::Keep, text),
+        FilterResult::Redacted(text) => (Verdict::Redacted, text),
+        FilterResult::Drop => (Verdict::Drop, WITHHELD.to_owned()),
+    }
+}
+
+/// The one gate for everything that leaves the memory (the writer's request
+/// and what it writes, the decider's excerpt and questions, the embedder's
+/// query) and everything quoted (facts, the direction, ledger lines,
+/// dictionary entries, chunks): `None` for text that is nothing but a secret,
+/// the text with its secrets replaced otherwise. Whether a turn may be sent
+/// to the writer is not decided here but by the verdict recorded when its
+/// messages came in, because text that was screened screens differently the
+/// second time (`KEY=[REDACTED]` is still a key).
+fn clean(text: &str) -> Option<String> {
+    match screened(text) {
+        (Verdict::Drop, _) => None,
+        (_, text) => Some(text),
+    }
+}
+
+/// Each message of a finished turn through the screen, in order (`None` for
+/// one with no text). A tool result that read a path reading is denied on
+/// becomes one line without a body.
+fn take_in(finished: &[Message]) -> Vec<Option<Taken>> {
+    let calls: HashMap<&str, &ToolCall> = finished
+        .iter()
+        .flat_map(|m| &m.tool_calls)
+        .map(|call| (call.id.as_str(), call))
+        .collect();
+    finished
+        .iter()
+        .map(|m| {
+            if m.content.is_empty() {
+                return None;
+            }
+            let origin = match m.role {
+                Role::User => Origin::User,
+                Role::Assistant => Origin::Assistant,
+                Role::Tool => Origin::Tool,
+            };
+            let read_denied = origin == Origin::Tool
+                && (m
+                    .tool_call_id
+                    .as_deref()
+                    .and_then(|id| calls.get(id))
+                    .is_some_and(|call| names_denied_path(call))
+                    || lists_denied_path(&m.content));
+            if read_denied {
+                return Some(Taken {
+                    origin,
+                    verdict: Verdict::Drop,
+                    text: WITHHELD_PATH.to_owned(),
+                });
+            }
+            let (verdict, text) = screened(&m.content);
+            Some(Taken {
+                origin,
+                verdict,
+                text,
+            })
+        })
+        .collect()
+}
+
+/// Whether a call names a path reading is denied on: the `path` of `read`,
+/// `write` and `edit`, or any word of a `bash` command. The words are not a
+/// parse of the shell; a command that reads a file without naming it (a glob,
+/// `find -exec`, `tar`) is not stopped.
+// ponytail: words, not a shell parse; lex the command properly if a bypass turns up.
+fn names_denied_path(call: &ToolCall) -> bool {
+    let argument = |name: &str| call.arguments.get(name).and_then(|value| value.as_str());
+    match call.name.as_str() {
+        "read" | "write" | "edit" => argument("path").is_some_and(denied),
+        "bash" => argument("command").is_some_and(|command| {
+            command
+                .split(|c: char| c.is_whitespace() || "'\"`<>|;&()".contains(c))
+                .any(denied)
+        }),
+        _ => false,
+    }
+}
+
+/// Whether a tool's output has a line that begins with a denied name, as
+/// `grep -r` prints (`path:line`) or a listing does.
+// ponytail: a bare name at a line's start counts, so a `.gitignore` that lists `.env` is
+// withheld too; ask for the `:` after the name if that costs recall.
+fn lists_denied_path(result: &str) -> bool {
+    result.lines().any(|line| {
+        let name = line
+            .trim_start()
+            .split(|c: char| c.is_whitespace() || c == ':')
+            .next()
+            .unwrap_or("");
+        denied(name)
+    })
+}
+
+/// Whether reading is denied on `word`, taken as a path. A bare name counts,
+/// and so does a leading `~` or `$HOME`.
+fn denied(word: &str) -> bool {
+    let word = if word.starts_with(['~', '$']) {
+        expand_home(word, std::env::var("HOME").ok().as_deref())
+    } else {
+        word.to_owned()
+    };
+    !word.is_empty() && polaris_tools::path_policy::is_denied(Path::new(&word))
+}
+
+/// `word` with a leading `~`, `$HOME` or `${HOME}` replaced by `home`, as the
+/// shell would. Anything else, or no home, leaves it as it was.
+fn expand_home(word: &str, home: Option<&str>) -> String {
+    let Some(home) = home else {
+        return word.to_owned();
+    };
+    ["~", "$HOME", "${HOME}"]
+        .iter()
+        .find_map(|prefix| {
+            let rest = word.strip_prefix(prefix)?;
+            (rest.is_empty() || rest.starts_with('/')).then(|| format!("{home}{rest}"))
+        })
+        .unwrap_or_else(|| word.to_owned())
+}
+
+/// A term the memory may name: a path reading is denied on is not one, and a
+/// path runs to `PATH_CHARS` at most. Terms of other kinds pass as they are.
+fn nameable(term: String, kind: Kind) -> Option<String> {
+    if kind != Kind::Path {
+        return Some(term);
+    }
+    (!denied(&term)).then(|| term.chars().take(PATH_CHARS).collect())
+}
+
+/// A turn's line as the ledger keeps it: `line` citing its chunks (`src=`) and
+/// the files `text` names (`at=`, three at most), through the gate. A path
+/// reading is denied on is not named.
+fn cited(mut line: String, cites: &std::ops::Range<usize>, text: &str) -> String {
+    match cites.len() {
+        0 => {}
+        1 => line.push_str(&format!("; src=c{}", cites.start)),
+        _ => line.push_str(&format!("; src=c{}-c{}", cites.start, cites.end - 1)),
+    }
+    let files: Vec<String> = candidates(text)
+        .into_iter()
+        .filter(|(_, kind)| *kind == Kind::Path)
+        .filter_map(|(term, kind)| nameable(term, kind))
+        .take(3)
+        .collect();
+    if !files.is_empty() {
+        line.push_str(&format!("; at={}", files.join("|")));
+    }
+    clean(&line).unwrap_or_else(|| WITHHELD.to_owned())
+}
+
+/// The first `WRITER_SENTENCES` sentences of `text`, and no more than
+/// `WRITER_FIELD_CHARS` characters. A sentence ends at `。！？`, or at `.!?`
+/// before a space or the end.
+// ponytail: "e.g. " ends a sentence here too; a real segmenter if the heads come out short.
+fn head(text: &str) -> String {
+    let mut end = text.len();
+    let (mut seen, mut chars) = (0, text.char_indices().peekable());
+    while let Some((at, c)) = chars.next() {
+        let ends = match c {
+            '。' | '！' | '？' => true,
+            '.' | '!' | '?' => chars.peek().is_none_or(|(_, next)| next.is_whitespace()),
+            _ => false,
+        };
+        if ends {
+            seen += 1;
+            if seen == WRITER_SENTENCES {
+                end = at + c.len_utf8();
+                break;
+            }
+        }
+    }
+    text[..end].chars().take(WRITER_FIELD_CHARS).collect()
+}
+
+/// What the line writer is sent about a turn: the head of the input and of
+/// the answer, and no more than `WRITER_REQUEST_CHARS` characters in all.
+fn request_text(input: &str, answer: &str) -> String {
+    format!("USER: {}\nASSISTANT: {}", head(input), head(answer))
+        .chars()
+        .take(WRITER_REQUEST_CHARS)
+        .collect()
 }
 
 fn is_number(name: &str) -> bool {
@@ -654,23 +946,26 @@ fn bm25(chunks: &VecDeque<Chunk>, query: &str) -> Vec<usize> {
 
 /// One line from the small model, if it answers and the answer passes: a
 /// single line within `limit` tokens whose paths and identifiers all appear
-/// in `source` (it may shorten, never invent).
+/// in `source` (it may shorten, never invent). What is sent and what comes
+/// back both pass the gate.
 async fn write(
     writer: Option<&dyn polaris_provider::Provider>,
     system: &str,
     source: &str,
     limit: usize,
 ) -> Option<String> {
-    let answer = writer?
+    let writer = writer?;
+    let source = clean(source)?;
+    let answer = writer
         .complete(polaris_provider::CompletionRequest {
             system: system.into(),
-            messages: vec![Message::user(source)],
+            messages: vec![Message::user(source.as_str())],
             tools: Vec::new(),
         })
         .await
         .ok()?;
-    let line = answer.text.trim().trim_matches('`').trim().to_owned();
-    checked(&line, source, limit).then_some(line)
+    let line = clean(answer.text.trim().trim_matches('`').trim())?;
+    checked(&line, &source, limit).then_some(line)
 }
 
 fn checked(line: &str, source: &str, limit: usize) -> bool {
@@ -728,21 +1023,27 @@ async fn judge(
     let Some(decider) = decider.filter(|_| !candidates.is_empty()) else {
         return fallback();
     };
+    // The excerpt and every question leave through the gate. A term the gate
+    // would change carries a secret and is not asked about; without an
+    // excerpt nothing is asked.
+    let Some(excerpt) = clean(text) else {
+        return fallback();
+    };
     let questions: BTreeMap<String, Question> = candidates
         .iter()
         .enumerate()
-        .map(|(i, (term, _))| {
-            (
-                format!("t{i}"),
-                Question::Noul {
-                    instructions: format!(
-                        "Is `{term}` a name, identifier or term specific to this conversation's project or task, rather than a general word anyone would use?"
-                    ),
-                },
-            )
+        .filter_map(|(i, (term, _))| {
+            let instructions = format!(
+                "Is `{term}` a name, identifier or term specific to this conversation's project or task, rather than a general word anyone would use?"
+            );
+            (clean(&instructions).as_deref() == Some(instructions.as_str()))
+                .then(|| (format!("t{i}"), Question::Noul { instructions }))
         })
         .collect();
-    let state = serde_json::json!({ "excerpt": text.chars().take(1500).collect::<String>() });
+    if questions.is_empty() {
+        return fallback();
+    }
+    let state = serde_json::json!({ "excerpt": excerpt.chars().take(1500).collect::<String>() });
     match decider.decide(&state, &questions).await {
         Ok(decision) => candidates
             .iter()
@@ -761,7 +1062,8 @@ async fn judge(
 }
 
 /// Candidate terms by rule: paths, identifiers, quoted spans, names. Strings
-/// shaped like secrets are never candidates (they would go to the decider).
+/// shaped like secrets are never candidates (they would go to the decider),
+/// nor is anything the memory's screen catches.
 fn candidates(text: &str) -> Vec<(String, Kind)> {
     static RULES: OnceLock<Vec<(regex::Regex, Kind)>> = OnceLock::new();
     let rules = RULES.get_or_init(|| {
@@ -794,7 +1096,11 @@ fn candidates(text: &str) -> Vec<(String, Kind)> {
                 .or_else(|| found.get(0))
                 .map(|m| m.as_str().trim())
                 .unwrap_or("");
-            if term.chars().count() < 3 || secret.is_match(term) {
+            if term.chars().count() < 3
+                || seen.contains_key(term)
+                || secret.is_match(term)
+                || !matches!(screen_for_memory(term), FilterResult::Keep(_))
+            {
                 continue;
             }
             seen.entry(term.to_owned()).or_insert(*kind);
@@ -866,8 +1172,8 @@ mod tests {
         assert!(memory.dictionary.is_empty());
         let line = &memory.ledger[0].1;
         assert!(
-            line.ends_with("; src=c0; at=app/settings.toml"),
-            "the line cites its chunk and file: {line}"
+            line.ends_with("; src=c0-c1; at=app/settings.toml"),
+            "the line cites its chunks and file: {line}"
         );
 
         let mut memory = TurnMemory::default();
@@ -1173,6 +1479,8 @@ mod tests {
                 offset: Some(*offset),
                 text: (*piece).to_owned(),
                 vector: None,
+                origin: Origin::User,
+                verdict: Verdict::Keep,
             })
             .collect();
         let best = bm25(&log, "retention_days の決定")[0];
@@ -1277,7 +1585,7 @@ mod tests {
                     "{local_only} {boundary:?}"
                 );
                 assert_eq!(
-                    memory.ledger[0].1, "asked=first; answered=answer; src=c0",
+                    memory.ledger[0].1, "asked=first; answered=answer; src=c0-c1",
                     "the line is the turn's own words either way"
                 );
             }
@@ -1353,3 +1661,6 @@ mod tests {
         assert!(memory.ledger[2].1.starts_with("asked=question 3;"));
     }
 }
+
+#[cfg(test)]
+mod screen_tests;

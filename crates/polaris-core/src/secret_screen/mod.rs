@@ -14,6 +14,11 @@ use std::sync::LazyLock;
 
 use regex::{Captures, Regex};
 
+// The turn-only memory's own screen; it shares no rule with `screen_text`.
+mod memory;
+
+pub use memory::screen_for_memory;
+
 /// The result of passing text through screen_text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilterResult {

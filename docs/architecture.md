@@ -98,7 +98,7 @@ crate 14件、依存 47件。名前の`polaris-`は省いた。開発用の依�
 - `crates/polaris-core/src/tier.rs:171`
 - `crates/polaris-core/src/tier.rs:178`
 - `crates/polaris-core/src/tier/chat.rs:59`
-- `crates/polaris-core/src/turn_memory.rs:665`
+- `crates/polaris-core/src/turn_memory.rs:960`
 - `crates/polaris-tui/src/mcp_commands/operations.rs:205`
 - `crates/polaris-tui/src/mcp_commands/operations.rs:212`
 - `crates/polaris-tui/src/mcp_commands/operations.rs:419`
