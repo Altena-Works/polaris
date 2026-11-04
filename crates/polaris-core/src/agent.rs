@@ -1013,9 +1013,12 @@ pub(crate) async fn run_loop(
     let effort_restore = effort_plan
         .as_ref()
         .map(|_| crate::effort_plan::Restore::new(provider));
-    // `turn-only` (experiment): finished turns go into the external memory,
+    // `turn-only` (the default): finished turns go into the external memory,
     // and this turn's requests carry only this turn plus what it recalls.
+    // strict10 and structured10 keep their own history, so the default does
+    // not apply to them.
     let turn_only = if caller == "root"
+        && !session.uses_strict_history()?
         && (crate::turn_memory::enabled()
             || session.turn_memory.is_some()
             || session.turn_memory_factory.is_some())

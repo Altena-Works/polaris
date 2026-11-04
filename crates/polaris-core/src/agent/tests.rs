@@ -5800,6 +5800,7 @@ async fn reasoning_from_a_tool_calling_turn_is_carried_into_the_session() {
 
 #[tokio::test]
 async fn custom_threshold_meters_summaries_even_when_empty_or_archive_fails() {
+    let _off = crate::turn_memory::TurnOnlyOff::hold();
     for (summary, archive_fails) in [("summary", false), (" \n", false), ("summary", true)] {
         let dir = tempfile::tempdir().unwrap();
         let mut session = Session::new();
@@ -5901,6 +5902,7 @@ async fn custom_threshold_meters_summaries_even_when_empty_or_archive_fails() {
 
 #[tokio::test]
 async fn the_compaction_decision_counts_what_the_request_will_actually_carry() {
+    let _off = crate::turn_memory::TurnOnlyOff::hold();
     // `examples` rides on every request but used to sit outside the
     // tally, so a session could cross the threshold on them and still
     // send uncompacted. The error only ever went one way: the decision
@@ -6162,6 +6164,7 @@ async fn an_always_on_floor_past_its_budget_stops_before_sending() {
 
 #[tokio::test]
 async fn a_turn_that_crosses_the_compaction_threshold_compacts_before_sending() {
+    let _off = crate::turn_memory::TurnOnlyOff::hold();
     let dir = tempfile::tempdir().expect("temp directory");
 
     // Two big prior turns (well past COMPACTION_THRESHOLD once summed),
@@ -6250,6 +6253,7 @@ async fn a_turn_that_crosses_the_compaction_threshold_compacts_before_sending() 
 
 #[tokio::test]
 async fn a_failed_compaction_call_does_not_block_the_turn() {
+    let _off = crate::turn_memory::TurnOnlyOff::hold();
     // Same over-threshold setup as the test above, except the
     // provider's summarization call itself fails. Before this fix, `?`
     // propagated that `ProviderError` straight out of `run_loop`,
@@ -6508,6 +6512,7 @@ async fn requests_at(
 
 #[tokio::test]
 async fn a_known_window_puts_the_threshold_at_seventy_percent_however_the_provider_is_wrapped() {
+    let _off = crate::turn_memory::TurnOnlyOff::hold();
     for handed in [Handed::Bare, Handed::InArc, Handed::InRoleProvider] {
         let below = requests_at(handed, Some("window-400k"), 279_999, |_| {}).await;
         assert_eq!(summaries(&below), 0);
@@ -6523,6 +6528,7 @@ async fn a_known_window_puts_the_threshold_at_seventy_percent_however_the_provid
 
 #[tokio::test]
 async fn an_unknown_window_keeps_the_default_threshold() {
+    let _off = crate::turn_memory::TurnOnlyOff::hold();
     for model in [None, Some("unlisted-model")] {
         let below = requests_at(Handed::Bare, model, 199_999, |_| {}).await;
         assert_eq!(summaries(&below), 0);
@@ -6533,6 +6539,7 @@ async fn an_unknown_window_keeps_the_default_threshold() {
 
 #[tokio::test]
 async fn a_local_models_window_comes_from_the_setting() {
+    let _off = crate::turn_memory::TurnOnlyOff::hold();
     let local = Some("local-model");
     let setting = |session: &mut Session| session.context_window = Some(8192);
     // 70% of 8192 is 5,734.4, which rounds down.
@@ -6550,6 +6557,7 @@ async fn a_local_models_window_comes_from_the_setting() {
 
 #[tokio::test]
 async fn a_threshold_set_on_the_session_wins_over_the_window() {
+    let _off = crate::turn_memory::TurnOnlyOff::hold();
     let sent = requests_at(Handed::Bare, Some("window-400k"), 5_000, |session| {
         session.compaction_threshold = Some(5_000)
     })
@@ -6559,6 +6567,7 @@ async fn a_threshold_set_on_the_session_wins_over_the_window() {
 
 #[tokio::test]
 async fn turn_only_does_not_compact_where_legacy_does() {
+    let _off = crate::turn_memory::TurnOnlyOff::hold();
     let model = Some("window-400k");
     let legacy = requests_at(Handed::Bare, model, 280_000, |_| {}).await;
     assert_eq!(
@@ -6642,6 +6651,7 @@ async fn requests_over_long_turns(
 
 #[tokio::test]
 async fn strict10_and_structured10_do_not_compact_where_legacy_does() {
+    let _off = crate::turn_memory::TurnOnlyOff::hold();
     use crate::conversation_state::HistoryMode;
     let legacy = requests_over_long_turns(None).await;
     assert_ne!(
@@ -6692,6 +6702,7 @@ async fn two_questions(reported: Option<u32>, sealed: usize, old: usize) -> Vec<
 
 #[tokio::test]
 async fn a_report_under_the_threshold_keeps_an_estimate_over_ciphertext_from_compacting() {
+    let _off = crate::turn_memory::TurnOnlyOff::hold();
     // A measured run: the provider counted 34,696 input tokens, o200k over
     // the encrypted reasoning read the request as 205,761, and the threshold
     // was 200,000.
@@ -6712,6 +6723,7 @@ async fn a_report_under_the_threshold_keeps_an_estimate_over_ciphertext_from_com
 
 #[tokio::test]
 async fn a_report_and_what_was_added_since_decide_at_the_threshold() {
+    let _off = crate::turn_memory::TurnOnlyOff::hold();
     use polaris_provider::Message;
     let threshold = crate::compaction::COMPACTION_THRESHOLD;
     // What the second question adds that the report did not cover: the first
@@ -6728,6 +6740,7 @@ async fn a_report_and_what_was_added_since_decide_at_the_threshold() {
 
 #[tokio::test]
 async fn without_a_report_the_estimate_leaves_the_ciphertext_out() {
+    let _off = crate::turn_memory::TurnOnlyOff::hold();
     // A conversation read back from storage, so its first request has no
     // report. One answer carries ciphertext that o200k reads as 250,000
     // tokens; its readable text is only a few thousand.
@@ -6749,6 +6762,7 @@ async fn without_a_report_the_estimate_leaves_the_ciphertext_out() {
 
 #[tokio::test]
 async fn the_loop_keeps_the_count_of_the_last_request_only() {
+    let _off = crate::turn_memory::TurnOnlyOff::hold();
     use crate::compaction::ReportedInput;
     let named = Named::replying(None, Some(100_000), 0);
     let mut session = resumed(2_000, 0);
@@ -6796,6 +6810,7 @@ async fn the_loop_keeps_the_count_of_the_last_request_only() {
 
 #[tokio::test]
 async fn a_report_does_not_outlive_the_history_it_counted() {
+    let _off = crate::turn_memory::TurnOnlyOff::hold();
     use crate::compaction::ReportedInput;
     let named = Named::replying(None, Some(250_000), 0);
     let mut session = Session::new();

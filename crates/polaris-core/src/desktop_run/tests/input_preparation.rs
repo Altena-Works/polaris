@@ -124,6 +124,7 @@ fn request(id: &str, body: RequestBody) -> Request {
 
 #[test]
 fn reopened_desktop_history_keeps_eligible_old_input_raw_on_the_next_request() {
+    let _off = crate::turn_memory::TurnOnlyOff::hold();
     let (_temp, mut input, mut executions, _) = fixture(Behavior::Complete);
     let original = repeated_input();
     assert!(

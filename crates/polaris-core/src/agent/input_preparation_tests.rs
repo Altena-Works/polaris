@@ -172,6 +172,7 @@ fn assert_saved_input(saved: &PersistedSession, original: &str) {
 
 #[tokio::test]
 async fn fresh_root_projects_the_sent_copy_and_uses_it_for_the_compaction_decision() {
+    let _off = crate::turn_memory::TurnOnlyOff::hold();
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("audit.jsonl");
     let (mut session, saved) = persisted_session(dir.path());
@@ -259,6 +260,7 @@ async fn a_tool_continuation_reuses_one_projection_and_keeps_durable_raw() {
 
 #[tokio::test]
 async fn reentering_or_resuming_an_old_source_does_not_prepare_it_again() {
+    let _off = crate::turn_memory::TurnOnlyOff::hold();
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("audit.jsonl");
     let (mut session, saved) = persisted_session(dir.path());
@@ -333,6 +335,7 @@ async fn a_child_cannot_project_even_a_fresh_persisted_eligible_input() {
 
 #[tokio::test]
 async fn successful_compaction_invalidates_the_slot_and_sends_original_current_input() {
+    let _off = crate::turn_memory::TurnOnlyOff::hold();
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("audit.jsonl");
     let (mut session, saved) = persisted_session(dir.path());

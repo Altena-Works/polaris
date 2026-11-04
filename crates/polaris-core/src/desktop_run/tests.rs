@@ -397,6 +397,7 @@ fn workflow_uses_trusted_skill_snapshot_without_reopening_host_paths() {
 
 #[test]
 fn tool_retention_shortens_requests_but_completion_returns_original_raw_history() {
+    let _off = crate::turn_memory::TurnOnlyOff::hold();
     struct Memory;
     impl crate::tool_memory::ToolMemoryBackend for Memory {
         fn save<'a>(

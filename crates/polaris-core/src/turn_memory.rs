@@ -1,8 +1,8 @@
 //! `turn-only`: each user turn sees only itself and an external memory.
 //!
-//! An experiment, off unless `POLARIS_TURN_ONLY` is set, for a model whose
-//! recall of exact strings fades over a long context (linear attention, for
-//! one). The memory has four layers, filled when a turn ends:
+//! The default memory, for a model whose recall of exact strings fades over a
+//! long context (linear attention, for one). On unless `POLARIS_TURN_ONLY` is
+//! `off` or empty. The memory has four layers, filled when a turn ends:
 //!
 //! 1. **Log**: each message of the turn (input, tool results, answer), after
 //!    the screen below, cut into chunks, each with its offset in the screened
@@ -141,8 +141,50 @@ pub fn factory(
     })
 }
 
+/// On by default; `POLARIS_TURN_ONLY=off` or an empty value turns it off.
 pub fn enabled() -> bool {
-    std::env::var_os("POLARIS_TURN_ONLY").is_some_and(|value| !value.is_empty() && value != "off")
+    enabled_by(std::env::var_os("POLARIS_TURN_ONLY").as_deref())
+}
+
+fn enabled_by(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_none_or(|value| !value.is_empty() && value != "off")
+}
+
+/// For a test of the history that turn-only replaces: holds
+/// `POLARIS_TURN_ONLY=off` until dropped. The environment is process-wide, so
+/// holders run one at a time.
+#[cfg(test)]
+pub(crate) struct TurnOnlyOff {
+    previous: Option<std::ffi::OsString>,
+    _held: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl TurnOnlyOff {
+    pub(crate) fn hold() -> Self {
+        static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let held = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("POLARIS_TURN_ONLY");
+        // SAFETY: the lock keeps this the only thread changing it.
+        unsafe { std::env::set_var("POLARIS_TURN_ONLY", "off") };
+        Self {
+            previous,
+            _held: held,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TurnOnlyOff {
+    fn drop(&mut self) {
+        // SAFETY: still under the lock, which is released after this.
+        unsafe {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("POLARIS_TURN_ONLY", value),
+                None => std::env::remove_var("POLARIS_TURN_ONLY"),
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1274,6 +1316,25 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn unset_means_on() {
+        assert!(enabled_by(None));
+        assert!(enabled_by(Some(OsStr::new("on"))));
+    }
+
+    #[test]
+    fn off_or_empty_turns_it_off() {
+        assert!(!enabled_by(Some(OsStr::new("off"))));
+        assert!(!enabled_by(Some(OsStr::new(""))));
+    }
+
+    #[test]
+    fn the_environment_switch_turns_it_off() {
+        let _off = TurnOnlyOff::hold();
+        assert!(!enabled());
+    }
 
     #[test]
     fn rules_find_paths_identifiers_quotes_and_names_but_not_secrets() {

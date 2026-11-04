@@ -21,7 +21,7 @@
   <a href="README.md" lang="ja">日本語</a> · <strong>English</strong>
 </p>
 
-polaris is a Rust coding agent that selects the context needed for the current task. Its main interfaces are a CLI and TUI, with a separate macOS workspace app. It stores workflow state and assembles instructions and skills for the active phase.
+polaris is a Rust coding agent that selects the context needed for the current task. Its main interfaces are a CLI and TUI, with a separate macOS workspace app. It stores workflow state and assembles instructions and skills for the active phase. By default it sends each turn only that turn plus recalled memory.
 
 v0.3.0-rc targets the macOS arm64 TUI. GUI and other-platform sources remain in the repository. See the [system overview](docs/system-overview.md), [release scope](docs/releases/v0.3.0.md), and [command reference](docs/command-reference.md) (Japanese). No RC tag, release, or package has been published.
 
@@ -59,19 +59,26 @@ The API-key `openai` provider currently uses Chat Completions and does not suppo
 
 The macOS CLI preview package contains no optional resources. The GUI installer has a manifest-verified download path for llama.cpp, the embedding runtime, and multilingual-e5-small/base under `~/.polaris`; Rust is optional. Qwen3.5-4B is a candidate for the SemIf classifier, but its pinned distribution artifacts and acceptance checks are incomplete, so it is not automatically downloaded. Signed distribution assets and real-device acceptance are still missing. See the [macOS guide](apps/macos/README.md) for the verified scope.
 
-## v0.2.0 comparison with stock Codex
+## Terminal-Bench v4.0 comparison with stock Codex
 
-These are historical v0.2.0 measurements, not results for v0.3.0-rc. The current-version comparison has not been run.
+On 2026-11-04 we ran 7 Terminal-Bench v4.0 tasks once each at `gpt-6.1-sol` with `xhigh` effort, comparing polaris (turn-only) with Codex 0.160.0.
 
-Both tools requested `gpt-6-astra` with `medium` effort; polaris had workflow enabled. These partial results cover 15 matched PRE02–08 trials with two turns each against Codex CLI 0.154.0. The additional PRE01 measurement was skipped.
+| | polaris (turn-only) | Codex 0.160.0 |
+| --- | ---: | ---: |
+| Tests passed | 99.2 to 99.3% | 92.9 to 93.0% |
+| Tasks fully passed | 5 to 6 of 7 | 3 to 4 of 7 |
+| Cost per task (API list rate, not a plan charge) | $0.377 | $0.362 |
+| Input tokens per task | 705,922 | 794,133 |
+| Requests per task | 24.1 | 20.6 |
 
-| Metric | polaris | Stock Codex CLI 0.154.0 | Reduction |
-| --- | ---: | ---: | ---: |
-| Total tokens | **95,139** | 467,901 | **79.7%** |
-| Hypothetical API cost | **$2.37915** | $3.600914 | **33.9%** |
-| Quality checks | 15/15 passed | 15/15 passed | — |
+Limits to read it by:
 
-Total tokens include input and output; cached input is already part of input. Cost uses API prices frozen in the measurement specification, not actual Codex billing. polaris took 23.5% longer across these 15 trials. These short synthetic tasks were run sequentially and do not establish reductions for general coding work or long conversations. See the [method, quality checks, timing, and limitations](docs/preimplementation-evaluation.md#v0120とcodex-01540の途中結果).
+- Each task ran once, so differences of this size may be run-to-run variation.
+- polaris cost 4% more.
+- The ranges come from one test that depends on timing and flips between gradings.
+- A benchmark task is a single user turn, where turn-only drops nothing, so the pass-rate gap cannot be credited to turn-only. Its benefit in long conversations is a separate measurement: over 18 turns, input fell from 841,289 to 96,215, against an older polaris, not Codex.
+
+For the v0.2.0 result, see the [method and results](docs/preimplementation-evaluation.md#v0120とcodex-01540の途中結果) (Japanese).
 
 ## Documentation
 
@@ -104,7 +111,7 @@ This section lists the elements polaris takes from research papers, grouped by s
 
 **Implemented**
 
-- **Fact admission check:** Turn-only memory (an [experimental setting](docs/usage.md#ビルドと一発実行), Japanese) keeps a ledger that compresses each turn into one line. Of the decisions written in ledger lines, only those whose checkable terms all appear in that turn's source text, and that the user stated or approved, are carried with every request as facts. No model makes this judgment. Each recall checks that the supporting source text is still in the log and marks the fact unsupported if it is gone. Source: [Assay](https://arjmandi.github.io/assay/) (Arjmandi, 2026).
+- **Fact admission check:** Turn-only memory (the [default](docs/usage.md#ビルドと一発実行), Japanese) keeps a ledger that compresses each turn into one line. Of the decisions written in ledger lines, only those whose checkable terms all appear in that turn's source text, and that the user stated or approved, are carried with every request as facts. No model makes this judgment. Each recall checks that the supporting source text is still in the log and marks the fact unsupported if it is gone. Source: [Assay](https://arjmandi.github.io/assay/) (Arjmandi, 2026).
 - **Lexical search:** Skill search, MCP tool preselection, and the turn-only index pick the entries closest to the input by term matching. Source: BM25 (Robertson et al., Okapi at TREC-3, 1994).
 - **Rank fusion:** Merge the lexical and embedding rankings into one by summing 1/(60 + rank). Used by memory search and the turn-only index. Source: [RRF](https://doi.org/10.1145/1571941.1572114) (Cormack et al., 2009).
 
