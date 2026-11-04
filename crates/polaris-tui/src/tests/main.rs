@@ -6377,7 +6377,7 @@ async fn handle_model_switches_the_hosted_provider_without_an_effort_step() {
     let mut effort_name = render::DEFAULT_EFFORT.to_string();
     let mut status = Status::Idle;
 
-    handle_model(
+    let chosen = handle_model(
         &terminal,
         &mut reader,
         &mut provider,
@@ -6393,6 +6393,10 @@ async fn handle_model_switches_the_hosted_provider_without_an_effort_step() {
     )
     .await;
 
+    assert!(
+        chosen,
+        "a completed choice is reported so an open chat follows it"
+    );
     assert_eq!(model_name, "gpt-6.1-sol");
     assert_eq!(provider_name, "codex");
     assert_eq!(effort_name, render::DEFAULT_EFFORT);
@@ -6426,7 +6430,7 @@ async fn handle_model_cancelled_with_esc_leaves_everything_untouched() {
     let mut effort_name = render::DEFAULT_EFFORT.to_string();
     let mut status = Status::Idle;
 
-    handle_model(
+    let chosen = handle_model(
         &terminal,
         &mut reader,
         &mut provider,
@@ -6442,11 +6446,62 @@ async fn handle_model_cancelled_with_esc_leaves_everything_untouched() {
     )
     .await;
 
+    assert!(!chosen, "Esc chooses nothing");
     assert_eq!(model_name, "gpt-6-astra");
     assert_eq!(effort_name, render::DEFAULT_EFFORT);
     assert_eq!(*cloud.model.lock().expect("lock"), None);
     assert_eq!(*cloud.effort.lock().expect("lock"), None);
     assert!(matches!(status, Status::Idle));
+}
+
+#[test]
+fn an_unserved_chat_sends_nothing_gets_its_text_back_and_shows_what_it_needs() {
+    let needs = "This chat needs ollama (qwen3:8b), but its server is not reachable.";
+    let mut buffer = String::new();
+    let mut cursor = 0;
+    let mut queue = VecDeque::new();
+    let mut paused = false;
+    let mut status = Status::Idle;
+
+    refuse_unserved_submission(
+        needs,
+        "fix the parser".into(),
+        6,
+        false,
+        &mut buffer,
+        &mut cursor,
+        &mut queue,
+        &mut paused,
+        &mut status,
+    );
+    assert_eq!(buffer, "fix the parser");
+    assert_eq!(cursor, 6);
+    assert!(queue.is_empty() && !paused);
+    assert!(matches!(&status, Status::Error(line) if line == needs));
+
+    // A queued submission goes back to the front of the queue, which stops, and
+    // the draft typed since stays where it is.
+    let mut buffer = "half a thought".to_string();
+    let mut cursor = 4;
+    queue.push_back("later request".into());
+    refuse_unserved_submission(
+        needs,
+        "queued request".into(),
+        0,
+        true,
+        &mut buffer,
+        &mut cursor,
+        &mut queue,
+        &mut paused,
+        &mut status,
+    );
+    assert_eq!(buffer, "half a thought");
+    assert_eq!(cursor, 4);
+    assert_eq!(
+        queue,
+        VecDeque::from(["queued request".into(), "later request".into()])
+    );
+    assert!(paused);
 }
 
 #[test]

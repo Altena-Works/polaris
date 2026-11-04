@@ -270,6 +270,100 @@ fn saved_settings_written_with_a_compact_threshold_still_load_and_set_no_thresho
     assert_eq!(session.compaction_threshold, None);
 }
 
+/// The process a conversation is opened in: it started on `codex`, and
+/// `endpoint` stands in for where the local servers would be.
+async fn reopen(
+    fixture: &Fixture,
+    process: &mut crate::session_activation::fixtures::Process,
+    endpoint: &str,
+) -> (Option<String>, SavedSessionSettingsV1) {
+    use crate::{
+        model_menu::LocalEndpoints,
+        session_activation::{apply_saved_binding, read_saved_activation},
+    };
+    let started = SavedSessionSettingsV1::new(
+        process.provider_name.clone(),
+        process.model_name.clone(),
+        "auto".into(),
+    )
+    .unwrap();
+    let activation = read_saved_activation(&fixture.session, &started, &process.model_name, true)
+        .unwrap()
+        .expect("a saved conversation");
+    let endpoints = LocalEndpoints {
+        ollama: endpoint,
+        lm_studio: endpoint,
+    };
+    let mut effective = started;
+    let needs = apply_saved_binding(
+        &activation,
+        true,
+        &mut effective,
+        &mut process.binding(&endpoints),
+    )
+    .await;
+    (needs, effective)
+}
+
+#[tokio::test]
+async fn resuming_a_conversation_saved_with_a_local_model_selects_it_before_the_first_turn() {
+    use crate::session_activation::fixtures::{Process, closed_endpoint, fake_ollama};
+    let mut fixture = Fixture::new();
+    // Its first saved setting records the binding the conversation was held with.
+    fixture.initial =
+        SavedSessionSettingsV1::new("ollama".into(), "qwen3:8b".into(), String::new()).unwrap();
+    fixture
+        .call("memory configure off", KeyCode::Char('y'), false, None)
+        .unwrap();
+    let recorded = fixture.snapshot().state.session_settings.unwrap();
+    assert_eq!(
+        (recorded.provider.as_str(), recorded.model.as_str()),
+        ("ollama", "qwen3:8b")
+    );
+
+    // A process that started on the hosted provider and can reach the server.
+    let endpoint = fake_ollama(&["qwen3:8b"], true).await;
+    let mut process = Process::started_on("codex", "gpt-6.1-sol");
+    let (needs, effective) = reopen(&fixture, &mut process, &endpoint).await;
+    assert_eq!(needs, None);
+    assert_eq!(process.provider_name, "ollama");
+    assert_eq!(process.model_name, "qwen3:8b");
+    assert_eq!(process.provider.model().as_deref(), Some("qwen3:8b"));
+    assert_eq!(effective, recorded);
+
+    // One that cannot reach it keeps its binding and is told what is needed.
+    let closed = closed_endpoint().await;
+    let mut process = Process::started_on("codex", "gpt-6.1-sol");
+    let (needs, _) = reopen(&fixture, &mut process, &closed).await;
+    let line = needs.expect("the conversation cannot be served here");
+    assert!(
+        line.contains("ollama") && line.contains("qwen3:8b"),
+        "{line}"
+    );
+    assert_eq!(process.provider_name, "codex");
+    assert!(Arc::ptr_eq(&process.provider, &process.startup));
+}
+
+#[tokio::test]
+async fn a_conversation_saved_with_the_hosted_model_opens_on_it_in_a_hosted_process() {
+    use crate::session_activation::fixtures::{Process, closed_endpoint};
+    let mut fixture = Fixture::new();
+    fixture
+        .call(
+            "session configure codex gpt-6-astra auto",
+            KeyCode::Char('y'),
+            false,
+            None,
+        )
+        .unwrap();
+    let mut process = Process::started_on("codex", "gpt-6.1-sol");
+    let (needs, _) = reopen(&fixture, &mut process, &closed_endpoint().await).await;
+    assert_eq!(needs, None);
+    assert_eq!(process.provider_name, "codex");
+    assert_eq!(process.model_name, "gpt-6-astra");
+    assert_eq!(process.provider.model().as_deref(), Some("gpt-6-astra"));
+}
+
 #[test]
 fn m3c_helper_cancel_records_denial_and_persistence_error_refuses_changes() {
     let mut fixture = Fixture::new();

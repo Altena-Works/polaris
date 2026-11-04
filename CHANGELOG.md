@@ -31,6 +31,8 @@ macOS arm64のTUIを配布対象として準備する。GUIと他OSのソース�
 - TUIの`/sync`と`/sync status`の先頭に、表示がこの端末の記録であり、remoteを観測していないことを示す行を足す。
 - macOSのTUIの一覧と`/help`から、macOSでは動かない`/setting`を外す。`/sync`の説明から、TUIでは参加を確定できない`join`を外す。
 - TUIの`/pwd`・`/sandbox`・`/instruction`・`/input`・`/roles`・`/compare`・`/run`・`/history`を廃止する。入力しても何も実行せず、廃止した旨と代わりの操作を1行で答える。代わりは、`/pwd`と`/sandbox`が`/status`（`Project root`行を追加）、`/instruction`が実行中に入力した文章の待ち行列、`/input`がEsc、`/roles`が`agents/<型名>/SKILL.md`、`/compare`が`polaris compare`、`/run`が`/subagents`と起動時の`--max-turns`、`/history`が画面のスクロールと`/export`である。CLIの`polaris compare`・`polaris sandbox`・`--max-turns`は保持する。
+- TUIで別の会話を開くと（`--resume`での起動、`/resume`）、その会話に保存したproviderとモデルを最初から選ぶ。保存したローカルモデル（Ollama・LM Studio）は`/model`の`Local model`と同じ経路、ホスト型は起動したproviderが同じときに選ぶ。提供できないときは、会話を開いて履歴を表示するだけで何も送らず、入力を入力欄へ戻して、必要なproviderとモデルと入手方法を1行で示す。`/model`で選べば送れる。`/fork`と巻き戻しは今の会話の子を作る操作なので選び直さず、今使っているproviderを引き継ぐ（提供できない会話の子は、提供できないまま続く）。以前は保存providerが起動providerと違うとTUIが終了した。保存形式は変えない。
+- TUIで、保存したroleの束縛が解決できなくなっても終了しない。そのターンは委任を止めて実行し（どのroleも許可しない）、役割名と理由を履歴に会話ごとに1回示す。解決できる束縛はこれまでどおり効く。
 
 ### 修正
 

@@ -35,34 +35,119 @@ impl ConnectedLocalModel {
     }
 }
 
-async fn discover_local_runtime(runtime: Runtime, endpoint: &str) -> Vec<ConnectedLocalModel> {
-    let Ok(endpoint) = Endpoint::parse(endpoint) else {
-        return Vec::new();
-    };
-    let Ok(adapter) = LocalAdapter::new(runtime, endpoint) else {
-        return Vec::new();
-    };
-    let adapter = Arc::new(adapter);
-    let Ok(models) = adapter.inventory().await else {
-        return Vec::new();
-    };
-    models
-        .into_iter()
-        .filter(|model| model.capabilities().completion != Capability::Unsupported)
-        .map(|observed| ConnectedLocalModel {
-            runtime,
-            adapter: adapter.clone(),
-            observed,
-        })
-        .collect()
+const OLLAMA_ENDPOINT: &str = "http://127.0.0.1:11434/";
+const LM_STUDIO_ENDPOINT: &str = "http://127.0.0.1:1234/";
+
+/// Where each local runtime is looked for. Held apart so a test can point the
+/// same code at a server of its own.
+#[cfg(unix)]
+pub(super) struct LocalEndpoints<'a> {
+    pub(super) ollama: &'a str,
+    pub(super) lm_studio: &'a str,
+}
+
+#[cfg(unix)]
+pub(super) const LOOPBACK_ENDPOINTS: LocalEndpoints<'static> = LocalEndpoints {
+    ollama: OLLAMA_ENDPOINT,
+    lm_studio: LM_STUDIO_ENDPOINT,
+};
+
+#[cfg(unix)]
+impl<'a> LocalEndpoints<'a> {
+    /// The runtime a saved provider name stands for, and where it is looked for.
+    /// Only what the `/model` picker lists: llama.cpp is started by the process.
+    pub(super) fn runtime_for(&self, provider: &str) -> Option<(Runtime, &'a str)> {
+        match provider {
+            "ollama" => Some((Runtime::Ollama, self.ollama)),
+            "lmstudio" => Some((Runtime::LmStudio, self.lm_studio)),
+            _ => None,
+        }
+    }
+}
+
+/// `None` when the server cannot be reached or does not answer in the expected shape.
+async fn discover_local_runtime(
+    runtime: Runtime,
+    endpoint: &str,
+) -> Option<Vec<ConnectedLocalModel>> {
+    let endpoint = Endpoint::parse(endpoint).ok()?;
+    let adapter = Arc::new(LocalAdapter::new(runtime, endpoint).ok()?);
+    let models = adapter.inventory().await.ok()?;
+    Some(
+        models
+            .into_iter()
+            .filter(|model| model.capabilities().completion != Capability::Unsupported)
+            .map(|observed| ConnectedLocalModel {
+                runtime,
+                adapter: adapter.clone(),
+                observed,
+            })
+            .collect(),
+    )
 }
 
 async fn discover_connected_local_models() -> Vec<ConnectedLocalModel> {
     let (ollama, lmstudio) = tokio::join!(
-        discover_local_runtime(Runtime::Ollama, "http://127.0.0.1:11434/"),
-        discover_local_runtime(Runtime::LmStudio, "http://127.0.0.1:1234/"),
+        discover_local_runtime(Runtime::Ollama, OLLAMA_ENDPOINT),
+        discover_local_runtime(Runtime::LmStudio, LM_STUDIO_ENDPOINT),
     );
-    ollama.into_iter().chain(lmstudio).collect()
+    ollama
+        .unwrap_or_default()
+        .into_iter()
+        .chain(lmstudio.unwrap_or_default())
+        .collect()
+}
+
+/// The `Local model` row from the chosen model onward: select it, require the
+/// tool support polaris needs, and bind it through the shared router.
+async fn bind_local_model(
+    picked: &ConnectedLocalModel,
+    usage_meter: &polaris_provider::UsageMeter,
+    local_router: &polaris_core::local_execution::LocalRouter,
+) -> Result<Arc<dyn Provider>, String> {
+    let selection = picked
+        .adapter
+        .select(&picked.observed)
+        .await
+        .map_err(|error| format!("local model is unavailable: {error}"))?;
+    if selection.model().capabilities().tools != Capability::Supported {
+        return Err("local model does not report the tool support required by polaris".to_string());
+    }
+    let binding = local_router
+        .bind(selection)
+        .map_err(|error| format!("local model cannot be used: {error}"))?;
+    Ok(Arc::new(usage_meter.wrap(binding)))
+}
+
+/// Why a conversation's saved local model could not be bound.
+#[cfg(unix)]
+pub(super) enum LocalMiss {
+    NotReachable,
+    NotListed,
+    Unusable(String),
+}
+
+/// The `Local model` row for a model named in advance, as a conversation that
+/// was held with one needs it: the same discovery, selection, tool check and
+/// bind, without the picker.
+#[cfg(unix)]
+pub(super) async fn bind_saved_local_model(
+    runtime: Runtime,
+    endpoint: &str,
+    model: &str,
+    usage_meter: &polaris_provider::UsageMeter,
+    local_router: &polaris_core::local_execution::LocalRouter,
+) -> Result<Arc<dyn Provider>, LocalMiss> {
+    let models = discover_local_runtime(runtime, endpoint)
+        .await
+        .ok_or(LocalMiss::NotReachable)?;
+    let picked = models
+        .iter()
+        .find(|held| held.observed.id() == model)
+        .ok_or(LocalMiss::NotListed)?;
+    bind_local_model(picked, usage_meter, local_router)
+        .await
+        .map_err(LocalMiss::Unusable)
 }
 
 /// Runs the `/model` picker — three hosted choices plus one local-runtime
@@ -145,6 +230,8 @@ fn run_local_model_picker<B: ratatui::backend::Backend, R: approver::KeyReader>(
 /// Handles `/model`. Hosted choices reuse the authenticated provider. The
 /// local row discovers only the same two loopback runtimes as the desktop,
 /// then installs an immutable local binding for the chosen observed model.
+/// Returns whether the person chose a model: an open conversation then runs on
+/// that choice, whatever it was saved with.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_model<B: ratatui::backend::Backend, R: approver::KeyReader>(
     terminal: &RefCell<ratatui::Terminal<B>>,
@@ -159,19 +246,19 @@ pub(super) async fn handle_model<B: ratatui::backend::Backend, R: approver::KeyR
     cloud_effort_name: &str,
     effort_name: &mut String,
     status: &mut Status,
-) {
+) -> bool {
     loop {
         #[cfg(target_os = "linux")]
         if signal::pending_linux_process_shutdown().is_some() {
-            return;
+            return false;
         }
         let current_is_local = is_local_provider(provider_name);
         let Some(choice) = run_model_picker(terminal, reader, model_name, current_is_local) else {
-            return;
+            return false;
         };
         #[cfg(target_os = "linux")]
         if signal::pending_linux_process_shutdown().is_some() {
-            return;
+            return false;
         }
         match choice {
             ModelMenuChoice::Hosted(picked_model) => {
@@ -180,7 +267,7 @@ pub(super) async fn handle_model<B: ratatui::backend::Backend, R: approver::KeyR
                         "hosted models are unavailable for this launch; restart with a hosted provider"
                             .to_string(),
                     );
-                    return;
+                    return false;
                 }
                 cloud_provider.set_model(picked_model);
                 *provider = cloud_provider.clone();
@@ -188,54 +275,40 @@ pub(super) async fn handle_model<B: ratatui::backend::Backend, R: approver::KeyR
                 *model_name = picked_model.to_string();
                 *effort_name = cloud_effort_name.to_string();
                 *status = Status::Notice(format!("model set to {picked_model}"));
-                return;
+                return true;
             }
             ModelMenuChoice::Local => {
                 let models = discover_connected_local_models().await;
                 #[cfg(target_os = "linux")]
                 if signal::pending_linux_process_shutdown().is_some() {
-                    return;
+                    return false;
                 }
                 let Some(index) =
                     run_local_model_picker(terminal, reader, &models, provider_name, model_name)
                 else {
                     if models.is_empty() {
                         *status = Status::Notice("no connected local models".to_string());
-                        return;
+                        return false;
                     }
                     continue;
                 };
                 #[cfg(target_os = "linux")]
                 if signal::pending_linux_process_shutdown().is_some() {
-                    return;
+                    return false;
                 }
                 let picked = &models[index];
-                let selection = match picked.adapter.select(&picked.observed).await {
-                    Ok(selection) => selection,
-                    Err(error) => {
-                        *status = Status::Error(format!("local model is unavailable: {error}"));
-                        return;
-                    }
-                };
+                let bound = bind_local_model(picked, usage_meter, local_router).await;
                 #[cfg(target_os = "linux")]
                 if signal::pending_linux_process_shutdown().is_some() {
-                    return;
+                    return false;
                 }
-                if selection.model().capabilities().tools != Capability::Supported {
-                    *status = Status::Error(
-                        "local model does not report the tool support required by polaris"
-                            .to_string(),
-                    );
-                    return;
-                }
-                let binding = match local_router.bind(selection) {
-                    Ok(binding) => binding,
-                    Err(error) => {
-                        *status = Status::Error(format!("local model cannot be used: {error}"));
-                        return;
+                *provider = match bound {
+                    Ok(bound) => bound,
+                    Err(message) => {
+                        *status = Status::Error(message);
+                        return false;
                     }
                 };
-                *provider = Arc::new(usage_meter.wrap(binding));
                 *provider_name = picked.provider_name().to_string();
                 *model_name = picked.observed.id().to_string();
                 effort_name.clear();
@@ -244,7 +317,7 @@ pub(super) async fn handle_model<B: ratatui::backend::Backend, R: approver::KeyR
                     picked.runtime_label(),
                     picked.observed.id()
                 ));
-                return;
+                return true;
             }
         }
     }

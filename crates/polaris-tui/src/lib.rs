@@ -110,7 +110,8 @@ use session_activation::{
 };
 #[cfg(unix)]
 use session_activation::{
-    SavedDraftTarget, apply_saved_binding, apply_saved_draft, read_saved_activation,
+    ModelBinding, SavedDraftTarget, apply_saved_binding, apply_saved_draft, opens_conversation,
+    read_saved_activation,
 };
 
 const UNDECIDED_EFFORT: &str = "undecided";
@@ -2584,6 +2585,33 @@ fn restore_rejected_new_submission(
     }
 }
 
+/// Nothing is sent while the open conversation's own provider or model cannot
+/// be served here. The text goes back where it came from, so the person loses
+/// nothing, and the status carries the one line saying what the chat needs.
+#[allow(clippy::too_many_arguments)]
+fn refuse_unserved_submission(
+    needs: &str,
+    submitted: String,
+    cursor: usize,
+    queued: bool,
+    input_buffer: &mut String,
+    input_cursor: &mut usize,
+    queued_inputs: &mut VecDeque<String>,
+    queued_inputs_paused: &mut bool,
+    status: &mut Status,
+) {
+    restore_rejected_new_submission(
+        submitted,
+        cursor,
+        queued,
+        input_buffer,
+        input_cursor,
+        queued_inputs,
+        queued_inputs_paused,
+    );
+    *status = Status::Error(needs.to_owned());
+}
+
 /// Resume always rebuilds the projection after the picker returns. A successful
 /// resume can reactivate the same path after replacing the in-memory session and
 /// clearing local lines, so path equality is not a safe reset decision.
@@ -3598,6 +3626,21 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
     let mut draft_autosave = draft::DraftAutosave::new();
     #[cfg(unix)]
     let mut last_submission_was_local = false;
+    // Set when the open conversation's own provider or model cannot be served
+    // here: the line saying what it needs. Nothing is sent while it is set,
+    // because a conversation held with a local model must not reach a hosted
+    // provider unless the person chooses that in `/model`, which clears it.
+    // Opening a conversation decides it afresh; a fork or rewind child keeps it.
+    let mut unserved_binding: Option<String> = None;
+    // Set when a fork or rewind has just made a child of the open conversation.
+    // The child copies the parent's record, which `/model` never rewrites, so
+    // it continues the binding in use instead of selecting what the record says.
+    // Every pass takes it, so a fork that failed leaves nothing for `/resume`.
+    #[cfg(unix)]
+    let mut keep_binding = false;
+    // Conversations already told that a saved role binding no longer resolves.
+    #[cfg(unix)]
+    let mut role_notices = role_commands::StoppedNotices::default();
     #[cfg(target_os = "linux")]
     let workspace_commands = {
         use std::os::unix::fs::MetadataExt;
@@ -3683,20 +3726,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
         // Reattach process-owned services and selectors before accepting the
         // next input; none of these belong to durable conversation state.
         #[cfg(unix)]
-        {
-            // `/model` changes the process binding without saving preferences.
-            // Unconfigured conversations and first-time settings writes must
-            // use that current binding; durable settings still take precedence.
-            initial_saved_settings.provider.clone_from(&provider_name);
-            initial_saved_settings.model.clone_from(&model_name);
-            initial_saved_settings.effort = if is_local_provider(&provider_name) {
-                String::new()
-            } else {
-                args.initial_effort_name
-                    .clone()
-                    .unwrap_or_else(|| "auto".into())
-            };
-        }
+        let carried = std::mem::take(&mut keep_binding);
         #[cfg(unix)]
         if refresh_saved_settings || saved_settings_path.as_ref() != Some(&session_path) {
             let switched = saved_settings_path.as_ref() != Some(&session_path);
@@ -3712,16 +3742,52 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                     break 'outer ExitCode::FAILURE;
                 }
             };
+            let open = opens_conversation(switched, carried, &mut unserved_binding);
             if let Some(activation) = activation {
-                if let Err(error) = apply_saved_binding(
+                // Opening a conversation runs it on the provider and model it
+                // was saved with. One this process cannot serve still opens,
+                // with its history, and nothing is sent until the person
+                // chooses a model.
+                let before = (provider_name.clone(), model_name.clone());
+                let needs = apply_saved_binding(
                     &activation,
+                    open,
                     &mut effective_saved_settings,
-                    &provider_name,
-                    args.provider.as_ref(),
-                    &mut model_name,
-                ) {
-                    fatal_message = Some(error);
-                    break 'outer ExitCode::FAILURE;
+                    &mut ModelBinding {
+                        provider: &mut args.provider,
+                        provider_name: &mut provider_name,
+                        model_name: &mut model_name,
+                        effort_name: &mut effort_name,
+                        startup_provider: &cloud_provider,
+                        startup_name: &cloud_provider_name,
+                        startup_effort: &cloud_effort_name,
+                        usage_meter: &usage_meter,
+                        local_router: &local_router,
+                        endpoints: &model_menu::LOOPBACK_ENDPOINTS,
+                    },
+                )
+                .await;
+                #[cfg(target_os = "linux")]
+                if let Some(code) = linux_pending_exit_code() {
+                    break 'outer code;
+                }
+                if provider_name != before.0 || model_name != before.1 {
+                    let width = terminal.borrow().size().map(|s| s.width).unwrap_or(80);
+                    conversation_view.reset(
+                        &render::HeaderInfo {
+                            provider_name: &provider_name,
+                            model_name: &model_name,
+                            usage: usage_meter.snapshot().usage,
+                            cwd: &cwd_display,
+                            cwd_short: &cwd_footer_display,
+                            effort_name: &effort_name,
+                        },
+                        width,
+                    );
+                }
+                if let Some(line) = needs {
+                    status = Status::Error(line.clone());
+                    unserved_binding = Some(line);
                 }
                 apply_saved_draft(
                     activation,
@@ -3736,6 +3802,21 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
             saved_settings_path = Some(session_path.clone());
             refresh_saved_settings = false;
             tool_memory_path = None;
+        }
+        #[cfg(unix)]
+        {
+            // `/model` changes the process binding without saving preferences.
+            // Unconfigured conversations and first-time settings writes must
+            // use that current binding; durable settings still take precedence.
+            initial_saved_settings.provider.clone_from(&provider_name);
+            initial_saved_settings.model.clone_from(&model_name);
+            initial_saved_settings.effort = if is_local_provider(&provider_name) {
+                String::new()
+            } else {
+                args.initial_effort_name
+                    .clone()
+                    .unwrap_or_else(|| "auto".into())
+            };
         }
         attach_process_services(
             &mut session,
@@ -4232,6 +4313,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                             mcp_host = Some(activation.mcp_host);
                             mcp_setup = Some(activation.mcp_setup);
                             tool_memory_path = Some(session_path.clone());
+                            keep_binding = true;
                             input_history = input::History::new();
                             history_compacted_this_turn = false;
                             local_lines.clear();
@@ -4720,6 +4802,10 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                                 &mut session_started_at_millis,
                                 &mut status,
                             );
+                            #[cfg(unix)]
+                            {
+                                keep_binding = true;
+                            }
                             clear_mcp_prompt_on_session_change(
                                 &previous_session_path,
                                 &session_path,
@@ -4756,7 +4842,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                             if let Some(code) = linux_pending_exit_code() {
                                 break 'outer code;
                             }
-                            handle_model(
+                            let chosen = handle_model(
                                 &terminal,
                                 &mut key_reader,
                                 &mut args.provider,
@@ -4774,6 +4860,9 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                             #[cfg(target_os = "linux")]
                             if let Some(code) = linux_pending_exit_code() {
                                 break 'outer code;
+                            }
+                            if chosen {
+                                unserved_binding = None;
                             }
                             continue;
                         }
@@ -5563,6 +5652,10 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                         &mut session_started_at_millis,
                         &mut status,
                     );
+                    #[cfg(unix)]
+                    {
+                        keep_binding = true;
+                    }
                     clear_mcp_prompt_on_session_change(
                         &previous_session_path,
                         &session_path,
@@ -5599,7 +5692,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                     if let Some(code) = linux_pending_exit_code() {
                         break 'outer code;
                     }
-                    handle_model(
+                    let chosen = handle_model(
                         &terminal,
                         &mut key_reader,
                         &mut args.provider,
@@ -5617,6 +5710,9 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                     #[cfg(target_os = "linux")]
                     if let Some(code) = linux_pending_exit_code() {
                         break 'outer code;
+                    }
+                    if chosen {
+                        unserved_binding = None;
                     }
                     continue;
                 }
@@ -5792,6 +5888,20 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                 &mut queued_inputs_paused,
             );
             status = Status::Error(error.into());
+            continue;
+        }
+        if let Some(needs) = &unserved_binding {
+            refuse_unserved_submission(
+                needs,
+                text,
+                cursor_before_submit,
+                dispatching_queued_input,
+                &mut input_buffer,
+                &mut input_cursor,
+                &mut queued_inputs,
+                &mut queued_inputs_paused,
+                &mut status,
+            );
             continue;
         }
 
@@ -6553,16 +6663,24 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
         #[cfg(unix)]
         let runtime_persistence = session.persistence.clone();
         #[cfg(unix)]
-        let child_provider = match role_commands::activation(
-            args.provider.clone(),
-            &effective_saved_settings,
-            &effective_agent_types,
-        ) {
-            Ok(provider) => provider,
-            Err(error) => {
-                fatal_message = Some(format!("Cannot attach role bindings to the run: {error}"));
-                break 'outer ExitCode::FAILURE;
+        let child_provider = {
+            // A binding that no longer resolves stops delegation for the run
+            // instead of ending the TUI; the person is told once per chat.
+            let (provider, stopped) = role_commands::activation_or_stop(
+                args.provider.clone(),
+                &effective_saved_settings,
+                &effective_agent_types,
+            );
+            if let Some(notice) = role_notices.once(&session_path, stopped) {
+                conversation_view.push_history_line(render::HistoryLine {
+                    line: ratatui::text::Line::from(ratatui::text::Span::styled(
+                        render::sanitize(&notice),
+                        ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray),
+                    )),
+                    shaded: false,
+                });
             }
+            provider
         };
         #[cfg(not(unix))]
         let child_provider = args.provider.clone();

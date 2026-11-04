@@ -3,12 +3,18 @@
 use std::path::Path;
 use std::sync::Arc;
 
+#[cfg(unix)]
+use polaris_core::local_execution::LocalRouter;
 use polaris_core::session::Session;
 #[cfg(unix)]
 use polaris_core::session_settings::{SavedSessionSettingsV1, ToolMemoryModeV1};
 use polaris_core::tool_memory::RetentionMode;
 use polaris_provider::Provider;
+#[cfg(unix)]
+use polaris_provider::UsageMeter;
 
+#[cfg(unix)]
+use crate::model_menu::{self, LocalEndpoints, LocalMiss};
 #[cfg(unix)]
 use crate::{draft::DraftAutosave, input};
 use crate::{memory, persist, tool_memory};
@@ -16,6 +22,9 @@ use crate::{memory, persist, tool_memory};
 #[cfg(unix)]
 pub(super) struct SavedActivationRead {
     settings: SavedSessionSettingsV1,
+    /// False when the conversation never saved settings: `settings` is then
+    /// only the live binding, and there is nothing to follow.
+    recorded: bool,
     draft: Option<String>,
 }
 
@@ -32,40 +41,153 @@ pub(super) fn read_saved_activation(
     let snapshot = saved
         .snapshot()
         .map_err(|error| format!("Cannot restore conversation settings: {error}"))?;
+    let recorded = snapshot.state.session_settings.is_some();
     let settings = snapshot.state.session_settings.unwrap_or_else(|| {
         let mut initial = initial_settings.clone();
         initial.model = current_model.to_owned();
         initial
     });
     let draft = switched.then_some(snapshot.state.draft.text);
-    Ok(Some(SavedActivationRead { settings, draft }))
+    Ok(Some(SavedActivationRead {
+        settings,
+        recorded,
+        draft,
+    }))
+}
+
+/// The provider and model the run uses, which `/model` also edits, and what
+/// this process can still switch to. Borrowed from `run`; none of it is
+/// conversation state.
+#[cfg(unix)]
+pub(super) struct ModelBinding<'a> {
+    pub(super) provider: &'a mut Arc<dyn Provider>,
+    pub(super) provider_name: &'a mut String,
+    pub(super) model_name: &'a mut String,
+    pub(super) effort_name: &'a mut String,
+    /// What the process started on, which `/model`'s hosted rows switch back to.
+    pub(super) startup_provider: &'a Arc<dyn Provider>,
+    pub(super) startup_name: &'a str,
+    pub(super) startup_effort: &'a str,
+    pub(super) usage_meter: &'a UsageMeter,
+    pub(super) local_router: &'a LocalRouter,
+    pub(super) endpoints: &'a LocalEndpoints<'a>,
+}
+
+/// Whether a change of conversation opens one. Opening selects what the
+/// conversation was saved with and decides afresh whether this process can
+/// serve it, so the line saying it cannot is dropped here.
+///
+/// `carried` is a fork or rewind child of the conversation that was open. It
+/// copies the parent's record, which `/model` never rewrites, so selecting that
+/// record would undo the person's choice: it continues the binding in use, and
+/// a parent that could not be served leaves its child unserved. Anything else
+/// that changes the conversation, such as `/resume`, opens it. `switched` is
+/// false for a refresh of the same conversation, which opens nothing.
+#[cfg(unix)]
+pub(super) fn opens_conversation(
+    switched: bool,
+    carried: bool,
+    unserved: &mut Option<String>,
+) -> bool {
+    let open = switched && !carried;
+    if open {
+        *unserved = None;
+    }
+    open
+}
+
+/// Selects the provider and model a conversation was saved with, when this
+/// process can serve them: a local model through the same selection and bind
+/// as `/model`'s `Local model`, a hosted one when it is the provider the
+/// process started on. When it cannot, the binding stays as it was and the
+/// result is the one line saying what the conversation needs. The caller then
+/// sends nothing: a conversation held with a local model must not reach a
+/// hosted provider unless the person chooses that in `/model`.
+///
+/// `open` marks a conversation opened from elsewhere (see
+/// `opens_conversation`). Otherwise, for a refresh or a fork or rewind child,
+/// only a changed saved model on the provider already in use is applied; a
+/// switch to another provider that the person made with `/model` stands.
+#[cfg(unix)]
+pub(super) async fn apply_saved_binding(
+    activation: &SavedActivationRead,
+    open: bool,
+    effective_settings: &mut SavedSessionSettingsV1,
+    live: &mut ModelBinding<'_>,
+) -> Option<String> {
+    effective_settings.clone_from(&activation.settings);
+    let saved = &activation.settings;
+    if !activation.recorded
+        || (*live.provider_name == saved.provider && *live.model_name == saved.model)
+    {
+        return None;
+    }
+    if let Some((runtime, endpoint)) = live.endpoints.runtime_for(&saved.provider) {
+        if !open {
+            return None;
+        }
+        return match model_menu::bind_saved_local_model(
+            runtime,
+            endpoint,
+            &saved.model,
+            live.usage_meter,
+            live.local_router,
+        )
+        .await
+        {
+            Ok(bound) => {
+                *live.provider = bound;
+                live.provider_name.clone_from(&saved.provider);
+                live.model_name.clone_from(&saved.model);
+                live.effort_name.clear();
+                None
+            }
+            Err(miss) => Some(needs_local(saved, miss)),
+        };
+    }
+    let on_startup_provider = *live.provider_name == live.startup_name;
+    if saved.provider == live.startup_name && (open || on_startup_provider) {
+        live.startup_provider.set_model(&saved.model);
+        if live.startup_provider.model().as_deref() == Some(saved.model.as_str()) {
+            if !on_startup_provider {
+                live.provider_name.clone_from(&saved.provider);
+                live.effort_name.clear();
+                live.effort_name.push_str(live.startup_effort);
+            }
+            *live.provider = live.startup_provider.clone();
+            live.model_name.clone_from(&saved.model);
+            return None;
+        }
+    }
+    open.then(|| needs_restart(saved))
 }
 
 #[cfg(unix)]
-pub(super) fn apply_saved_binding(
-    activation: &SavedActivationRead,
-    effective_settings: &mut SavedSessionSettingsV1,
-    provider_name: &str,
-    provider: &dyn Provider,
-    model_name: &mut String,
-) -> Result<(), String> {
-    effective_settings.clone_from(&activation.settings);
-    if effective_settings.provider != provider_name {
-        return Err(
-            "The saved provider differs from the startup provider. Specify it and restart".into(),
-        );
-    }
-    if *model_name != effective_settings.model {
-        if provider.model().is_none() {
-            return Err("Cannot apply the saved model to this provider".into());
+fn needs_local(saved: &SavedSessionSettingsV1, miss: LocalMiss) -> String {
+    let what = format!("This chat needs {} ({})", saved.provider, saved.model);
+    match miss {
+        LocalMiss::NotReachable => format!(
+            "{what}, but its server is not reachable. Start it, then choose the model with /model (Local model)."
+        ),
+        LocalMiss::NotListed => format!(
+            "{what}, but its server does not list that model. Add it, then choose it with /model (Local model)."
+        ),
+        LocalMiss::Unusable(why) => {
+            format!("{what}, but it cannot be used here ({why}). Choose another model with /model.")
         }
-        provider.set_model(&effective_settings.model);
-        if provider.model().as_deref() != Some(effective_settings.model.as_str()) {
-            return Err("Cannot verify application of the saved model".into());
-        }
-        model_name.clone_from(&effective_settings.model);
     }
-    Ok(())
+}
+
+#[cfg(unix)]
+fn needs_restart(saved: &SavedSessionSettingsV1) -> String {
+    let how = match saved.provider.as_str() {
+        "llamacpp" => format!("POLARIS_PROVIDER=llamacpp and --model {}", saved.model),
+        provider => format!("POLARIS_PROVIDER={provider}"),
+    };
+    format!(
+        "This chat needs {} ({}). Restart with {how}, or choose a model with /model.",
+        saved.provider, saved.model
+    )
 }
 
 #[cfg(unix)]
@@ -315,4 +437,410 @@ pub(super) fn configure_saved_tool_memory(
         )?;
     }
     Ok(())
+}
+
+/// Stand-ins for binding tests: a process that started on a hosted provider,
+/// and a loopback server that answers Ollama's two metadata routes.
+#[cfg(all(test, unix))]
+pub(crate) mod fixtures {
+    use super::*;
+    use polaris_provider::{CompletionRequest, CompletionResponse, ProviderError};
+    use std::sync::Mutex;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Switches model the way codex and openai do.
+    pub(crate) struct Hosted(Mutex<String>);
+    impl Hosted {
+        pub(crate) fn shared(model: &str) -> Arc<dyn Provider> {
+            Arc::new(Self(Mutex::new(model.to_owned())))
+        }
+    }
+    #[async_trait::async_trait]
+    impl Provider for Hosted {
+        async fn complete(
+            &self,
+            _: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            panic!("choosing a binding never sends")
+        }
+        fn model(&self) -> Option<String> {
+            Some(self.0.lock().unwrap().clone())
+        }
+        fn set_model(&self, model: &str) {
+            *self.0.lock().unwrap() = model.to_owned();
+        }
+    }
+
+    /// What `run` holds for the binding, as a process started on `name`.
+    pub(crate) struct Process {
+        pub(crate) startup: Arc<dyn Provider>,
+        startup_name: String,
+        pub(crate) provider: Arc<dyn Provider>,
+        pub(crate) provider_name: String,
+        pub(crate) model_name: String,
+        pub(crate) effort_name: String,
+        usage: UsageMeter,
+        router: LocalRouter,
+    }
+
+    impl Process {
+        pub(crate) fn started_on(name: &str, model: &str) -> Self {
+            let startup = Hosted::shared(model);
+            Self {
+                provider: startup.clone(),
+                startup,
+                startup_name: name.to_owned(),
+                provider_name: name.to_owned(),
+                model_name: model.to_owned(),
+                effort_name: "high".to_owned(),
+                usage: UsageMeter::default(),
+                router: LocalRouter::new(1),
+            }
+        }
+
+        pub(crate) fn binding<'a>(
+            &'a mut self,
+            endpoints: &'a LocalEndpoints<'a>,
+        ) -> ModelBinding<'a> {
+            ModelBinding {
+                provider: &mut self.provider,
+                provider_name: &mut self.provider_name,
+                model_name: &mut self.model_name,
+                effort_name: &mut self.effort_name,
+                startup_provider: &self.startup,
+                startup_name: &self.startup_name,
+                startup_effort: "high",
+                usage_meter: &self.usage,
+                local_router: &self.router,
+                endpoints,
+            }
+        }
+
+        pub(crate) fn bound_local_endpoint(&self) -> bool {
+            self.router.has_bound_endpoints()
+        }
+    }
+
+    /// An Ollama-shaped server on a free loopback port; returns its endpoint.
+    pub(crate) async fn fake_ollama(models: &'static [&'static str], tools: bool) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    let (head_end, body_len) = loop {
+                        let read = stream.read(&mut chunk).await.unwrap_or(0);
+                        if read == 0 {
+                            return;
+                        }
+                        request.extend_from_slice(&chunk[..read]);
+                        if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                            let body_len = head
+                                .lines()
+                                .find_map(|line| line.strip_prefix("content-length:"))
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            break (end + 4, body_len);
+                        }
+                    };
+                    while request.len() < head_end + body_len {
+                        let read = stream.read(&mut chunk).await.unwrap_or(0);
+                        if read == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&chunk[..read]);
+                    }
+                    let request_line = String::from_utf8_lossy(&request)
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .to_owned();
+                    let body = if request_line.starts_with("GET /api/tags ") {
+                        serde_json::json!({"models": models.iter().map(|name| serde_json::json!({"name": name})).collect::<Vec<_>>()})
+                    } else if request_line.starts_with("POST /api/show ") {
+                        serde_json::json!({"capabilities": if tools { vec!["completion", "tools"] } else { vec!["completion"] }})
+                    } else {
+                        serde_json::json!({})
+                    }
+                    .to_string();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        endpoint
+    }
+
+    /// An endpoint nothing listens on.
+    pub(crate) async fn closed_endpoint() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        format!("http://{}/", listener.local_addr().unwrap())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::fixtures::{Process, closed_endpoint, fake_ollama};
+    use super::*;
+
+    fn saved(provider: &str, model: &str) -> SavedActivationRead {
+        SavedActivationRead {
+            settings: SavedSessionSettingsV1::new(provider.into(), model.into(), "auto".into())
+                .unwrap(),
+            recorded: true,
+            draft: None,
+        }
+    }
+
+    async fn apply(
+        process: &mut Process,
+        activation: &SavedActivationRead,
+        open: bool,
+        endpoint: &str,
+    ) -> Option<String> {
+        let endpoints = LocalEndpoints {
+            ollama: endpoint,
+            lm_studio: endpoint,
+        };
+        let mut effective = activation.settings.clone();
+        apply_saved_binding(
+            activation,
+            open,
+            &mut effective,
+            &mut process.binding(&endpoints),
+        )
+        .await
+    }
+
+    /// A conversation opened from elsewhere, as `/resume` does.
+    async fn open(
+        process: &mut Process,
+        activation: &SavedActivationRead,
+        endpoint: &str,
+    ) -> Option<String> {
+        apply(process, activation, true, endpoint).await
+    }
+
+    #[tokio::test]
+    async fn a_saved_local_model_is_selected_through_the_local_router() {
+        let endpoint = fake_ollama(&["qwen3:8b"], true).await;
+        let mut process = Process::started_on("codex", "gpt-6.1-sol");
+        let startup = process.startup.clone();
+        let needs = open(&mut process, &saved("ollama", "qwen3:8b"), &endpoint).await;
+        assert_eq!(needs, None);
+        assert_eq!(process.provider_name, "ollama");
+        assert_eq!(process.model_name, "qwen3:8b");
+        assert_eq!(process.provider.model().as_deref(), Some("qwen3:8b"));
+        assert!(!Arc::ptr_eq(&process.provider, &startup));
+        assert!(
+            process.effort_name.is_empty(),
+            "a local model has no effort"
+        );
+        assert!(process.bound_local_endpoint());
+        // Choosing a local model never retunes the hosted provider.
+        assert_eq!(startup.model().as_deref(), Some("gpt-6.1-sol"));
+    }
+
+    #[tokio::test]
+    async fn a_saved_local_model_this_process_cannot_serve_leaves_the_binding_and_says_what_it_needs()
+     {
+        let closed = closed_endpoint().await;
+        let without_model = fake_ollama(&["other:1b"], true).await;
+        let without_tools = fake_ollama(&["qwen3:8b"], false).await;
+        for (endpoint, reason) in [
+            (closed, "not reachable"),
+            (without_model, "does not list that model"),
+            (without_tools, "tool support"),
+        ] {
+            let mut process = Process::started_on("codex", "gpt-6.1-sol");
+            let startup = process.startup.clone();
+            let line = open(&mut process, &saved("ollama", "qwen3:8b"), &endpoint)
+                .await
+                .expect("the conversation reports what it needs");
+            for expected in ["ollama", "qwen3:8b", "/model", reason] {
+                assert!(line.contains(expected), "{expected} missing from {line}");
+            }
+            // Still on the hosted provider the process started on, unchanged.
+            assert_eq!(process.provider_name, "codex");
+            assert_eq!(process.model_name, "gpt-6.1-sol");
+            assert!(Arc::ptr_eq(&process.provider, &startup));
+            assert_eq!(startup.model().as_deref(), Some("gpt-6.1-sol"));
+            assert!(!process.bound_local_endpoint());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_saved_hosted_model_on_the_started_provider_is_applied() {
+        let closed = closed_endpoint().await;
+        let mut process = Process::started_on("codex", "gpt-6.1-sol");
+        let needs = open(&mut process, &saved("codex", "gpt-6-astra"), &closed).await;
+        assert_eq!(needs, None);
+        assert_eq!(process.provider_name, "codex");
+        assert_eq!(process.model_name, "gpt-6-astra");
+        assert_eq!(process.provider.model().as_deref(), Some("gpt-6-astra"));
+
+        // After `/model` moved to a local model, opening another conversation
+        // that was held with the hosted one (`/resume`) switches back.
+        let endpoint = fake_ollama(&["qwen3:8b"], true).await;
+        let mut process = Process::started_on("codex", "gpt-6.1-sol");
+        assert_eq!(
+            open(&mut process, &saved("ollama", "qwen3:8b"), &endpoint).await,
+            None
+        );
+        let needs = open(&mut process, &saved("codex", "gpt-6-astra"), &closed).await;
+        assert_eq!(needs, None);
+        assert_eq!(process.provider_name, "codex");
+        assert!(Arc::ptr_eq(&process.provider, &process.startup));
+        assert_eq!(process.provider.model().as_deref(), Some("gpt-6-astra"));
+        assert_eq!(process.effort_name, "high");
+    }
+
+    #[tokio::test]
+    async fn a_conversation_held_with_another_backend_is_not_switched_to() {
+        let closed = closed_endpoint().await;
+        for (provider, model, how) in [
+            ("openai", "gpt-6-astra", "POLARIS_PROVIDER=openai"),
+            (
+                "llamacpp",
+                "gemma-4b",
+                "POLARIS_PROVIDER=llamacpp and --model gemma-4b",
+            ),
+        ] {
+            let mut process = Process::started_on("codex", "gpt-6.1-sol");
+            let startup = process.startup.clone();
+            let line = open(&mut process, &saved(provider, model), &closed)
+                .await
+                .expect("it cannot be served here");
+            for expected in [provider, model, how, "/model"] {
+                assert!(line.contains(expected), "{expected} missing from {line}");
+            }
+            assert_eq!(process.provider_name, "codex");
+            assert!(Arc::ptr_eq(&process.provider, &startup));
+            assert_eq!(startup.model().as_deref(), Some("gpt-6.1-sol"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_conversation_that_saved_nothing_follows_the_live_binding() {
+        let closed = closed_endpoint().await;
+        let mut process = Process::started_on("codex", "gpt-6.1-sol");
+        let mut activation = saved("ollama", "qwen3:8b");
+        activation.recorded = false;
+        assert_eq!(open(&mut process, &activation, &closed).await, None);
+        assert_eq!(process.provider_name, "codex");
+        assert_eq!(process.model_name, "gpt-6.1-sol");
+    }
+
+    #[tokio::test]
+    async fn after_opening_a_switch_made_with_model_stands() {
+        let closed = closed_endpoint().await;
+        let mut process = Process::started_on("codex", "gpt-6.1-sol");
+        let activation = saved("ollama", "qwen3:8b");
+        let endpoints = LocalEndpoints {
+            ollama: &closed,
+            lm_studio: &closed,
+        };
+        let mut effective = activation.settings.clone();
+        let needs = apply_saved_binding(
+            &activation,
+            false,
+            &mut effective,
+            &mut process.binding(&endpoints),
+        )
+        .await;
+        assert_eq!(needs, None);
+        assert_eq!(process.provider_name, "codex");
+        assert_eq!(process.model_name, "gpt-6.1-sol");
+        // The saved settings still become the effective ones.
+        assert_eq!(effective, activation.settings);
+    }
+
+    #[tokio::test]
+    async fn a_fork_or_rewind_child_continues_the_binding_in_use_not_its_copied_record() {
+        let endpoint = fake_ollama(&["qwen3:8b"], true).await;
+        let mut process = Process::started_on("codex", "gpt-6.1-sol");
+        let startup = process.startup.clone();
+        // The chat was recorded with the hosted model; `/model` then moved it to
+        // a local one, which the record does not show.
+        assert_eq!(
+            open(&mut process, &saved("ollama", "qwen3:8b"), &endpoint).await,
+            None
+        );
+        let local = process.provider.clone();
+        let copied = saved("codex", "gpt-6.1-sol");
+
+        // The child copies that record. Selecting it would send the local
+        // model's history to the hosted provider without anyone choosing it.
+        assert_eq!(apply(&mut process, &copied, false, &endpoint).await, None);
+        assert_eq!(process.provider_name, "ollama");
+        assert_eq!(process.model_name, "qwen3:8b");
+        assert!(Arc::ptr_eq(&process.provider, &local));
+        assert_eq!(startup.model().as_deref(), Some("gpt-6.1-sol"));
+
+        // Opening the same record from elsewhere (`/resume`) does follow it.
+        assert_eq!(open(&mut process, &copied, &endpoint).await, None);
+        assert_eq!(process.provider_name, "codex");
+        assert!(Arc::ptr_eq(&process.provider, &startup));
+    }
+
+    #[test]
+    fn only_a_change_to_another_conversation_opens_one() {
+        let line = || Some("This chat needs ollama (qwen3:8b).".to_owned());
+        // Startup and `/resume`: it opens, deciding afresh whether it is served.
+        let mut unserved = line();
+        assert!(opens_conversation(true, false, &mut unserved));
+        assert_eq!(unserved, None);
+        // A fork or rewind child continues what its parent was left with.
+        let mut unserved = line();
+        assert!(!opens_conversation(true, true, &mut unserved));
+        assert_eq!(unserved, line());
+        // A refresh of the same conversation opens nothing.
+        let mut unserved = line();
+        assert!(!opens_conversation(false, false, &mut unserved));
+        assert_eq!(unserved, line());
+    }
+
+    #[tokio::test]
+    async fn a_child_of_a_chat_this_process_cannot_serve_stays_unserved_when_its_server_comes_up() {
+        let mut process = Process::started_on("codex", "gpt-6.1-sol");
+        let startup = process.startup.clone();
+        let record = saved("ollama", "qwen3:8b");
+
+        // Opened while its server is down: it is shown, and nothing is sent.
+        let mut unserved = None;
+        let open_now = opens_conversation(true, false, &mut unserved);
+        let closed = closed_endpoint().await;
+        unserved = apply(&mut process, &record, open_now, &closed).await;
+        assert!(unserved.is_some());
+
+        // The server starts and the chat is forked (a rewind is the same). The
+        // child copies the record, but it is no more servable than its parent.
+        let endpoint = fake_ollama(&["qwen3:8b"], true).await;
+        let open_child = opens_conversation(true, true, &mut unserved);
+        assert_eq!(
+            apply(&mut process, &record, open_child, &endpoint).await,
+            None
+        );
+        assert!(unserved.is_some(), "only `/model` clears it");
+        assert_eq!(process.provider_name, "codex");
+        assert!(Arc::ptr_eq(&process.provider, &startup));
+        assert!(!process.bound_local_endpoint());
+
+        // Opening the chat from elsewhere decides afresh, and now it is served.
+        let open_again = opens_conversation(true, false, &mut unserved);
+        assert_eq!(unserved, None);
+        assert_eq!(
+            apply(&mut process, &record, open_again, &endpoint).await,
+            None
+        );
+        assert_eq!(process.provider_name, "ollama");
+        assert!(process.bound_local_endpoint());
+    }
 }
