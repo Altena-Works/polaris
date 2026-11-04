@@ -54,14 +54,13 @@ graph TD
   tui --> memory
   tui --> auth
   tui --> core
-  tui --> envkit
   tui --> mcp
   tui --> provider
   tui --> sandbox
   tui --> skills
 ```
 
-crate 14件、依存 47件。名前の`polaris-`は省いた。開発用の依存は、製品の組み立てを表さないため含めない。
+crate 14件、依存 46件。名前の`polaris-`は省いた。開発用の依存は、製品の組み立てを表さないため含めない。
 
 ## 外部との接続点
 
@@ -266,4 +265,4 @@ processが動く。
 - `crates/polaris-core/src/sync/repository.rs:50`
 - `crates/polaris-core/src/sync/repository/c10.rs:1551`
 - `crates/polaris-desktop-service/src/workspace_view.rs:470`
-- `crates/polaris-tui/src/lib.rs:11612`
+- `crates/polaris-tui/src/lib.rs:10633`

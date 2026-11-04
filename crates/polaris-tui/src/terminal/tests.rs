@@ -498,7 +498,6 @@ fn production_runtime_factories_and_sync_async_readers_use_the_common_path() {
         ("onboarding", include_str!("../onboarding.rs")),
         ("approver", include_str!("../approver.rs")),
         ("account", include_str!("../account.rs")),
-        ("env", include_str!("../environment_commands.rs")),
         ("auth", include_str!("../auth_browser.rs")),
         ("windows", include_str!("../windows_read_only.rs")),
     ] {

@@ -258,7 +258,7 @@ mod tests {
     fn an_end_line_past_the_end_of_wrapped_does_not_panic_and_clamps() {
         let wrapped = vec![hl("only line")];
         // end.line (5) is past wrapped.len() (1) -- e.g. history shrank
-        // (a `/clear`) mid-drag while a stale Selection still points past
+        // (a `/new`) mid-drag while a stale Selection still points past
         // the end.
         let got = highlighted_columns(&wrapped, &sel((0, 2), (5, 3)));
         assert_eq!(got, vec![(0, 2, 9)]);

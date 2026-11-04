@@ -63,7 +63,7 @@ fn tool_memory_lineage_rejects_unverified_ancestors_and_excessive_depth() {
         .to_owned();
     let write = |id: &str, origin: Option<&str>| {
         let path = logs.path().join(format!("{id}.jsonl"));
-        persist::clear_session(&path).unwrap();
+        persist::rewrite(&path, &[]).unwrap();
         if path.with_extension("meta.json").exists() {
             std::fs::remove_file(path.with_extension("meta.json")).unwrap();
         }

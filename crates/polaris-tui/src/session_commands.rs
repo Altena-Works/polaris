@@ -1,33 +1,20 @@
-//! Saved session controls use the conversation owner and shared project lease.
-//! Displayed preferences do not claim that a provider has been switched.
+//! `/memory configure` saves the remember and history-mode settings of the open conversation.
+//! It uses the conversation owner and the shared project lease.
 
 use crate::{HistoryBackendFactory, account, approver::KeyReader, render};
 use polaris_core::{
-    conversation_state::{ConversationSnapshot, HistoryMode},
+    conversation_state::HistoryMode,
     management_effect::{ManagementEffectStoreV1, ManagementOperationIdV1},
     rewind_workspace::WorkspaceOwner,
     session::Session,
-    session_settings::{
-        GoalOperationV1, SavedSessionSettingsV1, SavedToolEmbeddingV1, SessionSettingsCommandV1,
-        SessionSettingsOwnerV1, ToolMemoryModeV1,
-    },
+    session_settings::{SavedSessionSettingsV1, SessionSettingsCommandV1, SessionSettingsOwnerV1},
 };
-use polaris_provider::Provider;
 use ratatui::{Terminal, backend::Backend, text::Line};
 use std::cell::RefCell;
 
 pub(crate) struct CommandResult {
     pub lines: Vec<Line<'static>>,
     pub settings_changed: bool,
-}
-
-impl CommandResult {
-    fn display(lines: Vec<Line<'static>>) -> Self {
-        Self {
-            lines,
-            settings_changed: false,
-        }
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -39,7 +26,6 @@ pub(crate) fn handle<B: Backend, R: KeyReader>(
     initial: &SavedSessionSettingsV1,
     workspace: &WorkspaceOwner,
     effects: &ManagementEffectStoreV1,
-    provider: &dyn Provider,
     history_factory: Option<&HistoryBackendFactory>,
     has_pending: bool,
 ) -> Result<CommandResult, String> {
@@ -57,55 +43,11 @@ pub(crate) fn handle<B: Backend, R: KeyReader>(
         return Err("Conversation source text exceeds the 16 MiB read limit".into());
     }
     let snapshot = persistence.snapshot().map_err(|e| e.to_string())?;
-    let saved = snapshot.state.session_settings.as_ref().unwrap_or(initial);
-    if matches!(request, "session" | "session current") {
-        return Ok(CommandResult::display(vec![
-            line(format!(
-                "Conversation: {} / generation {}",
-                snapshot.state.session_id, snapshot.state.generation
-            )),
-            line(format!(
-                "Current provider: {} / model: {}",
-                initial.provider,
-                provider.model().unwrap_or_else(|| "unverified".into())
-            )),
-            line(format!(
-                "Saved provider: {} / model: {} / effort: {} / revision: {}",
-                saved.provider,
-                saved.model,
-                if saved.effort.is_empty() {
-                    "auto"
-                } else {
-                    &saved.effort
-                },
-                saved.revision
-            )),
-            line(format!(
-                "History: {} / remember: {} / tool-memory: {}",
-                history_name(snapshot.state.history_mode),
-                on_off(saved.remember),
-                tool_name(saved.tool_memory),
-            )),
-            line(match &saved.tool_memory_embedding {
-                Some(pair) => format!("tool-memory endpoint: {} / model: {}", pair.url, pair.model),
-                None => "tool-memory endpoint: off".into(),
-            }),
-        ]));
-    }
-    if matches!(request, "goal" | "goal current") {
-        return Ok(CommandResult::display(goal_lines(&snapshot)));
-    }
-    if request == "session history" {
-        return Ok(CommandResult::display(vec![line(format!(
-            "History mode: {}. Change it in a new, empty conversation.",
-            history_name(snapshot.state.history_mode)
-        ))]));
-    }
     if has_pending {
         return Err("Cannot change session settings while input is queued".into());
     }
     session.check_persistence().map_err(|e| e.to_string())?;
-    let command = parse(request, &snapshot, saved, initial, provider)?;
+    let command = parse(request)?;
     let history_mode = match &command {
         SessionSettingsCommandV1::History { mode } => Some(*mode),
         _ => None,
@@ -139,23 +81,18 @@ pub(crate) fn handle<B: Backend, R: KeyReader>(
             &preview,
         )
         .map_err(|e| e.to_string())?;
-    let detail = match preview.inventory() {
-        "D20" => {
-            "Save the goal at the specified revision. It does not become input content or authority."
-        }
-        _ => "Save in this conversation; effective from the next send.",
-    };
     if !account::confirm(
         terminal,
         reader,
         "Save session settings",
         preview.session_id(),
-        &format!("{request}\n{detail}"),
+        &format!("{request}\nSave in this conversation; effective from the next send."),
     ) {
         owner.deny(&prepared).map_err(|e| e.to_string())?;
-        return Ok(CommandResult::display(vec![line(
-            "Session settings change cancelled",
-        )]));
+        return Ok(CommandResult {
+            lines: vec![line("Session settings change cancelled")],
+            settings_changed: false,
+        });
     }
     let published = owner
         .execute(&persistence, &prepared)
@@ -169,64 +106,24 @@ pub(crate) fn handle<B: Backend, R: KeyReader>(
             session.summary_usage = staged.summary_usage;
         }
     }
-    let mut lines = vec![line(format!(
-        "Saved {} (conversation generation {}).",
-        preview.inventory(),
-        published.state.generation
-    ))];
-    if preview.inventory() == "D20" {
-        lines.extend(goal_lines(&published));
-    }
     Ok(CommandResult {
-        lines,
+        lines: vec![line(format!(
+            "Saved {} (conversation generation {}).",
+            preview.inventory(),
+            published.state.generation
+        ))],
         settings_changed: published.state.session_settings != snapshot.state.session_settings,
     })
 }
 
-fn parse(
-    request: &str,
-    snapshot: &ConversationSnapshot,
-    saved: &SavedSessionSettingsV1,
-    initial: &SavedSessionSettingsV1,
-    provider: &dyn Provider,
-) -> Result<SessionSettingsCommandV1, String> {
-    let words: Vec<_> = request.split_whitespace().collect();
-    match words.as_slice() {
-        ["session", "configure", requested_provider, model] | ["session", "configure", requested_provider, model, _] => {
-            let effort = words.get(4).copied().unwrap_or(&saved.effort);
-            if *requested_provider != initial.provider {
-                return Err("Changing the provider requires a restart".into());
-            }
-            let current = provider.model().ok_or("Cannot verify the current provider's model")?;
-            if *model != current && !(matches!(initial.provider.as_str(), "codex" | "openai") && render::MODEL_CATALOG.contains(model)) {
-                return Err("Specify a model verified for this provider".into());
-            }
-            if !matches!(effort, "" | "auto") && effort != initial.effort {
-                return Err("Cannot switch to a fixed effort during an interactive session".into());
-            }
-            Ok(SessionSettingsCommandV1::Configure { expected_revision: saved.revision, provider: requested_provider.to_string(), model: model.to_string(), effort: effort.to_string() })
-        }
+fn parse(request: &str) -> Result<SessionSettingsCommandV1, String> {
+    match request.split_whitespace().collect::<Vec<_>>().as_slice() {
         ["memory", "configure", "on"] => Ok(SessionSettingsCommandV1::Remember { enabled: true }),
         ["memory", "configure", "off"] => Ok(SessionSettingsCommandV1::Remember { enabled: false }),
-        ["session", "history", mode] | ["memory", "configure", mode] => Ok(SessionSettingsCommandV1::History { mode: parse_history(mode)? }),
-        ["tool-memory", "off"] => Ok(SessionSettingsCommandV1::ToolMemory { mode: ToolMemoryModeV1::Off }),
-        ["tool-memory", "history"] => Ok(SessionSettingsCommandV1::ToolMemory { mode: ToolMemoryModeV1::History }),
-        ["tool-memory", "retrieval"] => Ok(SessionSettingsCommandV1::ToolMemory { mode: ToolMemoryModeV1::Retrieval }),
-        ["tool-memory", "endpoint", "off"] => Ok(SessionSettingsCommandV1::EmbeddingEndpoint { embedding: None }),
-        ["tool-memory", "endpoint", url, model] => Ok(SessionSettingsCommandV1::EmbeddingEndpoint { embedding: Some(SavedToolEmbeddingV1::new(url.to_string(), model.to_string()).map_err(|e| e.to_string())?) }),
-        ["tool-memory", "model", model] => {
-            let pair = saved.tool_memory_embedding.as_ref().ok_or("Configure the pair first with /tool-memory endpoint <URL> <MODEL>")?;
-            Ok(SessionSettingsCommandV1::EmbeddingModel { embedding: Some(SavedToolEmbeddingV1::new(pair.url.clone(), model.to_string()).map_err(|e| e.to_string())?) })
-        }
-        ["goal", "clear"] | ["goal", "stop"] | ["goal", "resume"] => {
-            let operation = match words[1] { "clear" => GoalOperationV1::Clear, "stop" => GoalOperationV1::Stop, _ => GoalOperationV1::Resume };
-            Ok(SessionSettingsCommandV1::Goal { expected_revision: snapshot.state.goal.as_ref().map_or(0, |goal| goal.revision.get()), operation })
-        }
-        ["goal", "set", ..] => {
-            let text = request.strip_prefix("goal").unwrap().trim_start().strip_prefix("set").unwrap().trim_start();
-            Ok(SessionSettingsCommandV1::Goal { expected_revision: snapshot.state.goal.as_ref().map_or(0, |goal| goal.revision.get()), operation: GoalOperationV1::Set { text: text.to_string() } })
-        }
-        _ => Err("Specify /session configure <provider> <model> [effort], /session history <mode>, /memory configure on|off, /tool-memory, or /goal".into()),
+        ["memory", "configure", mode] => Ok(SessionSettingsCommandV1::History {
+            mode: parse_history(mode)?,
+        }),
+        _ => Err("Specify /memory configure on|off|legacy|strict10|structured10".into()),
     }
 }
 
@@ -237,41 +134,6 @@ fn parse_history(value: &str) -> Result<HistoryMode, String> {
         "structured10" => Ok(HistoryMode::Structured10),
         _ => Err("Specify history mode as legacy|strict10|structured10".into()),
     }
-}
-
-fn goal_lines(snapshot: &ConversationSnapshot) -> Vec<Line<'static>> {
-    match &snapshot.state.goal {
-        Some(goal) => vec![
-            line(format!(
-                "goal revision {} / enabled {} / stopped {}",
-                goal.revision.get(),
-                on_off(goal.active),
-                on_off(goal.stopped)
-            )),
-            line(goal.text.clone()),
-        ],
-        None => vec![line("No saved goal")],
-    }
-}
-
-fn history_name(mode: HistoryMode) -> &'static str {
-    match mode {
-        HistoryMode::Legacy => "legacy",
-        HistoryMode::Strict10 => "strict10",
-        HistoryMode::Structured10 => "structured10",
-    }
-}
-
-fn tool_name(mode: ToolMemoryModeV1) -> &'static str {
-    match mode {
-        ToolMemoryModeV1::Off => "off",
-        ToolMemoryModeV1::History => "history",
-        ToolMemoryModeV1::Retrieval => "retrieval",
-    }
-}
-
-fn on_off(value: bool) -> &'static str {
-    if value { "on" } else { "off" }
 }
 
 fn line(text: impl AsRef<str>) -> Line<'static> {

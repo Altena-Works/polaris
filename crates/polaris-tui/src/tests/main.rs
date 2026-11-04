@@ -386,27 +386,6 @@ fn m3c_memory_read_keeps_project_scope_and_bounds_exact_ranges() {
 }
 
 #[test]
-fn decided_read_is_bounded_and_marks_old_entries_as_history() {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::create_dir(root.path().join(".polaris")).unwrap();
-    polaris_core::decisions::append(root.path(), "2026-09-23", "keep the old name").unwrap();
-    let lines = decided_read_lines(root.path())
-        .unwrap()
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(lines.contains("keep the old name"), "{lines}");
-    assert!(lines.contains("not current approvals"), "{lines}");
-    std::fs::write(
-        root.path().join(polaris_core::decisions::PATH),
-        "x".repeat(1024 * 1024 + 1),
-    )
-    .unwrap();
-    assert!(decided_read_lines(root.path()).is_err());
-}
-
-#[test]
 fn mcp_prompt_selection_is_typed_and_rejects_ambiguous_arguments() {
     let choice = mcp_prompt_choice("prompt files/review path=src/lib.rs depth=2").unwrap();
     assert_eq!(choice.server, "files");
@@ -2385,8 +2364,13 @@ fn working_turn_accepts_and_queues_prompts_and_commands_in_order() {
         );
     }
     let suggestions = slash_suggestions(&buffer, &history, false);
+    // model, mcp, memory: the highlight wraps past both ends and lands on the first row.
+    assert_eq!(
+        suggestions.iter().map(|c| c.name).collect::<Vec<_>>(),
+        ["model", "mcp", "memory"]
+    );
     let mut selected = 0;
-    for code in [KeyCode::Up, KeyCode::Down, KeyCode::Up] {
+    for code in [KeyCode::Down, KeyCode::Up, KeyCode::Up, KeyCode::Down] {
         assert_eq!(
             slash_completion_action(&suggestions, &mut selected, key(code)),
             SlashCompletionAction::Navigate
@@ -2479,14 +2463,14 @@ fn a_second_escape_after_the_window_starts_over() {
 #[test]
 fn slash_completion_preserves_recalled_and_queued_commands() {
     let mut history = input::History::new();
-    history.record("/subagents");
-    assert_eq!(history.older("independent draft"), Some("/subagents"));
-    assert!(slash_suggestions("/subagents", &history, false).is_empty());
-    assert!(slash_suggestions("/sub", &history, true).is_empty());
+    history.record("/permissions");
+    assert_eq!(history.older("independent draft"), Some("/permissions"));
+    assert!(slash_suggestions("/permissions", &history, false).is_empty());
+    assert!(slash_suggestions("/perm", &history, true).is_empty());
 
     // Editing a recalled command, or typing during a queued run, uses
     // interactive completion without consuming the saved history draft.
-    let suggestions = slash_suggestions("/sub", &history, false);
+    let suggestions = slash_suggestions("/perm", &history, false);
     assert_eq!(suggestions.len(), 1);
     let mut selected = 0;
     assert_eq!(
@@ -2495,10 +2479,10 @@ fn slash_completion_preserves_recalled_and_queued_commands() {
             &mut selected,
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         ),
-        SlashCompletionAction::Submit("subagents")
+        SlashCompletionAction::Submit("permissions")
     );
     assert_eq!(history.newer(), Some("independent draft"));
-    assert!(slash_suggestions("/subagents list", &history, false).is_empty());
+    assert!(slash_suggestions("/permissions list", &history, false).is_empty());
 }
 
 #[test]
@@ -2686,13 +2670,13 @@ fn m2d_sync_confirmation_cancels_and_sanitizes_paths() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn m3b_sync_tui_join_pull_leave_and_denial() {
+fn m3b_sync_tui_pull_leave_denial_and_no_join() {
     const CHILD: &str = "POLARIS_M3B_TUI_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let home = tempfile::tempdir().unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
-                "tests::m3b_sync_tui_join_pull_leave_and_denial",
+                "tests::m3b_sync_tui_pull_leave_denial_and_no_join",
                 "--exact",
                 "--nocapture",
             ])
@@ -2718,7 +2702,7 @@ fn m3b_sync_tui_join_pull_leave_and_denial() {
     let project = home.join("project");
     std::fs::create_dir(&project).unwrap();
     let state = polaris_core::project::state_dir(&project).unwrap();
-    source_apply::prepare_state(&project, &state).unwrap();
+    private_state::prepare_state(&project, &state).unwrap();
     let peer_project = home.join("peer-project");
     std::fs::create_dir(&peer_project).unwrap();
     std::fs::write(peer_project.join("received.txt"), "peer body\n").unwrap();
@@ -2735,16 +2719,6 @@ fn m3b_sync_tui_join_pull_leave_and_denial() {
         sync_action(&project, &state, &request, true, |_| panic!(
             "queued mutation confirmed"
         ))
-        .is_err()
-    );
-    assert!(
-        sync_action(
-            &project,
-            &state,
-            "join https://user:secret@example.com/x fixture-share fixture-invite 9999999999",
-            false,
-            |_| panic!("invalid invite displayed")
-        )
         .is_err()
     );
     fn state_files(root: &Path) -> std::collections::BTreeMap<PathBuf, Option<Vec<u8>>> {
@@ -2764,22 +2738,20 @@ fn m3b_sync_tui_join_pull_leave_and_denial() {
     }
     drop(polaris_core::apply_owner::ApplyOwnerV1::acquire(&project).unwrap());
     let before_join = state_files(&state);
-    for accepted in [false, true] {
-        assert!(
-            sync_action(&project, &state, &request, false, |view| {
-                assert!(view.revision.contains("fixture-share"));
-                accepted
-            })
-            .is_err()
-        );
-        assert_eq!(state_files(&state), before_join);
-        assert!(matches!(
-            participation::read(&state).unwrap(),
-            participation::ParticipationReadV2::Missing
-        ));
-        assert!(!project.join("received.txt").exists());
-        assert_eq!(peer.head(), head);
-    }
+    // The TUI no longer serves a join: it is refused before it asks anything.
+    assert!(
+        sync_action(&project, &state, &request, false, |_| panic!(
+            "a join is not served here"
+        ))
+        .is_err()
+    );
+    assert_eq!(state_files(&state), before_join);
+    assert!(matches!(
+        participation::read(&state).unwrap(),
+        participation::ParticipationReadV2::Missing
+    ));
+    assert!(!project.join("received.txt").exists());
+    assert_eq!(peer.head(), head);
     // Historical participation is input for C11/C13, not a C08 write
     // through the retired apply adapter or a credential-binding success.
     participation::join(
@@ -2846,13 +2818,13 @@ fn m3b_sync_tui_join_pull_leave_and_denial() {
 
 /// C09: `/sync` and `/sync status` show what this device recorded. The first
 /// line must say so, because nothing on the screen was read from the remote.
-/// The same fixture shows why the command list does not offer `join`: the
-/// confirmed TUI join still cannot be completed.
+/// The same fixture shows that a join is not served here: it is refused
+/// before it asks anything, and `/sync join` answers where to go.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn c09_sync_status_labels_the_local_record_and_join_is_not_offered() {
+fn c09_sync_status_labels_the_local_record_and_join_is_not_served() {
     const CHILD: &str = "POLARIS_C09_SYNC_STATUS_CHILD";
-    const TEST: &str = "tests::c09_sync_status_labels_the_local_record_and_join_is_not_offered";
+    const TEST: &str = "tests::c09_sync_status_labels_the_local_record_and_join_is_not_served";
     if std::env::var_os(CHILD).is_none() {
         let home = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -2893,7 +2865,7 @@ fn c09_sync_status_labels_the_local_record_and_join_is_not_offered() {
     assert!(alone.contains("Shared apply: not participating"), "{alone}");
     assert_eq!(status("status"), alone);
 
-    // A confirmed TUI join is refused and records nothing.
+    // A join is refused and records nothing.
     let remote = home.join("remote-that-does-not-exist");
     let link = ShareLink {
         remote: format!("file://{}", remote.display()),
@@ -2905,18 +2877,19 @@ fn c09_sync_status_labels_the_local_record_and_join_is_not_offered() {
         "join {} {} {} {}",
         link.remote, link.share_id, link.invitation_id, link.expires_unix_seconds
     );
-    let mut asked = false;
     assert!(
         sync_action(&project, &state, &join, false, |_| {
-            asked = true;
-            true
+            panic!("a join must not reach a confirmation")
         })
         .is_err()
     );
-    assert!(asked, "the join reaches its confirmation before it fails");
     assert!(matches!(
         participation::read(&state).unwrap(),
         participation::ParticipationReadV2::Missing
+    ));
+    assert!(matches!(
+        slash::parse(&format!("/sync {join}")),
+        Some(slash::Action::Removed(notice)) if notice.contains("polaris sync join")
     ));
     let sync_description = slash::COMMANDS
         .iter()
@@ -2997,7 +2970,7 @@ fn m2d_c12_confirmation_apply_reopen_and_refusal() {
     std::fs::create_dir(&project).unwrap();
     std::fs::write(project.join("shared.txt"), b"local").unwrap();
     let state = polaris_core::project::state_dir(&project).unwrap();
-    source_apply::prepare_state(&project, &state).unwrap();
+    private_state::prepare_state(&project, &state).unwrap();
     let manifest = ShareManifest {
         version: 1,
         excluded: Vec::new(),
@@ -3169,7 +3142,7 @@ fn m2d_c12_confirmation_apply_reopen_and_refusal() {
     let source_file = unknown_project.join("shared.txt");
     std::fs::write(&source_file, b"untouched").unwrap();
     let unknown_state = polaris_core::project::state_dir(&unknown_project).unwrap();
-    source_apply::prepare_state(&unknown_project, &unknown_state).unwrap();
+    private_state::prepare_state(&unknown_project, &unknown_state).unwrap();
     participation::join(&unknown_state, held.share.clone(), manifest.clone(), 1).unwrap();
     let unknown_repository = SyncRepository::open(SyncPaths::under(&unknown_state)).unwrap();
     unknown_repository.stage_from(&incoming, &manifest).unwrap();
@@ -4408,40 +4381,26 @@ fn append_new_history_renders_correctly_after_compaction_shrinks_less_than_the_t
     assert_eq!(printed_messages, 8);
 }
 
-#[allow(clippy::too_many_arguments)]
 fn call(
     action: slash::Action,
     session: &mut Session,
-    session_path: &std::path::Path,
     status: &mut Status,
-    skills: &[polaris_skills::Skill],
     cwd: &std::path::Path,
     local_lines: &mut Vec<ratatui::text::Line<'static>>,
 ) -> SlashOutcome {
     apply_slash_action(
         action,
         session,
-        session_path,
         status,
         "openai",
         "gpt-5.4",
         polaris_provider::UsageReport::default(),
-        skills,
         cwd,
         cwd,
         cwd,
         false,
         local_lines,
     )
-}
-
-fn skill(name: &str) -> polaris_skills::Skill {
-    polaris_skills::Skill {
-        name: name.to_string(),
-        description: format!("{name} description"),
-        body: String::new(),
-        path: PathBuf::new(),
-    }
 }
 
 // `abbreviate_home` reads `HOME`, which is process-global state —
@@ -4485,54 +4444,18 @@ fn abbreviate_home_leaves_a_path_outside_home_unchanged() {
     assert_eq!(unchanged, "/var/other/place");
 }
 
-#[test]
-fn run_skills_picker_with_none_discovered_dismisses_on_any_key() {
-    let backend = TestBackend::new(70, 14);
-    let terminal = RefCell::new(Terminal::new(backend).expect("terminal"));
-    let mut reader = ScriptedReader(VecDeque::from([KeyCode::Enter]));
-
-    // Must return promptly rather than looping forever on an empty list.
-    run_skills_picker(&terminal, &mut reader, &[]);
-}
-
-#[test]
-fn run_skills_picker_shows_discovered_skills_and_closes_on_enter() {
-    let backend = TestBackend::new(70, 14);
-    let terminal = RefCell::new(Terminal::new(backend).expect("terminal"));
-    let skills = [skill("alpha"), skill("beta")];
-    // Move the highlight once, then close — exercises Down as well as
-    // the close path.
-    let mut reader = ScriptedReader(VecDeque::from([KeyCode::Down, KeyCode::Enter]));
-
-    run_skills_picker(&terminal, &mut reader, &skills);
-
-    let content = terminal
-        .borrow()
-        .backend()
-        .buffer()
-        .content
-        .iter()
-        .map(|c| c.symbol())
-        .collect::<String>();
-    assert!(content.contains("alpha"));
-    assert!(content.contains("beta"));
-}
-
 #[cfg(unix)]
 #[test]
 fn init_creates_agents_md_in_cwd() {
     let mut session = Session::default();
     let mut status = Status::Idle;
     let dir = tempfile::tempdir().expect("temp dir");
-    let session_path = dir.path().join("session.jsonl");
     let mut local_lines = Vec::new();
 
     call(
         slash::Action::Init,
         &mut session,
-        &session_path,
         &mut status,
-        &[],
         dir.path(),
         &mut local_lines,
     );
@@ -4584,7 +4507,6 @@ fn init_does_not_overwrite_an_existing_agents_md() {
     let mut session = Session::default();
     let mut status = Status::Idle;
     let dir = tempfile::tempdir().expect("temp dir");
-    let session_path = dir.path().join("session.jsonl");
     let mut local_lines = Vec::new();
     let agents_md = dir.path().join("AGENTS.md");
     std::fs::write(&agents_md, "existing content").expect("write");
@@ -4592,9 +4514,7 @@ fn init_does_not_overwrite_an_existing_agents_md() {
     call(
         slash::Action::Init,
         &mut session,
-        &session_path,
         &mut status,
-        &[],
         dir.path(),
         &mut local_lines,
     );
@@ -4607,63 +4527,6 @@ fn init_does_not_overwrite_an_existing_agents_md() {
         Status::Notice(n) => assert!(n.contains("already exists")),
         _ => panic!("expected a Notice"),
     }
-}
-
-#[cfg(unix)]
-#[test]
-fn clear_empties_the_session_and_the_persisted_file_in_place() {
-    let mut session = Session::default();
-    session.push_user("something from before");
-    let mut status = Status::Idle;
-    let dir = tempfile::tempdir().expect("temp dir");
-    let session_path = dir.path().join("session.jsonl");
-    let mut local_lines = Vec::new();
-    persist::append_message(&session_path, session.messages.last().unwrap())
-        .expect("seed the file");
-
-    call(
-        slash::Action::Clear,
-        &mut session,
-        &session_path,
-        &mut status,
-        &[],
-        dir.path(),
-        &mut local_lines,
-    );
-
-    assert!(session.messages.is_empty());
-    assert_eq!(
-        std::fs::read_to_string(&session_path).unwrap(),
-        "",
-        "the persisted file should be emptied too, not just the in-memory session"
-    );
-    assert!(matches!(status, Status::Idle));
-}
-
-#[cfg(unix)]
-#[test]
-fn clear_forgets_the_providers_count_of_the_cleared_conversation() {
-    let mut session = Session::default();
-    session.push_user("something from before");
-    session.reported_input = Some(polaris_core::compaction::ReportedInput {
-        tokens: 250_000,
-        messages: 1,
-    });
-    let mut status = Status::Idle;
-    let dir = tempfile::tempdir().expect("temp dir");
-
-    call(
-        slash::Action::Clear,
-        &mut session,
-        &dir.path().join("session.jsonl"),
-        &mut status,
-        &[],
-        dir.path(),
-        &mut Vec::new(),
-    );
-
-    assert!(session.messages.is_empty());
-    assert_eq!(session.reported_input, None);
 }
 
 /// The session's own model: it answers every turn.
@@ -4854,18 +4717,6 @@ async fn a_session_that_replaces_another_still_writes_through_the_attached_facto
     let mut started = 0;
     let mut status = Status::Idle;
     let mut rebuilt: Vec<(&str, Session)> = Vec::new();
-
-    let mut session = old(None);
-    call(
-        slash::Action::Clear,
-        &mut session,
-        &path,
-        &mut status,
-        &[],
-        root,
-        &mut Vec::new(),
-    );
-    rebuilt.push(("/clear", session));
 
     let mut session = old(Some(saved()));
     handle_new_session(
@@ -5110,29 +4961,27 @@ async fn a_turn_stopped_by_esc_leaves_nothing_of_it_in_the_memory() {
 fn new_and_resume_are_never_actually_dispatched_through_apply_slash_action() {
     // `run()` intercepts every one of these before they'd ever reach
     // here (see `handle_new_session`/`handle_resume`/`handle_fork`/
-    // `handle_permissions`/`handle_model`/`run_skills_picker`); this
-    // only guards the defensive fallback arm against silently doing
-    // nothing instead of surfacing that something is wrong.
+    // `handle_permissions`/`handle_model`/`run_decider_command` and the
+    // `Ctrl+O` copy); this only guards the defensive fallback arm against
+    // silently doing nothing instead of surfacing that something is wrong.
     for action in [
         slash::Action::New,
         slash::Action::Resume,
         slash::Action::Fork,
         slash::Action::Permissions,
         slash::Action::Model,
-        slash::Action::Skills,
+        slash::Action::Decider,
+        slash::Action::Copy,
     ] {
         let mut session = Session::default();
         let mut status = Status::Idle;
         let dir = tempfile::tempdir().expect("temp dir");
-        let session_path = dir.path().join("session.jsonl");
         let mut local_lines = Vec::new();
 
         call(
             action,
             &mut session,
-            &session_path,
             &mut status,
-            &[],
             dir.path(),
             &mut local_lines,
         );
@@ -6620,15 +6469,12 @@ fn an_unknown_command_names_itself_in_the_notice() {
     let mut session = Session::default();
     let mut status = Status::Idle;
     let dir = tempfile::tempdir().expect("temp dir");
-    let session_path = dir.path().join("session.jsonl");
     let mut local_lines = Vec::new();
 
     call(
         slash::Action::Unknown("frobnicate".to_string()),
         &mut session,
-        &session_path,
         &mut status,
-        &[],
         dir.path(),
         &mut local_lines,
     );
@@ -6661,9 +6507,7 @@ fn compact_answers_that_compaction_is_automatic_and_touches_nothing() {
         call(
             slash::parse(line).expect("a slash command"),
             &mut session,
-            &session_path,
             &mut status,
-            &[],
             dir.path(),
             &mut local_lines,
         );
@@ -6700,9 +6544,7 @@ fn help_lists_no_compaction_command() {
     call(
         slash::Action::Help,
         &mut session,
-        &dir.path().join("session.jsonl"),
         &mut status,
-        &[],
         dir.path(),
         &mut local_lines,
     );
@@ -6716,9 +6558,10 @@ fn help_lists_no_compaction_command() {
     );
 }
 
-/// The eight commands removed from the TUI, written out here rather than read
-/// back from `slash`, each with a form that carries the old arguments.
-const REMOVED_TUI_COMMANDS: [(&str, &str); 8] = [
+/// Every command, and every form of a listed command, that was removed from
+/// the TUI, written out here rather than read back from `slash`, each with a
+/// form that carries arguments.
+const REMOVED_TUI_COMMANDS: [(&str, &str); 29] = [
     ("/pwd", "/pwd now"),
     ("/sandbox", "/sandbox status"),
     ("/instruction", "/instruction send do the next thing"),
@@ -6727,43 +6570,37 @@ const REMOVED_TUI_COMMANDS: [(&str, &str); 8] = [
     ("/compare", "/compare left | right"),
     ("/run", "/run settings max-turns 5"),
     ("/history", "/history 20"),
+    ("/env", "/env set node --path app"),
+    ("/setting", "/setting git"),
+    ("/session", "/session configure codex gpt-6-astra auto"),
+    ("/goal", "/goal set finish the task"),
+    (
+        "/tool-memory",
+        "/tool-memory endpoint http://127.0.0.1:8080/v1 embed",
+    ),
+    ("/subagents", "/subagents cancel child attempt"),
+    ("/doctor", "/doctor now"),
+    ("/decided", "/decided add keep the ledger"),
+    ("/apply", "/apply run change the title"),
+    ("/phase", "/phase implement"),
+    ("/workflow", "/workflow mode adaptive"),
+    ("/decider", "/decider now"),
+    ("/skills", "/skills list"),
+    ("/clear", "/clear now"),
+    ("/review", "/review focus on the auth changes"),
+    ("/fork", "/fork now"),
+    ("/copy", "/copy now"),
+    ("/compact", "/compact threshold 5000"),
+    (
+        "/mcp configure",
+        "/mcp configure unity --preset unity-local-v2",
+    ),
+    ("/mcp delete", "/mcp delete some-server"),
+    (
+        "/sync join",
+        "/sync join https://example.com/x share invite 9999999999",
+    ),
 ];
-
-#[test]
-fn help_lists_none_of_the_removed_tui_commands_and_still_lists_status() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let mut session = Session::default();
-    let mut status = Status::Idle;
-    let mut local_lines = Vec::new();
-
-    call(
-        slash::Action::Help,
-        &mut session,
-        &dir.path().join("session.jsonl"),
-        &mut status,
-        &[],
-        dir.path(),
-        &mut local_lines,
-    );
-
-    let help: Vec<String> = local_lines.iter().map(ToString::to_string).collect();
-    for (name, _) in REMOVED_TUI_COMMANDS {
-        assert!(
-            help.iter()
-                .all(|line| !line.starts_with(&format!("{name} "))),
-            "{name} is listed: {help:?}"
-        );
-    }
-    // The positive control: the same lines do list a command that stays.
-    assert!(
-        help.iter().any(|line| line.starts_with("/status ")),
-        "{help:?}"
-    );
-    assert!(
-        help.iter().any(|line| line.starts_with("/subagents ")),
-        "{help:?}"
-    );
-}
 
 #[test]
 fn removed_tui_commands_answer_one_notice_and_change_nothing() {
@@ -6804,18 +6641,22 @@ fn removed_tui_commands_answer_one_notice_and_change_nothing() {
     let saved = persisted.snapshot().unwrap();
     let files = project_files(&project);
     let session_path = project.join("session.jsonl");
+    let earlier = vec![ratatui::text::Line::from("earlier local output")];
 
     for (bare, with_arguments) in REMOVED_TUI_COMMANDS {
-        for line in [bare, with_arguments] {
+        for line in [
+            bare.to_owned(),
+            bare.to_uppercase(),
+            with_arguments.to_owned(),
+            with_arguments.to_uppercase(),
+        ] {
             let mut status = Status::Idle;
-            let mut local_lines = Vec::new();
+            let mut local_lines = earlier.clone();
 
             let outcome = call(
-                slash::parse(line).expect("a slash command"),
+                slash::parse(&line).expect("a slash command"),
                 &mut session,
-                &session_path,
                 &mut status,
-                &[],
                 &project,
                 &mut local_lines,
             );
@@ -6823,15 +6664,24 @@ fn removed_tui_commands_answer_one_notice_and_change_nothing() {
             assert!(matches!(outcome, SlashOutcome::Continue), "{line}");
             match status {
                 Status::Notice(notice) => {
-                    assert!(
-                        notice.starts_with(&format!("{bare} was removed.")),
-                        "{notice}"
-                    );
+                    let start = if bare == "/compact" {
+                        "Compaction is automatic.".to_owned()
+                    } else {
+                        format!("{bare} was removed.")
+                    };
+                    assert!(notice.starts_with(&start), "{line}: {notice}");
                     assert!(!notice.contains('\n'), "one line: {notice:?}");
+                    assert!(
+                        unicode_width::UnicodeWidthStr::width(notice.as_str()) <= 78,
+                        "{line}: cut off past 78 columns: {notice}"
+                    );
                 }
                 _ => panic!("expected a Notice for {line}"),
             }
-            assert!(local_lines.is_empty(), "the answer is one line: {line}");
+            assert_eq!(
+                local_lines, earlier,
+                "the answer is the status line: {line}"
+            );
         }
     }
 
@@ -6841,46 +6691,6 @@ fn removed_tui_commands_answer_one_notice_and_change_nothing() {
     let after = persisted.snapshot().unwrap();
     assert_eq!(after.state, saved.state);
     assert_eq!(after.events.len(), saved.events.len());
-}
-
-/// `/subagents` is the one runtime command left. The handler gets the whole
-/// request, name included, and passes on only the words after the name, along
-/// with the run's owner. With no run there is no owner, and the answer says so.
-#[cfg(unix)]
-#[tokio::test]
-async fn subagents_request_passes_its_arguments_and_the_run_owner_on() {
-    for request in ["subagents", "subagents list"] {
-        assert_eq!(
-            handle_runtime_command(request, None).await,
-            Ok(vec!["The current run has no subagent owner".to_owned()]),
-            "{request}"
-        );
-    }
-    let error = handle_runtime_command("subagents wait child attempt", None)
-        .await
-        .unwrap_err();
-    assert!(error.contains("no subagent owner"), "{error}");
-
-    let sandbox = SandboxPolicy::new(polaris_sandbox::SandboxMode::ReadOnly, &[]).unwrap();
-    let mut session = Session::default();
-    let control = install_tui_root_control(
-        &mut session,
-        TuiRootControlArgs {
-            session_id: "subagents-session",
-            turn: 1,
-            sandbox: &sandbox,
-            approval: ApprovalPolicy::Never,
-            mcp_available: false,
-            tool_names: &[],
-            model: "gpt-6-astra",
-            effort: "xhigh",
-        },
-    )
-    .unwrap();
-    let lines = handle_runtime_command("subagents list", Some(&control))
-        .await
-        .unwrap();
-    assert!(lines.iter().any(|line| line == "No subagents"), "{lines:?}");
 }
 
 /// What `/status` shows now that `/pwd` is gone, and the positive control for
@@ -7024,7 +6834,7 @@ async fn handle_model_switches_the_hosted_provider_without_an_effort_step() {
     let mut effort_name = render::DEFAULT_EFFORT.to_string();
     let mut status = Status::Idle;
 
-    handle_model(
+    let chosen = handle_model(
         &terminal,
         &mut reader,
         &mut provider,
@@ -7040,6 +6850,10 @@ async fn handle_model_switches_the_hosted_provider_without_an_effort_step() {
     )
     .await;
 
+    assert!(
+        chosen,
+        "a completed choice is reported so an open chat follows it"
+    );
     assert_eq!(model_name, "gpt-6.1-sol");
     assert_eq!(provider_name, "codex");
     assert_eq!(effort_name, render::DEFAULT_EFFORT);
@@ -7073,7 +6887,7 @@ async fn handle_model_cancelled_with_esc_leaves_everything_untouched() {
     let mut effort_name = render::DEFAULT_EFFORT.to_string();
     let mut status = Status::Idle;
 
-    handle_model(
+    let chosen = handle_model(
         &terminal,
         &mut reader,
         &mut provider,
@@ -7089,11 +6903,62 @@ async fn handle_model_cancelled_with_esc_leaves_everything_untouched() {
     )
     .await;
 
+    assert!(!chosen, "Esc chooses nothing");
     assert_eq!(model_name, "gpt-6-astra");
     assert_eq!(effort_name, render::DEFAULT_EFFORT);
     assert_eq!(*cloud.model.lock().expect("lock"), None);
     assert_eq!(*cloud.effort.lock().expect("lock"), None);
     assert!(matches!(status, Status::Idle));
+}
+
+#[test]
+fn an_unserved_chat_sends_nothing_gets_its_text_back_and_shows_what_it_needs() {
+    let needs = "This chat needs ollama (qwen3:8b), but its server is not reachable.";
+    let mut buffer = String::new();
+    let mut cursor = 0;
+    let mut queue = VecDeque::new();
+    let mut paused = false;
+    let mut status = Status::Idle;
+
+    refuse_unserved_submission(
+        needs,
+        "fix the parser".into(),
+        6,
+        false,
+        &mut buffer,
+        &mut cursor,
+        &mut queue,
+        &mut paused,
+        &mut status,
+    );
+    assert_eq!(buffer, "fix the parser");
+    assert_eq!(cursor, 6);
+    assert!(queue.is_empty() && !paused);
+    assert!(matches!(&status, Status::Error(line) if line == needs));
+
+    // A queued submission goes back to the front of the queue, which stops, and
+    // the draft typed since stays where it is.
+    let mut buffer = "half a thought".to_string();
+    let mut cursor = 4;
+    queue.push_back("later request".into());
+    refuse_unserved_submission(
+        needs,
+        "queued request".into(),
+        0,
+        true,
+        &mut buffer,
+        &mut cursor,
+        &mut queue,
+        &mut paused,
+        &mut status,
+    );
+    assert_eq!(buffer, "half a thought");
+    assert_eq!(cursor, 4);
+    assert_eq!(
+        queue,
+        VecDeque::from(["queued request".into(), "later request".into()])
+    );
+    assert!(paused);
 }
 
 #[test]
@@ -7205,20 +7070,6 @@ fn m3_acceptance_status_includes_usage_and_fixed_capability_truth() {
             line.contains(label) && line.ends_with(value)
         }));
     }
-    let diagnostic = doctor_lines(
-        "openai\nforged",
-        "model\tforged",
-        std::path::Path::new("."),
-        &sandbox,
-        ApprovalPolicy::Never,
-        false,
-    );
-    assert!(
-        diagnostic
-            .iter()
-            .all(|line| !line.to_string().contains(['\n', '\t', '\x1b']))
-    );
-
     for section in [
         "Polaris status (read-only)",
         "Account",
@@ -7316,332 +7167,10 @@ fn status_rows_align_labels_and_keep_values_when_wrapped() {
     assert!(escaped.contains("/tmp/audit\\nforged\\t"), "{escaped}");
 }
 
-fn doctor_facts(workspace_write: Result<String, String>) -> DoctorFacts {
-    DoctorFacts {
-        chatgpt_file: true,
-        api_key_file: false,
-        api_key_env: false,
-        provider_env: None,
-        openai_key: false,
-        codex_credentials: true,
-        sandboxes: vec![
-            ("read-only", Ok("read-only".into())),
-            ("workspace-write", workspace_write),
-        ],
-        capacity: vec![
-            "Memory: synthetic host".into(),
-            "Execution fit: not verified here".into(),
-        ],
-        state: "/synthetic/state (present)".into(),
-        delivered: 7,
-    }
-}
-
-/// C39: configured, available and observed are separate statements. Changing
-/// what is available never changes what is configured, and the observed part
-/// stays "nothing" however much is available.
-#[test]
-fn doctor_keeps_configured_available_and_observed_apart() {
-    let startup = SandboxPolicy::new(polaris_sandbox::SandboxMode::ReadOnly, &[]).unwrap();
-    let report = |approval, facts: &DoctorFacts| {
-        doctor_report(("openai", "gpt-5.4"), &startup, approval, true, facts)
-    };
-    let group = |lines: &[String], prefix: &str| -> Vec<String> {
-        lines
-            .iter()
-            .filter(|line| line.starts_with(prefix))
-            .cloned()
-            .collect()
-    };
-    let broken = report(
-        ApprovalPolicy::Never,
-        &doctor_facts(Err("writable root is missing".into())),
-    );
-    assert_eq!(broken[0], "Diagnostics (read-only)");
-    // Configured first, then available, then the single observed statement.
-    let rank = |line: &String| match line.split(':').next().unwrap() {
-        "Configured" => 0,
-        "Available" => 1,
-        "Observed" => 2,
-        other => panic!("unlabelled line: {other}"),
-    };
-    let ranks: Vec<_> = broken[1..].iter().map(rank).collect();
-    assert!(ranks.is_sorted(), "{broken:#?}");
-    assert_eq!(ranks.iter().filter(|rank| **rank == 0).count(), 3);
-    assert_eq!(ranks.iter().filter(|rank| **rank == 2).count(), 1);
-    assert_eq!(ranks.last(), Some(&2));
-
-    let configured = group(&broken, "Configured:").join("\n");
-    for expected in [
-        "provider=openai, model=gpt-5.4",
-        "sandbox=read-only, approval=Never",
-        "external MCP=true",
-    ] {
-        assert!(configured.contains(expected), "{configured}");
-    }
-    for availability in ["credential", "resolution", "capacity", "available"] {
-        assert!(
-            !configured.to_lowercase().contains(availability),
-            "configured part states {availability}: {configured}"
-        );
-    }
-
-    let available = group(&broken, "Available:").join("\n");
-    for expected in [
-        "ChatGPT credential file=true, API key file=false, environment API key=false",
-        "provider resolution: POLARIS_PROVIDER is not set; a new launch would default to codex",
-        "sandbox read-only: available (read-only)",
-        "sandbox workspace-write: NOT available (writable root is missing)",
-        "state=/synthetic/state (present); delivered always-on instruction lines=7",
-        "decision capacity: Memory: synthetic host",
-        "decision capacity: Execution fit: not verified here",
-    ] {
-        assert!(available.contains(expected), "{expected}\n{available}");
-    }
-
-    let observed = group(&broken, "Observed:");
-    assert_eq!(observed.len(), 1);
-    assert!(observed[0].contains("does not contact"), "{observed:?}");
-    assert!(observed[0].contains("unverified"), "{observed:?}");
-
-    // The sandbox that becomes available changes only the available part.
-    let healthy = report(
-        ApprovalPolicy::Never,
-        &doctor_facts(Ok("workspace-write".into())),
-    );
-    assert_eq!(
-        group(&healthy, "Configured:"),
-        group(&broken, "Configured:")
-    );
-    assert_eq!(group(&healthy, "Observed:"), observed);
-    assert_ne!(group(&healthy, "Available:"), group(&broken, "Available:"));
-    // A different approval policy changes only the configured part.
-    let stricter = report(
-        ApprovalPolicy::OnRequest,
-        &doctor_facts(Err("writable root is missing".into())),
-    );
-    assert_eq!(group(&stricter, "Available:"), group(&broken, "Available:"));
-    assert_ne!(
-        group(&stricter, "Configured:"),
-        group(&broken, "Configured:")
-    );
-}
-
-#[test]
-fn doctor_provider_resolution_follows_the_launch_rule() {
-    assert_eq!(
-        provider_resolution(Some("llamacpp"), true, true),
-        "POLARIS_PROVIDER is set explicitly: llamacpp"
-    );
-    for (openai_key, codex_credentials, chosen) in [
-        (false, false, "openai"),
-        (true, false, "openai"),
-        (true, true, "openai"),
-        (false, true, "codex"),
-    ] {
-        assert_eq!(
-            provider_resolution(None, openai_key, codex_credentials),
-            format!("POLARIS_PROVIDER is not set; a new launch would default to {chosen}"),
-            "key {openai_key}, codex credentials {codex_credentials}"
-        );
-    }
-}
-
-#[test]
-fn doctor_sandbox_availability_is_computed_for_this_project_not_copied_from_startup() {
-    let project = tempfile::tempdir().unwrap();
-    let root = project.path().canonicalize().unwrap();
-    assert_eq!(
-        sandbox_availability(&root, polaris_sandbox::SandboxMode::ReadOnly).unwrap(),
-        "read-only"
-    );
-    let writable = sandbox_availability(&root, polaris_sandbox::SandboxMode::WorkspaceWrite)
-        .expect("a project directory can be made writable");
-    assert!(
-        writable.starts_with(&format!("workspace-write (writable: {}", root.display())),
-        "{writable}"
-    );
-    // A project that does not exist can be read-only but not writable.
-    let missing = root.join("not-created");
-    assert!(sandbox_availability(&missing, polaris_sandbox::SandboxMode::ReadOnly).is_ok());
-    assert!(sandbox_availability(&missing, polaris_sandbox::SandboxMode::WorkspaceWrite).is_err());
-}
-
-#[test]
-fn doctor_reads_availability_from_this_host_without_claiming_a_connection() {
-    let project = tempfile::tempdir().unwrap();
-    let startup = SandboxPolicy::new(polaris_sandbox::SandboxMode::ReadOnly, &[]).unwrap();
-    let text = doctor_lines(
-        "openai",
-        "gpt-5.4",
-        project.path(),
-        &startup,
-        ApprovalPolicy::OnRequest,
-        false,
-    )
-    .iter()
-    .map(ToString::to_string)
-    .collect::<Vec<_>>()
-    .join("\n");
-    for expected in [
-        "Configured: provider=openai, model=gpt-5.4",
-        "Available: provider resolution: POLARIS_PROVIDER ",
-        "Available: sandbox read-only: available (read-only)",
-        "Available: sandbox workspace-write: available (workspace-write (writable: ",
-        "Available: decision capacity: Memory: ",
-        "Available: decision capacity: Execution fit: not verified here",
-        "Observed: nothing.",
-    ] {
-        assert!(text.contains(expected), "{expected}\n{text}");
-    }
-}
-
-#[test]
-fn phase_command_cannot_write_without_managed_owner() {
-    let mut session = Session::new();
-    session.workflow = Some(polaris_core::workflow::SessionWorkflow::new(
-        polaris_core::workflow::WorkflowConfig {
-            enabled: true,
-            ..Default::default()
-        },
-    ));
-    let mut status = Status::Idle;
-    let dir = tempfile::tempdir().expect("temp dir");
-    let persistence = polaris_core::session_store::PersistedSession::create(
-        dir.path(),
-        &dir.path().join("memory.sqlite3"),
-        "project",
-        polaris_core::conversation_state::HistoryMode::Legacy,
-        session.workflow.as_ref(),
-    )
-    .expect("create v2 session");
-    session.attach(persistence).expect("attach v2 session");
-    let session_path = dir.path().join("session.jsonl");
-    let mut local_lines = Vec::new();
-
-    call(
-        slash::Action::Phase("implement".into()),
-        &mut session,
-        &session_path,
-        &mut status,
-        &[],
-        dir.path(),
-        &mut local_lines,
-    );
-    assert_eq!(
-        session.workflow.as_ref().unwrap().state().phase,
-        polaris_core::workflow::Phase::General,
-        "a manual phase command must not bypass M27's approved change-contract gate"
-    );
-    call(
-        slash::Action::Phase("review".into()),
-        &mut session,
-        &session_path,
-        &mut status,
-        &[],
-        dir.path(),
-        &mut local_lines,
-    );
-    assert_eq!(
-        session.workflow.as_ref().unwrap().state().phase,
-        polaris_core::workflow::Phase::General
-    );
-    assert_eq!(
-        session
-            .persistence
-            .as_ref()
-            .expect("v2 persistence")
-            .snapshot()
-            .expect("snapshot")
-            .state
-            .workflow
-            .phase,
-        polaris_core::workflow::Phase::General,
-        "the fallback dispatch must not bypass the management effect owner"
-    );
-    assert!(matches!(status, Status::Error(_)));
-    call(
-        slash::Action::Phase("not-a-phase".into()),
-        &mut session,
-        &session_path,
-        &mut status,
-        &[],
-        dir.path(),
-        &mut local_lines,
-    );
-    assert_eq!(
-        session.workflow.as_ref().unwrap().state().phase,
-        polaris_core::workflow::Phase::General
-    );
-}
-
-#[test]
-fn workflow_command_cannot_write_without_managed_owner() {
-    let mut session = Session::new();
-    session.workflow = Some(polaris_core::workflow::SessionWorkflow::new(
-        polaris_core::workflow::WorkflowConfig {
-            enabled: true,
-            ..Default::default()
-        },
-    ));
-    let mut status = Status::Idle;
-    let dir = tempfile::tempdir().expect("temp dir");
-    let persistence = polaris_core::session_store::PersistedSession::create(
-        dir.path(),
-        &dir.path().join("memory.sqlite3"),
-        "project",
-        polaris_core::conversation_state::HistoryMode::Legacy,
-        session.workflow.as_ref(),
-    )
-    .expect("create v2 session");
-    session.attach(persistence).expect("attach v2 session");
-    let session_path = dir.path().join("session.jsonl");
-    let mut local_lines = Vec::new();
-
-    call(
-        slash::Action::Workflow("mode adaptive".into()),
-        &mut session,
-        &session_path,
-        &mut status,
-        &[],
-        dir.path(),
-        &mut local_lines,
-    );
-    assert_eq!(
-        session.workflow.as_ref().unwrap().config.mode,
-        polaris_core::workflow::WorkflowMode::Manual
-    );
-    assert_eq!(
-        session
-            .persistence
-            .as_ref()
-            .unwrap()
-            .snapshot()
-            .unwrap()
-            .state
-            .workflow_config
-            .unwrap()
-            .config
-            .mode,
-        polaris_core::workflow::WorkflowMode::Manual
-    );
-    assert!(matches!(status, Status::Error(_)));
-
-    call(
-        slash::Action::Workflow("off".into()),
-        &mut session,
-        &session_path,
-        &mut status,
-        &[],
-        dir.path(),
-        &mut local_lines,
-    );
-    assert!(session.workflow.as_ref().unwrap().config.enabled);
-}
-
 #[cfg(unix)]
 #[test]
-fn confirmed_phase_change_records_effect_and_cancel_preserves_session() {
+fn confirmed_startup_workflow_change_records_effect_and_cancel_preserves_session() {
+    use polaris_core::management_effect::workflow_change::WorkflowEffectInventoryV1;
     use polaris_core::management_effect::{ManagementEffectStateV1, ManagementEffectStoreV1};
     use polaris_core::rewind_workspace::{RewindLimits, WorkspaceOwner};
 
@@ -7681,45 +7210,57 @@ fn confirmed_phase_change_records_effect_and_cancel_preserves_session() {
     let mut session = Session::new();
     session.workflow = Some(workflow);
     session.attach(persistence.clone()).unwrap();
-    let terminal = RefCell::new(Terminal::new(TestBackend::new(100, 16)).unwrap());
-    let mut status = Status::Idle;
     let journal = state_dir.join("management-effects-v1/journal.v1.jsonl");
     let before = persistence.snapshot().unwrap();
     let journal_before = std::fs::read(&journal).unwrap();
+    // `--workflow-mode off` on a resumed conversation, as `run()` applies it.
+    let off = polaris_core::workflow::WorkflowConfig {
+        enabled: false,
+        ..Default::default()
+    };
+    let candidate = |session: &Session| workflow_override_candidate(session, &off, &[]).unwrap();
 
-    let mut cancel = ScriptedReader(VecDeque::from([KeyCode::Esc]));
-    handle_managed_workflow_action(
-        &terminal,
-        &mut cancel,
-        slash::Action::Phase("review".into()),
+    let first = candidate(&session);
+    let cancelled = apply_confirmed_workflow_change(
         &mut session,
-        &[],
+        first,
+        WorkflowEffectInventoryV1::F15,
         &workspace,
         &effects,
         &state_dir,
-        false,
-        &mut status,
-    );
+        |_| false,
+    )
+    .unwrap();
+    assert!(matches!(cancelled, WorkflowChangeResult::Cancelled));
+    assert!(session.workflow.as_ref().unwrap().config.enabled);
     assert_eq!(persistence.snapshot().unwrap().state, before.state);
     assert_eq!(std::fs::read(&journal).unwrap(), journal_before);
 
-    let mut accept = ScriptedReader(VecDeque::from([KeyCode::Char('y')]));
-    handle_managed_workflow_action(
-        &terminal,
-        &mut accept,
-        slash::Action::Phase("review".into()),
+    let second = candidate(&session);
+    let changed = apply_confirmed_workflow_change(
         &mut session,
-        &[],
+        second,
+        WorkflowEffectInventoryV1::F15,
         &workspace,
         &effects,
         &state_dir,
-        false,
-        &mut status,
-    );
-    assert!(matches!(status, Status::Notice(_)));
-    assert_eq!(
-        persistence.snapshot().unwrap().state.workflow.phase,
-        polaris_core::workflow::Phase::Review
+        |view| {
+            assert_eq!((view.before_mode, view.after_mode), ("manual", "off"));
+            true
+        },
+    )
+    .unwrap();
+    assert!(matches!(changed, WorkflowChangeResult::Changed));
+    assert!(!session.workflow.as_ref().unwrap().config.enabled);
+    assert!(
+        !persistence
+            .snapshot()
+            .unwrap()
+            .state
+            .workflow_config
+            .unwrap()
+            .config
+            .enabled
     );
     assert_eq!(effects.effects().unwrap().len(), 1);
     assert!(matches!(
@@ -7727,41 +7268,22 @@ fn confirmed_phase_change_records_effect_and_cancel_preserves_session() {
         ManagementEffectStateV1::Completed { .. }
     ));
 
-    let mut disable = ScriptedReader(VecDeque::from([KeyCode::Char('y')]));
-    handle_managed_workflow_action(
-        &terminal,
-        &mut disable,
-        slash::Action::Workflow("off".into()),
+    // The same mode again changes nothing and records nothing.
+    let saved = persistence.snapshot().unwrap().state;
+    let third = candidate(&session);
+    let unchanged = apply_confirmed_workflow_change(
         &mut session,
-        &[],
+        third,
+        WorkflowEffectInventoryV1::F15,
         &workspace,
         &effects,
         &state_dir,
-        false,
-        &mut status,
-    );
-    assert!(matches!(status, Status::Notice(_)));
-    assert!(!session.workflow.as_ref().unwrap().config.enabled);
-    assert_eq!(effects.effects().unwrap().len(), 2);
-
-    let disabled_state = persistence.snapshot().unwrap().state;
-    let disabled_journal = std::fs::read(&journal).unwrap();
-    let mut unused = ScriptedReader(VecDeque::new());
-    handle_managed_workflow_action(
-        &terminal,
-        &mut unused,
-        slash::Action::Phase("implement".into()),
-        &mut session,
-        &[],
-        &workspace,
-        &effects,
-        &state_dir,
-        false,
-        &mut status,
-    );
-    assert!(matches!(status, Status::Error(_)));
-    assert_eq!(persistence.snapshot().unwrap().state, disabled_state);
-    assert_eq!(std::fs::read(&journal).unwrap(), disabled_journal);
+        |_| panic!("no change to confirm"),
+    )
+    .unwrap();
+    assert!(matches!(unchanged, WorkflowChangeResult::NoChange));
+    assert_eq!(persistence.snapshot().unwrap().state, saved);
+    assert_eq!(effects.effects().unwrap().len(), 1);
 }
 
 /// The registry lives under `HOME`, not under the project, so "nothing is
@@ -7782,15 +7304,12 @@ fn mcp_reports_state_into_the_transcript_without_connecting_or_asking_a_model() 
     }
     let mut session = polaris_core::session::Session::new();
     let mut status = Status::Idle;
-    let session_path = dir.path().join("session.jsonl");
     let mut local_lines = Vec::new();
 
     call(
         slash::Action::Mcp(String::new()),
         &mut session,
-        &session_path,
         &mut status,
-        &[],
         dir.path(),
         &mut local_lines,
     );
@@ -7818,71 +7337,6 @@ fn mcp_reports_state_into_the_transcript_without_connecting_or_asking_a_model() 
     assert!(matches!(status, Status::Idle));
 }
 
-#[cfg(unix)]
-#[test]
-fn copy_with_no_assistant_reply_yet_reports_nothing_to_copy() {
-    let mut session = Session::default();
-    session.push_user("hi");
-    let mut status = Status::Idle;
-    let dir = tempfile::tempdir().expect("temp dir");
-    let session_path = dir.path().join("session.jsonl");
-    let mut local_lines = Vec::new();
-
-    call(
-        slash::Action::Copy,
-        &mut session,
-        &session_path,
-        &mut status,
-        &[],
-        dir.path(),
-        &mut local_lines,
-    );
-
-    match status {
-        Status::Notice(n) => assert!(n.contains("nothing to copy")),
-        _ => panic!("expected a Notice"),
-    }
-}
-
-#[test]
-fn apply_copy_action_with_a_reply_wires_it_through_to_the_copy_fn_and_status() {
-    // Exercises the success path `apply_slash_action`'s `Action::Copy`
-    // arm delegates to, without performing real clipboard I/O — an
-    // accidental edit that drops the `*status = ...` assignment, or
-    // wires the wrong session into `copy_last_reply_with`, fails this.
-    let mut session = Session::default();
-    session.push_user("hi");
-    session.push_assistant("the answer is 4", Vec::new());
-    let mut status = Status::Idle;
-
-    apply_copy_action(&session, &mut status, |text| {
-        assert_eq!(text, "the answer is 4");
-        Ok(())
-    });
-
-    match status {
-        Status::Notice(n) => assert!(n.contains("copied")),
-        _ => panic!("expected a Notice"),
-    }
-}
-
-#[test]
-fn apply_copy_action_reports_a_failing_copy() {
-    let mut session = Session::default();
-    session.push_assistant("reply", Vec::new());
-    let mut status = Status::Idle;
-
-    apply_copy_action(&session, &mut status, |_| Err("no tty".to_string()));
-
-    match status {
-        Status::Notice(n) => {
-            assert!(n.contains("can't copy"));
-            assert!(n.contains("no tty"));
-        }
-        _ => panic!("expected a Notice"),
-    }
-}
-
 #[test]
 fn apply_selection_copy_reports_success() {
     let status = apply_selection_copy("hello world", |text| {
@@ -7907,15 +7361,12 @@ fn export_writes_the_conversation_as_markdown() {
     session.push_assistant("it's a coding agent", Vec::new());
     let mut status = Status::Idle;
     let dir = tempfile::tempdir().expect("temp dir");
-    let session_path = dir.path().join("session.jsonl");
     let mut local_lines = Vec::new();
 
     call(
         slash::Action::Export(String::new()),
         &mut session,
-        &session_path,
         &mut status,
-        &[],
         dir.path(),
         &mut local_lines,
     );
@@ -7941,15 +7392,12 @@ fn export_with_a_destination_argument_writes_there_instead() {
     session.push_user("hi");
     let mut status = Status::Idle;
     let dir = tempfile::tempdir().expect("temp dir");
-    let session_path = dir.path().join("session.jsonl");
     let mut local_lines = Vec::new();
 
     call(
         slash::Action::Export("notes.md".to_string()),
         &mut session,
-        &session_path,
         &mut status,
-        &[],
         dir.path(),
         &mut local_lines,
     );
@@ -8106,6 +7554,32 @@ fn handle_permissions_rejects_a_policy_above_startup_never() {
     }
 }
 
+/// `/login decider` is the old `/decider`: it parses to the same action, and
+/// that action opens the decider choice, which Esc leaves without saving.
+#[test]
+fn login_decider_opens_the_decider_choice() {
+    assert!(matches!(
+        slash::parse("/login decider"),
+        Some(slash::Action::Decider)
+    ));
+    let dir = tempfile::tempdir().expect("temp dir");
+    let terminal = RefCell::new(Terminal::new(TestBackend::new(90, 24)).expect("terminal"));
+    let mut reader = ScriptedReader(VecDeque::from([KeyCode::Esc]));
+
+    let status = run_decider_command(&terminal, &mut reader, dir.path());
+
+    let screen = terminal
+        .borrow()
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(screen.contains("Choose a decider"), "{screen}");
+    assert!(matches!(status, Status::Idle));
+}
+
 #[test]
 fn handle_permissions_can_narrow_and_restore_startup_on_request() {
     let backend = TestBackend::new(70, 14);
@@ -8225,15 +7699,12 @@ fn diff_reports_no_changes_outside_a_git_repository() {
     let mut session = Session::default();
     let mut status = Status::Idle;
     let dir = tempfile::tempdir().expect("temp dir");
-    let session_path = dir.path().join("session.jsonl");
     let mut local_lines = Vec::new();
 
     let outcome = call(
         slash::Action::Diff,
         &mut session,
-        &session_path,
         &mut status,
-        &[],
         dir.path(),
         &mut local_lines,
     );
@@ -8243,7 +7714,7 @@ fn diff_reports_no_changes_outside_a_git_repository() {
 }
 
 #[test]
-fn help_lists_every_registered_command_in_scrollback() {
+fn help_lists_the_fifteen_commands_in_order_then_the_keys() {
     let dir = tempfile::tempdir().expect("temp dir");
     let mut session = Session::default();
     let mut status = Status::Idle;
@@ -8251,116 +7722,55 @@ fn help_lists_every_registered_command_in_scrollback() {
     let outcome = call(
         slash::Action::Help,
         &mut session,
-        &dir.path().join("session.jsonl"),
         &mut status,
-        &[],
         dir.path(),
         &mut local_lines,
     );
 
     assert!(matches!(outcome, SlashOutcome::Continue));
-    assert_eq!(local_lines.len(), slash::COMMANDS.len() + 1);
-    for (line, command) in local_lines.iter().skip(1).zip(slash::COMMANDS) {
-        assert_eq!(
-            line.to_string(),
-            format!("/{} — {}", command.name, command.description)
-        );
+    let help: Vec<String> = local_lines.iter().map(ToString::to_string).collect();
+    // The commands, written out here instead of read back from `slash`.
+    let names = [
+        "model",
+        "new",
+        "resume",
+        "status",
+        "diff",
+        "permissions",
+        "mcp",
+        "login",
+        "logout",
+        "memory",
+        "sync",
+        "export",
+        "init",
+        "help",
+        "quit",
+    ];
+    assert_eq!(help[0], "commands:");
+    for (line, name) in help[1..].iter().zip(names) {
+        assert!(line.starts_with(&format!("/{name} — ")), "{name}: {line}");
+        assert!(line.len() > name.len() + 5, "{name} has no description");
     }
-    assert!(local_lines.last().unwrap().to_string().contains("/quit"));
-}
-
-/// `(cfg, name)` for each line that opens with a `target_os` attribute and is
-/// followed by a line `name_of` can read a name from.
-fn target_os_pairs(
-    source: &str,
-    name_of: impl Fn(&str) -> Option<String>,
-) -> std::collections::BTreeSet<(String, String)> {
-    let lines: Vec<&str> = source.lines().map(str::trim).collect();
-    lines
-        .windows(2)
-        .filter(|pair| {
-            pair[0].starts_with("#[cfg(target_os = \"")
-                || pair[0].starts_with("#[cfg(not(target_os = \"")
-        })
-        .filter_map(|pair| Some((pair[0].to_owned(), name_of(pair[1])?)))
-        .collect()
-}
-
-fn identifier(text: &str) -> Option<String> {
-    let name: String = text
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric())
-        .collect();
-    (!name.is_empty()).then_some(name)
-}
-
-/// The `Action` a handler arm matches, as `slash::Action::Name` or
-/// `Some(slash::Action::Name`.
-fn arm_variant(line: &str) -> Option<String> {
-    identifier(
-        line.trim_start_matches("Some(")
-            .strip_prefix("slash::Action::")?,
-    )
-}
-
-/// A variant declaration such as `Name(String),`.
-fn declared_variant(line: &str) -> Option<String> {
-    let name = identifier(line)?;
-    (name.starts_with(|c: char| c.is_ascii_uppercase()) && line[name.len()..].starts_with('('))
-        .then_some(name)
-}
-
-/// Arms in `handlers` that exist on one platform while the command is
-/// recognized on every platform: `actions` does not gate the variant the same
-/// way, and `dispatcher` does not serve it on the other platforms.
-fn arms_without_a_route_elsewhere(handlers: &str, actions: &str, dispatcher: &str) -> Vec<String> {
-    let declared = target_os_pairs(actions, declared_variant);
-    let served = target_os_pairs(dispatcher, arm_variant);
-    target_os_pairs(handlers, arm_variant)
-        .into_iter()
-        .filter(|(cfg, variant)| {
-            let other = cfg
-                .replace("(target_os", "(not(target_os")
-                .replace("\")]", "\"))]");
-            !declared.contains(&(cfg.clone(), variant.clone()))
-                && !served.contains(&(other, variant.clone()))
-        })
-        .map(|(cfg, variant)| format!("{variant} has a {cfg} arm"))
-        .collect()
-}
-
-/// T01: a handler arm compiled for one platform must belong to a command that
-/// exists only there, or be served by the dispatcher everywhere else. Otherwise
-/// the other platforms list the command and end in the unconnected fallback.
-#[test]
-fn single_platform_handler_arms_belong_to_single_platform_commands() {
-    let handlers = include_str!("../lib.rs");
-    let actions = include_str!("../slash.rs");
-    let dispatcher = include_str!("../command_dispatch.rs");
-    // The scan must see the arms it exists to check.
-    let arms = target_os_pairs(handlers, arm_variant);
-    for variant in ["WorkspaceControl", "Apply", "Decided"] {
+    // Then the keys, ending the output.
+    assert_eq!(help[names.len() + 1], "keys:");
+    let keys = &help[names.len() + 2..];
+    assert_eq!(keys.len(), 5, "{keys:?}");
+    for (line, key) in keys
+        .iter()
+        .zip(["Esc", "Esc Esc", "Ctrl+C", "Ctrl+O", "PageUp / PageDown"])
+    {
+        assert!(line.starts_with(&format!("{key} — ")), "{key}: {line}");
+    }
+    assert!(matches!(status, Status::Notice(_)));
+    // No removed command is listed or named as a command in the output.
+    for (bare, _) in REMOVED_TUI_COMMANDS {
         assert!(
-            arms.iter().any(|(_, found)| found == variant),
-            "no {variant} arm found"
+            help.iter()
+                .all(|line| !line.starts_with(&format!("{bare} "))),
+            "{bare} is listed: {help:?}"
         );
     }
-    assert_eq!(
-        arms_without_a_route_elsewhere(handlers, actions, dispatcher),
-        Vec::<String>::new()
-    );
-
-    // And it reports an arm whose command the other platforms still list.
-    let arm = "#[cfg(target_os = \"linux\")]\n    slash::Action::Feature(x) => {}\n";
-    let ungated = "    Feature(String),\n";
-    let gated = "    #[cfg(target_os = \"linux\")]\n    Feature(String),\n";
-    let served = "    #[cfg(not(target_os = \"linux\"))]\n    slash::Action::Feature(x) => {}\n";
-    assert_eq!(
-        arms_without_a_route_elsewhere(arm, ungated, ""),
-        ["Feature has a #[cfg(target_os = \"linux\")] arm"]
-    );
-    assert!(arms_without_a_route_elsewhere(arm, gated, "").is_empty());
-    assert!(arms_without_a_route_elsewhere(arm, ungated, served).is_empty());
 }
 
 #[test]
@@ -8383,15 +7793,12 @@ fn diff_shows_no_changes_in_a_clean_git_repository() {
 
     let mut session = Session::default();
     let mut status = Status::Idle;
-    let session_path = dir.path().join("session.jsonl");
     let mut local_lines = Vec::new();
 
     call(
         slash::Action::Diff,
         &mut session,
-        &session_path,
         &mut status,
-        &[],
         dir.path(),
         &mut local_lines,
     );
@@ -8425,15 +7832,12 @@ fn diff_shows_an_actual_uncommitted_change() {
 
     let mut session = Session::default();
     let mut status = Status::Idle;
-    let session_path = dir.path().join("session.jsonl");
     let mut local_lines = Vec::new();
 
     call(
         slash::Action::Diff,
         &mut session,
-        &session_path,
         &mut status,
-        &[],
         dir.path(),
         &mut local_lines,
     );
@@ -8462,14 +7866,11 @@ fn diff_shows_untracked_file_in_an_unborn_repository() {
 
     let mut session = Session::default();
     let mut status = Status::Idle;
-    let session_path = dir.path().join("session.jsonl");
     let mut local_lines = Vec::new();
     call(
         slash::Action::Diff,
         &mut session,
-        &session_path,
         &mut status,
-        &[],
         dir.path(),
         &mut local_lines,
     );
@@ -8502,14 +7903,11 @@ fn diff_shows_staged_file_in_an_unborn_repository() {
 
     let mut session = Session::default();
     let mut status = Status::Idle;
-    let session_path = dir.path().join("session.jsonl");
     let mut local_lines = Vec::new();
     call(
         slash::Action::Diff,
         &mut session,
-        &session_path,
         &mut status,
-        &[],
         dir.path(),
         &mut local_lines,
     );
@@ -8537,9 +7935,7 @@ fn diff_hostile_environment_child() {
     call(
         slash::Action::Diff,
         &mut session,
-        &project.join("session.jsonl"),
         &mut status,
-        &[],
         &project,
         &mut local_lines,
     );
@@ -8641,9 +8037,7 @@ fn diff_bounds_large_git_output() {
     call(
         slash::Action::Diff,
         &mut session,
-        &dir.path().join("session.jsonl"),
         &mut status,
-        &[],
         dir.path(),
         &mut local_lines,
     );
@@ -8658,40 +8052,6 @@ fn diff_bounds_large_git_output() {
         "{rendered}"
     );
     assert!(!rendered.contains("large.txt"), "{rendered}");
-}
-
-#[cfg(unix)]
-#[test]
-fn clear_also_empties_local_lines_from_a_previous_diff() {
-    let mut session = Session::default();
-    let mut status = Status::Idle;
-    let dir = tempfile::tempdir().expect("temp dir");
-    let session_path = dir.path().join("session.jsonl");
-    let mut local_lines = vec![ratatui::text::Line::from("leftover diff output")];
-
-    call(
-        slash::Action::Clear,
-        &mut session,
-        &session_path,
-        &mut status,
-        &[],
-        dir.path(),
-        &mut local_lines,
-    );
-
-    assert!(local_lines.is_empty());
-}
-
-#[test]
-fn review_prompt_with_no_extra_text_is_the_bare_instruction() {
-    assert_eq!(review_prompt(""), REVIEW_INSTRUCTION);
-}
-
-#[test]
-fn review_prompt_appends_the_extra_text_when_given() {
-    let p = review_prompt("the auth module");
-    assert!(p.starts_with(REVIEW_INSTRUCTION));
-    assert!(p.contains("the auth module"));
 }
 
 #[test]

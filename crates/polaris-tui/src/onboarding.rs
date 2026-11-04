@@ -246,7 +246,7 @@ pub fn save_jev_and_enable(setup: &DeciderSetup, key: &str) -> Result<DeciderRes
 }
 
 /// The decider step shown after a successful subscription sign-in and by
-/// `/decider`. Sign-in already succeeded, so Esc, "No decider", a failed
+/// `/login decider`. Sign-in already succeeded, so Esc, "No decider", a failed
 /// draw or a save error all end the step without failing it.
 pub fn decider_step<B: ratatui::backend::Backend>(
     terminal: &mut ratatui::Terminal<B>,

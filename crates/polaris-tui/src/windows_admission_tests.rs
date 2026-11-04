@@ -34,25 +34,20 @@ fn contents(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
 fn windows_unavailable_owner_preserves_rejected_submission() {
     for text in [
         "実行してください",
-        "/review",
         "/init",
-        "/clear",
         "/export saved.md",
         "/resume",
         "/new",
-        "/fork",
+        "/new fork",
         "/model",
         "/permissions",
-        "/copy",
         "/logout",
-        "/phase plan",
-        "/workflow manual",
         "/login",
+        "/login decider",
         "/memory import source.md",
+        "/memory configure on",
         "/mcp prompt select fixture",
         "/sync apply",
-        "/session configure fixture",
-        "/subagents cancel child attempt",
     ] {
         let mut buffer = text.to_owned();
         let mut cursor = text.chars().next().unwrap().len_utf8();
@@ -66,7 +61,7 @@ fn windows_unavailable_owner_preserves_rejected_submission() {
     }
     // Popup admission uses the resolved action, not the typed prefix.
     assert_eq!(
-        require_action_owner(&slash::action_for("review")),
+        require_action_owner(&slash::action_for("model")),
         Err(WINDOWS_OWNER_UNAVAILABLE)
     );
 }
@@ -76,20 +71,21 @@ fn windows_read_only_slash_submission_remains_available() {
     for text in [
         "/help",
         "/status",
-        "/doctor",
-        "/skills",
         "/diff",
-        "/decided list",
         "/memory search fixture",
         "/memory get fixture",
         "/memory source fixture",
         "/mcp list",
-        "/phase",
-        "/workflow",
-        "/session current",
-        "/subagents list",
+        "/login list",
         "/sync status",
         "/quit",
+        // A removed command only answers where to go instead.
+        "/doctor",
+        "/skills",
+        "/phase",
+        "/subagents list",
+        "/mcp configure unity",
+        "/sync join remote share invite 9999999999",
     ] {
         let mut buffer = text.to_owned();
         let mut cursor = buffer.len();
@@ -198,7 +194,6 @@ fn windows_unavailable_owner_blocks_direct_slash_mutations() {
     fs::write(root.path().join("journal.json"), b"journal before").unwrap();
     for action in [
         slash::Action::Init,
-        slash::Action::Clear,
         slash::Action::Export(root.path().join("export.md").display().to_string()),
         slash::Action::Copy,
         slash::Action::Logout,
@@ -213,12 +208,10 @@ fn windows_unavailable_owner_blocks_direct_slash_mutations() {
             apply_slash_action(
                 action,
                 &mut session,
-                &session_path,
                 &mut status,
                 "fixture",
                 "fixture",
                 polaris_provider::UsageReport::default(),
-                &[],
                 root.path(),
                 root.path(),
                 root.path(),
@@ -253,12 +246,10 @@ fn windows_read_only_slash_dispatch_preserves_project_and_session() {
             apply_slash_action(
                 action,
                 &mut session,
-                &root.path().join("session.json"),
                 &mut status,
                 "fixture",
                 "fixture",
                 polaris_provider::UsageReport::default(),
-                &[],
                 root.path(),
                 root.path(),
                 root.path(),

@@ -93,15 +93,6 @@ impl ConversationViewState {
         self.history_wrap_cache.invalidate();
     }
 
-    pub(super) fn extend_text_lines(&mut self, lines: impl IntoIterator<Item = String>) {
-        self.history
-            .extend(lines.into_iter().map(|line| render::HistoryLine {
-                line: Line::from(line),
-                shaded: false,
-            }));
-        self.history_wrap_cache.invalidate();
-    }
-
     pub(super) fn observe_compaction(&mut self, messages_before: usize, messages_after: usize) {
         self.printed_messages = self
             .printed_messages

@@ -1,6 +1,6 @@
 # コマンドの役割と出力
 
-2026-10-26時点のソースを基にした一覧。生成するhelp・ログ・エラーは英語で表示する。主な対象はmacOSの対話TUIとCLIである。出力例の`<ID>`・`<path>`・数値は説明用で、実際の実行結果ではない。表中の日本語は表示内容の説明であり、生成する実際の文言は英語である。設定や保存状態によって、確認画面やエラーが先に出る場合がある。
+2026-11-03時点のソースを基にした一覧。生成するhelp・ログ・エラーは英語で表示する。主な対象はmacOSの対話TUIとCLIである。出力例の`<ID>`・`<path>`・数値は説明用で、実際の実行結果ではない。表中の日本語は表示内容の説明であり、生成する実際の文言は英語である。設定や保存状態によって、確認画面やエラーが先に出る場合がある。
 
 - [TUIコマンド一覧](#tuiコマンド一覧)
 - [シェルで使うCLI](#シェルで使うcli)
@@ -16,80 +16,90 @@
 | モデルに送る文章 | `このプログラムの構成を説明して` | モデルが応答し、必要に応じてツールを呼ぶ。 |
 | モデル内部のツール | 画面に出る`read(...)`や`skill(...)` | モデルが選ぶ操作。スラッシュコマンドとして直接入力するものではない。 |
 
-TUIでは`/`で候補を出し、入力で絞り込み、↑↓とEnterで選ぶ。引数が必要な操作は、入力欄にコマンド全文を書く。例えば`/subagents cancel <child-id> <attempt-id>`では、`<...>`を一覧に出た実際のIDへ置き換える。
+TUIでは`/`で候補を出し、入力で絞り込み、↑↓とEnterで選ぶ。引数が必要な操作は、入力欄にコマンド全文を書く。例えば`/login use <ID>`では、`<...>`を`/login list`に出た実際の登録IDへ置き換える。
 
-実行中（working）も補完を使える。`/subagents`は実行中に処理される。ほかのコマンドとコマンドではない文章は待ち行列へ入り、実行終了後に処理される。秘密入力の操作は実行中には受け付けない。
+実行中（working）も補完を使える。コマンドとコマンドではない文章は待ち行列へ入り、実行終了後に処理される。秘密入力の操作は実行中には受け付けない。
 
 ## TUIコマンド一覧
 
-### 環境構築（macOS arm64）
+`/help`・`/`の候補・補完に載るコマンドは、次の15個である。この順に並ぶ。
 
-| コマンド | 役割 | 主な出力 |
+`/model`・`/new`・`/resume`・`/status`・`/diff`・`/permissions`・`/mcp`・`/login`・`/logout`・`/memory`・`/sync`・`/export`・`/init`・`/help`・`/quit`
+
+`/exit`と`/q`は`/quit`の別名で、候補には出ない。`/new fork`は旧`/fork`、`/login decider`は旧`/decider`にあたる。ここにない名前は、引数を付けても、大文字で入力しても何も実行しない。削除した名前は、代わりの操作を1行で答える（[削除したTUIコマンド](#削除したtuiコマンド)）。
+
+### モデルと承認
+
+| コマンド | 役割 | 主な出力・反映時期 |
 | --- | --- | --- |
-| `/env set <profile> [--version <constraint>] [--path <directory>]` | 1回の計画承認から固定資源の取得、private runtime、offline導入、検証まで進める。モデル呼出なし。 | 対象・版・資源数/bytes・SHA-256・作成先・保存先の確認。完了時に`Environment verified`とreceipt。 |
-| `env set <profile> ...` | 入力全文が同じ構文に一致する場合だけ、上記の直接操作として扱う。 | 上と同じ。自然文や引用中の部分一致は実行しない。 |
-| `/env plan <profile> ...` | 対象を読み取り、固定計画をprivate領域へ保存する。取得・導入はしない。 | 計画の概要、SHA-256、plan/definitionの保存先。 |
-| `/env status` | 固定profileと対応版を列挙する。 | `available`と、実行ごとのreceiptで検証を区別する案内。 |
-| `/env status --operation <retained-root>` | 保存済み操作を読み取り照合する。 | stage・outcome・一致/競合・未完了のJSON。 |
-| `/env recover --operation <retained-root>` | 検証済みreceiptに基づき、欠けた最終管理記録だけを補う。 | 照合結果。通信・process・publishは繰り返さない。 |
+| `/model` | 次のターンで使うモデルを選ぶ。保存したモデルを選べず送信が止まった会話も、ここで選べば続けられる。 | `gpt-6-astra`、`gpt-6.1-sol`、`gpt-6.1-terra`、`gpt-6-luna`、`Local model`の選択画面。成功時`model set to <model>`。 |
+| `/permissions` | 起動時に許された範囲で承認方針を選ぶ。 | Never / OnRequest / Alwaysの選択画面と`permissions set to <policy>`。起動時の境界を超える選択は拒否し、再起動用の引数を案内する。 |
 
-profileは`node`・`nextjs`・`react`・`vue`・`svelte`・`astro`・`nuxt`・`angular`・`python`・`rust`・`go`。対応外の版・OS・CPUは拒否する。相対pathと省略時の対象は起動時cwdを基準にする。既存manifest/lock/sourceは保持し、既存の依存treeを削除・上書きしない。安全に対応できる固定依存に限定し、更新や再生成が必要なら停止する。
+`/model`の`Local model`はloopbackのOllama/LM Studioへモデル在庫を問い合わせる。ツール対応を確認できたモデルを選び、成功時に`local model set to Ollama · <model>`等を表示する。候補がなければ`no connected local models`。推論強度を選ぶ画面ではない。
 
-実行中はEscまたはCtrl-Cで停止を要求できる。停止・失敗時のprivate資源と部分反映は保持し、未検証を成功と表示しない。常駐dev serverやglobal設定の変更は行わない。
+workflowの実行方式と段階を、TUIの中で変えるコマンドはない。起動時の`--workflow-mode`・`--phase`、または設定の`[workflow]`で決める（[利用ガイド](usage.md#workflowと厳密履歴)）。
 
 ### 状態・ヘルプ・表示
 
 | コマンド | 役割 | 主な出力 |
 | --- | --- | --- |
-| `/help`、`/` | 利用できるコマンドを調べる。 | `commands:`に続くコマンド名と説明の一覧。一覧と`/`の候補に載るのは、今のOSで経路が接続されているコマンドだけ（macOSでは`/setting`と`/apply`を載せない）。 |
 | `/status` | 現在の設定、利用条件、使用量、workflow、管理状態を確認する。モデルへの送信や接続確認は行わない。 | アカウント・利用条件・usage/workflow・可用性・管理診断を項目ごとに表示。対話ID、project root（canonicalize済み）、保存済みログイン状態・使用登録、provider/model/effort、承認・sandbox、tokens、phase/skills、未確認事項、audit、CAT等。 |
-| `/doctor` | 設定済み（Configured）・利用可能（Available）・観測済み（Observed）を分けて診断する。認証・モデル・MCPには接続しない。 | `Configured:`にprovider/model、起動時のsandboxと承認方針、外部MCPの上限。`Available:`に認証ファイル・環境キーの有無、provider解決（`POLARIS_PROVIDER`の明示、なければ次回起動時の既定）、read-onlyとworkspace-writeそれぞれのsandboxの可否、容量の観測（物理メモリ。統合メモリの機種では容量帯の目安も出る）、状態保存先、AGENTS到達量。`Observed:`は接続をしていない旨だけ。続けてMCP・CAT・巻き戻し・管理診断。認証値は表示しない。 |
 | `/diff` | 未コミットの変更を見る。 | `diff:`に続く未stage・stage済みの差分。未追跡ファイルは`?? <path>`で名前だけを表示。最大200行、変更なしなら`(no changes)`。 |
-| `/skills` | 検出されたskillを閲覧する。 | 名前・説明・探索元を一覧表示。↑↓で選び、Enter/Escで閉じる。選択による有効化は行わない。 |
+| `/help`、`/` | 利用できるコマンドと主なキーを調べる。 | `commands:`に続く15個のコマンド名と説明、続けて`keys:`とキーの一覧。 |
 
 `/status`のtokensは観測済みの使用量であり、アカウントの残り利用枠ではない。認証・モデル・MCPの接続や、capacityの空きを確認済みという意味でもない。
 
-`/doctor`の`Available:`は手元のファイルとホストを読んだ結果で、接続の成功を意味しない。sandboxの可否は、その方式の方針を組み立てられるかの確認であり、実行の保証ではない。容量の観測は物理メモリの読取りで、モデルを動かせるかの判定ではない。`Configured:`は`Available:`の結果で変わらず、`Observed:`は接続を行うまで未検証のままである。CLIの`polaris doctor`にあるsandboxの可否・provider解決・容量の観測は、TUIでは`Available:`に出る。provider解決は、登録済みアカウントがあれば起動時と同じくそれもChatGPT認証として数える。
+### キー操作
 
-### モデル・承認・workflow
+`/help`の`keys:`には、次の操作が出る。
 
-| コマンド | 役割 | 主な出力・反映時期 |
-| --- | --- | --- |
-| `/model` | 次のターンで使うモデルを選ぶ。 | `gpt-6-astra`、`gpt-6.1-sol`、`gpt-6.1-terra`、`gpt-6-luna`、`Local model`の選択画面。成功時`model set to <model>`。 |
-| `/permissions` | 起動時に許された範囲で承認方針を選ぶ。 | Never / OnRequest / Alwaysの選択画面と`permissions set to <policy>`。起動時の境界を超える選択は拒否し、再起動用の引数を案内する。 |
+| キー | 動作 |
+| --- | --- |
+| `Esc` | 実行中は実行を止め、実行中の子（subagent）にも停止を要求する。すでに起動したOSサブプロセスは強制終了しない。 |
+| `Esc` `Esc` | 入力欄が空の待機中に続けて2回押すと、巻き戻す位置を選べる。 |
+| `Ctrl+C` | 実行中は`Esc`と同じく実行を止める。待機中は2回押すと終了する。 |
+| `Ctrl+O` | 最後の本文があるassistant返答をclipboardへコピーする。確認画面が出る。実行中に押すと、実行の終了後に押し直すよう案内する。 |
+| `PageUp`・`PageDown` | 会話をスクロールする。実行中も使える。 |
 
-`/model`の`Local model`はloopbackのOllama/LM Studioへモデル在庫を問い合わせる。ツール対応を確認できたモデルを選び、成功時に`local model set to Ollama · <model>`等を表示する。候補がなければ`no connected local models`。推論強度を選ぶ画面ではない。
+ログイン画面・ダイアログ・実行中も、可視文字をドラッグして離すと選択範囲を直接clipboardへコピーする。非表示の秘密値は対象外で、追加の確認画面は表示しない。リンクはCtrl-click、端末が通知する場合はCmd-clickで開く。通常のクリック・ドラッグでは開かない。Terminal.appのCmd＋単クリックは未対応であり、Ctrl-clickを使う。
 
-| workflowコマンド | 役割 | 主な出力 |
-| --- | --- | --- |
-| `/phase [段階]` | 現在の段階を表示し、指定時は確認後に次ターンの段階を保存する。 | `ワークフロー段階: <段階>`。値はgeneral/brainstorm/specify/implement/review/verify/deliver。 |
-| `/workflow` | 現在の実行方式を見る。 | `workflow: manual/adaptive/off`。 |
-| `/workflow [mode] manual\|adaptive\|off` | 確認後、実行方式を保存する。 | 保存後のmode。`mode`という語は省略できる。 |
+macOSでは、会話に表示された実在するファイル名やローカルパスを宛先とするMarkdownリンクをCtrl-click（端末対応時はCmd-click）すると、Finderでそのファイルの所在を表示する。ファイル自体は開かない。相対パスはproject rootから解決し、`src/main.rs:12:3`のような行・列指定にも対応する。日本語・折り返されたパス、インラインコードで示された空白入りのファイル名も対象になる。ドラッグ操作は範囲選択として扱う。Webリンクや存在しないファイルはFinderで開かない。
 
 ### 会話の作成・再開・保存
 
 | コマンド | 役割 | 主な出力・操作 |
 | --- | --- | --- |
-| `/new` | 元会話を残し、空の会話を始める。 | 会話画面をresetして待機状態へ戻る。新しいIDは`/session`で確認できる。 |
-| `/resume` | 保存会話を選んで開く。 | `resume a conversation`と、経過時間・message数・previewの一覧。↑↓で移動、Enterで選択、Escで取消。候補1件なら選択位置は変わらない。 |
-| `/fork` | 現在の履歴を別の会話IDへ複製する。 | `v2セッションへ分岐しました: <ID>`。 |
-| `/session`、`/session current` | 会話IDと現在・保存済みの設定を確認する。 | `会話: <ID> / 世代 <n>`、`現在provider: ... / model: ...`、保存provider/model/effort、履歴・remember・tool-memory等。 |
-| `/clear` | 確認後、会話の現在の区間（epoch）を消去する。turn-onlyの記憶も捨てる。 | `T08 complete`。過去の証拠は保持されるため、全履歴ファイルの削除とは異なる。 |
-| `/review [追加指示]` | 現在の未コミット変更のレビューをモデルへ依頼する。 | 通常のモデル応答とツールの実行状況。追加指示をレビューpromptに含める。 |
+| `/new` | 元会話を残し、空の会話を始める。 | 会話画面をresetして待機状態へ戻る。新しいIDは`/status`の`Session ID`で確認できる。 |
+| `/new fork` | 現在の履歴を別の会話IDへ複製して分岐する。`/model`で選んだproviderは引き継ぐ。 | `v2セッションへ分岐しました: <ID>`。 |
+| `/resume` | 保存会話を選んで開く。保存したprovider・モデルが選べるときは、それを最初から選ぶ。 | `resume a conversation`と、経過時間・message数・previewの一覧。↑↓で移動、Enterで選択、Escで取消。候補1件なら選択位置は変わらない。 |
 | `/export [path]` | 確認後、会話原文のeventをMarkdownへ新規保存する。 | `T17 完了: <path>`。省略時は`polaris-export-<時刻>.md`。既存ファイルは上書きせず、上限16MiB。 |
-| `/copy` | 確認後、最後の本文があるassistant返答をclipboardへコピーする。 | `T19 完了`。 |
 | `/init` | 確認後、project rootに`AGENTS.md`の雛形を新規作成する。 | `T10 完了: <path>`。既存ファイルは上書きしない。 |
 | `/quit`、`/exit`、`/q` | TUIを終了する。 | 保存会話があれば`Resume this session with: polaris --resume <ID>`。未処理入力や下書きがあれば終了を拒否する場合がある。 |
 
-`/resume`で会話を開いても、現在の作業ファイルと保存状態が一致しない場合は閲覧のみになる。`/new`・`/fork`・`/resume`は別の操作であり、IDは`/session current`で確認できる。
+`/resume`で会話を開いても、現在の作業ファイルと保存状態が一致しない場合は閲覧のみになる。`/new`・`/new fork`・`/resume`は別の操作であり、IDは`/status`の`Session ID`で確認できる。
+
+別の会話を開く操作（`--resume`での起動、`/resume`）は、その会話に保存したproviderとモデルを、このプロセスが提供できるとき最初から選ぶ。`/new fork`と巻き戻しは、今開いている会話の子を作る操作なので、保存したproviderを選び直さず、今使っているproviderを引き継ぐ。子は親の保存設定を複製するが、`/model`はその設定を書き換えないため、選び直すと、人が選んでいないのに`/model`で選んだ先から親の保存したproviderへ戻ってしまう。
+
+- 保存したローカルモデル（`ollama`・`lmstudio`）は、`/model`の`Local model`と同じ経路で選ぶ。loopbackのサーバーから在庫を取得し、保存したモデルがあってツール対応を確認できたものを、ローカルの実行枠へ束縛する。現在のモデルは置き換わり、推論強度の表示は空になる。
+- 保存したホスト型のモデル（`codex`・`openai`）は、起動したproviderが同じときに選ぶ。`/model`でローカルモデルへ移っていても、`/resume`でホスト型の会話を開けば起動したproviderへ戻る。
+- 設定を保存していない会話（`/memory configure`などで設定を一度も保存していない会話）は保存先が無く、現在の選択のまま動く。会話を開いた後に`/model`で別のproviderへ移った場合、その選択は設定を保存しても変わらない。
+
+保存したproviderを提供できないときは、会話を開いて履歴を表示するが、何も送らない。送ろうとした入力（キューの入力を含む）は入力欄へ戻り、ステータス行に1行を示す。コマンドは使える。提供できない会話から`/new fork`や巻き戻しで作った会話も、同じく何も送れない。
+
+| 提供できない理由 | 示す1行（例） |
+| --- | --- |
+| ローカルのサーバーに接続できない | `This chat needs ollama (qwen3:8b), but its server is not reachable. Start it, then choose the model with /model (Local model).` |
+| サーバーに保存したモデルが無い | `This chat needs ollama (qwen3:8b), but its server does not list that model. Add it, then choose it with /model (Local model).` |
+| ツール対応を確認できないなど、束縛できない | `This chat needs ollama (qwen3:8b), but it cannot be used here (...). Choose another model with /model.` |
+| 起動したproviderが違う、または`llamacpp`の別モデル | `This chat needs codex (gpt-6-astra). Restart with POLARIS_PROVIDER=codex, or choose a model with /model.`（`llamacpp`は`POLARIS_PROVIDER=llamacpp and --model <モデル>`） |
+
+`/model`でモデルを選ぶと、その会話は選んだモデルで送れる。ローカルモデルで行った会話は、人が`/model`で選ばない限りホスト型へ送られない。保存設定の無い会話は、保存先が無いため比較できず、この確認の対象外である。
+
+会話に保存したroleの束縛（旧版が保存したもの）が解決できなくなったとき（roleが`agents/`に無い、束縛先のtierにproviderが無い、tierのモデルを確認できない、など）は、TUIを終了しない。そのターンは委任を止めて実行し、どのroleへのspawnも拒否する。履歴に`Delegation is off in this chat: role <名前> ...`の1行を、会話ごとに1回だけ示す。解決できる束縛は、これまでどおりroleごとのtierへ振り分ける。
 
 履歴の圧縮は自動で行い、手動で起動するコマンドとオプションはない。閾値の決め方は[コンテキスト効率化](context-efficiency.md#圧縮と履歴保存)にある。
 
-保存済みのv2会話では、入力欄の未送信の下書きを、入力が約0.35秒止まるたびに会話へ保存する（空白だけなら消去）。起動時と、`/resume`・`/new`・`/fork`で会話を切り替えたときに、開いた会話の下書きを入力欄へ戻す。端末を閉じるなど終了処理を通らない場合も、直前の保存までは残る。`/`で始まる行は下書きとして保存せず、直前の下書きを保つ。`/mcp secret`の行は保存しない。ほかのプロセスがprojectを使用中、または未解決の管理操作がある間は保存を待ち、約0.35秒おきに再試行する。保存先に障害があると`Cannot save the draft: ...`を表示して終了する。legacy会話には下書きの保存がない。
-
-ログイン画面・ダイアログ・実行中も、可視文字をドラッグして離すと選択範囲を直接clipboardへコピーする。非表示の秘密値は対象外で、追加の確認画面は表示しない。リンクはCtrl-click、端末が通知する場合はCmd-clickで開く。通常のクリック・ドラッグでは開かない。Terminal.appのCmd＋単クリックは未対応であり、Ctrl-clickを使う。
-
-macOSでは、会話に表示された実在するファイル名やローカルパスを宛先とするMarkdownリンクをCtrl-click（端末対応時はCmd-click）すると、Finderでそのファイルの所在を表示する。ファイル自体は開かない。相対パスはproject rootから解決し、`src/main.rs:12:3`のような行・列指定にも対応する。日本語・折り返されたパス、インラインコードで示された空白入りのファイル名も対象になる。ドラッグ操作は範囲選択として扱う。Webリンクや存在しないファイルはFinderで開かない。
+保存済みのv2会話では、入力欄の未送信の下書きを、入力が約0.35秒止まるたびに会話へ保存する（空白だけなら消去）。起動時と、`/resume`・`/new`・`/new fork`で会話を切り替えたときに、開いた会話の下書きを入力欄へ戻す。端末を閉じるなど終了処理を通らない場合も、直前の保存までは残る。`/`で始まる行は下書きとして保存せず、直前の下書きを保つ。`/mcp secret`の行は保存しない。ほかのプロセスがprojectを使用中、または未解決の管理操作がある間は保存を待ち、約0.35秒おきに再試行する。保存先に障害があると`Cannot save the draft: ...`を表示して終了する。legacy会話には下書きの保存がない。
 
 ### ファイルのD&Dと入力リンク
 
@@ -99,57 +109,23 @@ macOSの端末へファイルをD&Dすると、入力欄に`[ファイル名]`�
 
 端末がD&Dをパス文字列として渡す場合は、入力が途切れた後に実在する絶対パスをリンク化する。同じ形で手動入力したパスも対象になる。存在しないファイルやフォルダ、Web URLはファイルブロックへ変換しない。入力・下書きの既存上限を超える貼り付けは、途中まで挿入せず拒否する。
 
-### 会話設定・goal
-
-設定の変更は確認後に保存される。成功表示は`F06 を保存しました（会話世代 <n>）。`のような操作種別と世代で、取消時は`Session settings change cancelled`。
-
-| コマンド | 役割 | 主な出力・条件 |
-| --- | --- | --- |
-| `/session configure <provider> <model> [effort]` | 現在と同じproviderで、保存会話のモデル設定を変更する。 | 設定の確認とD18の保存結果。異なるproviderの指定は拒否し、再起動を案内する。新しい固定effortへの変更も拒否する。modelは確認済みのものに限る。 |
-| `/session history` | 履歴方式を見る。 | 現在のlegacy/strict10/structured10。 |
-| `/session history legacy\|strict10\|structured10` | 空会話の履歴方式を変更する。 | F16の保存結果。既存履歴のある会話は変更不可。 |
-| `/memory configure on\|off` | 圧縮前履歴の記憶設定を変更する。 | F06の保存結果。 |
-| `/memory configure legacy\|strict10\|structured10` | 履歴方式の変更別名。 | `/session history <方式>`と同じ。 |
-| `/tool-memory off\|history\|retrieval` | ツール結果の保存・参照方式を変更する。 | F07の保存結果。 |
-| `/tool-memory endpoint off`、`/tool-memory endpoint <URL> <MODEL>` | ツール記憶の埋め込み接続を無効化、または接続先とモデルを保存する。 | F08の保存結果。 |
-| `/tool-memory model <MODEL>` | 設定済みの埋め込みモデルを変更する。 | F09の保存結果。先にendpoint設定が必要。 |
-| `/goal`、`/goal current` | 保存したgoalを見る。 | `goal revision <n> / 有効 on / 停止 off`と本文。未設定なら`No saved goal`。 |
-| `/goal set <文章>`、`/goal clear` | goalを設定、または消去する。 | 確認後、D20の保存結果とgoal表示。 |
-| `/goal stop`、`/goal resume` | 保存goalを停止、または再開する。 | 確認後、D20の保存結果と停止状態。 |
-
-goalの保存本文や過去の記録は、それ自体では実行権限や承認にならない。
-
-### subagents
-
-| コマンド | 役割 | 主な出力 |
-| --- | --- | --- |
-| `/subagents`、`/subagents list` | 現在runの子を一覧表示する。 | `run=<ID> attempt=<ID> revision=<n>`、続いて`<child-ID> / <attempt-ID>: running role=... tier=... model=... effort=...`。 |
-| `/subagents wait <child-ID> <attempt-ID>` | 指定attemptの状態を最大2秒の範囲で取得する。完了まで待ち続ける操作ではない。 | `revision=<n> cursor=<n>`と対象の状態行。停止後などは`outcome_unknown`の場合がある。 |
-| `/subagents cancel <child-ID> <attempt-ID>` | 対象を確認後、そのattemptへ停止要求を出す。 | `停止要求 revision=<n>`、`Stop request delivered to this attempt. Check its terminal state with /subagents wait`。 |
-
-child-IDは一覧の`/`の左、attempt-IDは右から`:`の直前まで。例えば、次の行ならその下のコマンドで照会する。
-
-```text
-child.example.1 / child.example.1.attempt.1: running role=file-reader ...
-
-/subagents wait child.example.1 child.example.1.attempt.1
-```
-
-親runのownerが終了した後は、そのrunのwait/cancelは使えない。ownerがなければ`The current run has no subagent owner`と表示する。
-
 ### 認証・アカウント
 
 | コマンド | 役割 | 主な出力・反映時期 |
 | --- | --- | --- |
 | `/status` | 保存されたログイン状態、現在の使用登録、対話ID、使用トークンを確認する。 | 登録ID・表示名・状態、使用登録の世代、対話ID、入力・出力・cache・総tokens。認証更新や接続確認は行わない。 |
 | `/login`、`/login new [表示名]` | ブラウザ認可でアカウントを登録する。 | 認可の案内と登録完了・登録ID。登録だけでは現在の使用登録を変更しない。 |
+| `/login list` | 登録済みのアカウントと、使用中の登録を一覧する。確認なしで読み取る。 | 登録数、`<登録ID> / <表示名> / <状態>`、使用中の登録とその世代。 |
 | `/login reauth <ID>` | 指定登録を再認証する。 | ブラウザ認可と再認証完了・登録ID。 |
 | `/login use <ID>` | 次の送信から使う登録を切り替える。 | `使用アカウントを切り替えました: <ID>`。 |
 | `/login label <ID> <表示名>` | 登録の表示名を変更する。 | 変更完了・登録ID。 |
+| `/login decider` | 判定器の選択画面を開く。Jevを選ぶと、APIキーを専用画面で受け取って保存する。 | 保存すると`Jev decider saved; it takes effect from the next launch`。実行中の判定器は変わらず、次の起動から有効になる。`decision.local_only`が設定されているとJevは選べない。 |
 | `/logout` | 使用中の登録の認証を解除するか、旧単一認証を削除する。 | 追加確認なしで実行し、解除・削除の結果。 |
 | `/logout <ID>` | 指定登録の認証を解除する。 | 追加確認なしで実行し、解除完了・登録ID。 |
 
-TUIの`/account`は廃止し、上記の3入口へ集約した。CLIの`polaris account`は保持している。CLIの`polaris login`は単一認証、TUIの`/login`はアカウント登録であり、処理が同一ではない。`/status`のログイン状態は保存情報であり、サーバーへの認証成功を再検証した結果ではない。
+TUIの`/account`は廃止し、上記の入口へ集約した。CLIの`polaris account`は保持している。CLIの`polaris login`は単一認証、TUIの`/login`はアカウント登録であり、処理が同一ではない。`/status`のログイン状態は保存情報であり、サーバーへの認証成功を再検証した結果ではない。
+
+`list`や`decider`という表示名でアカウントを登録するときは、`/login new list`のように`new`を付ける。
 
 ### MCP
 
@@ -167,9 +143,9 @@ TUIの`/account`は廃止し、上記の3入口へ集約した。CLIの`polaris 
 
 秘密入力画面では値と文字数を表示せず、通常の入力履歴に保存しない。Esc/Ctrl-Cで取り消すと`MCP secret input cancelled`。`check`やpackage取得は、起動時の外部接続上限と承認設定に従う。
 
-`/mcp configure`・`/mcp delete`は提供していない。Unityの`configure`はシェルのCLIで行う。
+`/mcp configure`・`/mcp delete`は削除した（[削除したTUIコマンド](#削除したtuiコマンド)）。
 
-### 会話記憶・決定事項
+### 会話記憶
 
 | コマンド | 役割 | 主な出力 |
 | --- | --- | --- |
@@ -182,17 +158,16 @@ TUIの`/account`は廃止し、上記の3入口へ集約した。CLIの`polaris 
 | `/memory index <session> [--batch <1..100>] [--after <id>]` | 記録の埋め込み索引をまとめて更新する。既定100件。 | 件数、操作ID、revision、継続情報。 |
 | `/memory forget <session>` | 記憶・vector・検証済み保管原文を削除し、再取り込みを禁止する。 | 確認後、削除した旨と件数、操作ID、revision。巻き戻しでは取り消せない。 |
 | `/memory reconcile <操作ID>` | 保存receiptを照合し、変更結果を確認する。 | 照合結果。同じ変更の再実行はしない。 |
-| `/decided`、`/decided list` | 保存された決定事項を読む。 | 件数、過去記録であり現在の承認ではない旨、時刻と文章。最新100件、空なら`No records`。 |
-| `/decided add <文章>` | 決定事項を追記する。macOSとLinuxの両方で使える。 | 文章を示した確認画面の後、`.polaris/decisions.csv`へ追記して`Decision saved. This is a historical record, not current approval.`。`add `の直後の文章を加工せずに保存する（`add `で始まる文章や、引用符・カンマ・改行を含む文章も同じ）。取消時は`Decision save cancelled`で何も書かない。入力待ちがあるとき、または文章が空・8KiB超・制御文字入りのときは拒否する。追記の結果が不明になったときは再試行せず、未解決の管理操作として残る。 |
+| `/memory configure on\|off` | 圧縮前履歴の記憶設定を、開いている会話に保存する。確認後に保存し、次の送信から有効になる。 | `F06 を保存しました（会話世代 <n>）。`のように操作種別と世代を示す。取消時は`Session settings change cancelled`。 |
+| `/memory configure legacy\|strict10\|structured10` | 空の会話の履歴方式を変更する。既存の履歴がある会話は変更できない。 | `F16 を保存しました（会話世代 <n>）。`のように操作種別と世代を示す。 |
 
-`/memory configure ...`は会話設定の節を参照。記憶の変更では`記録の変更を保存しました。記録<n>件、v2索引削除<n>件。`等と`操作ID: <ID> / revision <前> → <後>`を表示する。埋め込み処理は設定済みloopback APIへ接続する。
+記憶の変更では`記録の変更を保存しました。記録<n>件、v2索引削除<n>件。`等と`操作ID: <ID> / revision <前> → <後>`を表示する。埋め込み処理は設定済みloopback APIへ接続する。決定事項の記録は、シェルの`polaris decided`で行う。
 
 ### 共有同期
 
 | コマンド | 役割 | 主な出力・現在の制限 |
 | --- | --- | --- |
 | `/sync`、`/sync status` | 共有の参加・合意・反映・衝突・復旧状態を、この端末の手元の記録から見る。remoteには接続しない。 | 先頭の`Local record (read from this device only; the remote was not contacted)`に続けて、参加中/未参加、revision、解消待ち、未完了操作、復旧用控え等。表示は全て手元の記録で、remoteの現在の状態ではない。 |
-| `/sync join <remote> <share-ID> <invite-ID> <expires-UNIX秒> [除外名...]` | TUIから共有への参加を要求する入口。 | **現状のTUI経路は未完成で、参加を確定できない**。結果を確定できない旨と`/sync`での確認案内。CLIのC08経路とは別。`/help`と候補の説明にもjoinは載せない。 |
 | `/sync pull` | 既存の参加情報を使いremoteから受信・統合する。 | `受け取りました: <n>件、解消待ち<m>件。sourceへは未反映です。`。 |
 | `/sync leave` | この端末の参加を解除する。 | `This device left the share`。 |
 | `/sync apply` | 確認後、同期内容をsourceへ書き込む。 | `<n>件を反映しました。復旧用の控え: <path>`。 |
@@ -201,35 +176,45 @@ TUIの`/account`は廃止し、上記の3入口へ集約した。CLIの`polaris 
 | `/sync recover <32桁C10-ID>` | 送信結果を照合・復旧する。remote照会を伴う場合がある。 | C10結果。結果未確定なら再送せず照合する案内。 |
 | `/sync abandon <32桁C10-ID>` | 確認後、C10操作を照合して中止する。 | 中止通知と`does not prove that nothing was sent`。 |
 
-### Linux限定のTUI操作
-
-`/setting`と`/apply`は、handlerがLinuxにしか接続されていない。macOSでは`/help`にも`/`の候補にも出ず、入力しても`unknown command`になる。macOSで`.gitignore`の規則を整えるときは、シェルで`polaris setting git`を使う。
-
-| コマンド | Linuxでの役割 | 主な出力 |
-| --- | --- | --- |
-| `/setting git` | `.gitignore`追加規則を確認し、保存する。 | 候補の確認と`Already added: <rule>`。 |
-
-| コマンド | Linuxでの役割 | 主な出力 |
-| --- | --- | --- |
-| `/apply`、`/apply list`、`/apply status` | 隔離runの変更候補を見る。 | 承認ID、entries件数、decision、result。候補なしならrunの案内。 |
-| `/apply run <指示>` | 確認後、隔離コピーでモデルを実行する。 | runの終端状態と、`/apply list`で候補を確認する案内。 |
-| `/apply view <ID>` | 候補の適用先・復旧先・revision・hash・mode等を見る。 | pathごとのbefore/after情報。本文diffではない。 |
-| `/apply resolve <ID> allow\|deny` | 確認後、適用への承認または拒否を返す。 | 承認応答の受付と、保存済み結果を`/apply list`で確認する案内。受付だけでは適用成功を意味しない。 |
+共有への参加（join）は、TUIでは扱わない。シェルの`polaris sync join`を使う。
 
 ### 削除したTUIコマンド
 
-次の8つはTUIから削除した。入力しても何も実行せず、削除した旨と代わりの操作を1行で答える。引数を付けても同じで、保存済みの会話や設定は変わらない。`/`の候補と`/help`には載せない。
+次の名前と形は、TUIから削除した。入力しても何も実行せず、何も変更せず、代わりの操作を1行（78桁以内）で答える。引数を付けても、大文字で入力しても同じで、保存済みの会話・設定・ファイルは変わらない。`/`の候補と`/help`には載せない。
 
-| 削除したコマンド | 代わりの操作 |
-| --- | --- |
-| `/pwd` | `/status`の`Project root`行で、canonicalize済みのproject rootを見る。 |
-| `/sandbox` | `/status`の`sandbox`・`Writable roots`・`Approval`の各行で、sandboxと承認方針を見る。sandboxの変更は、新しい起動の`--sandbox`で行う。エージェントを介さずsandbox内で実行する操作は、CLIの`polaris sandbox -- <実行物>`に残っている。 |
-| `/instruction` | 実行中に入力した文章は待ち行列へ入り、実行終了後の次のturnで処理される。 |
-| `/input` | 実行中はEscを約2秒以内に2回押して停止を要求する。1回目は`Press Esc again to interrupt`と表示するだけで、入力欄は変わらない。 |
-| `/roles` | TUIにはrole定義を表示しない。role定義は`agents/<型名>/SKILL.md`にあり、探す場所は[subagent](subagents.md)に書いてある。 |
-| `/compare` | シェルで`polaris compare <folderA> <folderB> [folder...]`を実行する。 |
-| `/run` | 子の一覧は`/subagents`で見る。turn上限は起動時の`--max-turns <n>`で指定する。 |
-| `/history` | 画面で会話をスクロールする。書き出す場合は`/export`を使う。 |
+| 削除した名前 | 代わりの操作 | 入力したときに表示する1行 |
+| --- | --- | --- |
+| `/apply` | 変更はそのまま依頼し、`/diff`で確かめる。承認方針は`/permissions`で選ぶ。隔離したコピーでの実行はTUIにない。 | `/apply was removed. Ask polaris to make the change, then check it with /diff.` |
+| `/clear` | `/new`で空の会話を始める。元の会話は`/resume`に残る。 | `/clear was removed. /new starts fresh and keeps this chat in /resume.` |
+| `/compact` | 圧縮は自動で行う。ローカルモデルでは`config.toml`の`context_window`を指定する。 | `Compaction is automatic. Local models: set context_window in config.toml.` |
+| `/compare` | シェルで`polaris compare <folderA> <folderB> [folder...]`を実行する。 | `/compare was removed. Run polaris compare <folder> <folder> in a shell.` |
+| `/copy` | `Ctrl+O`で最後の返答をコピーする。画面上の範囲はドラッグで選んでコピーする。 | `/copy was removed. Press Ctrl+O to copy the last reply.` |
+| `/decided` | シェルで`polaris decided`（一覧）や`polaris decided "<1文>"`（追記）を使う。 | `/decided was removed. In a shell: polaris decided [sentence].` |
+| `/decider` | `/login decider`を使う。 | `/decider was removed. Use /login decider.` |
+| `/doctor` | シェルで`polaris doctor`を使う。 | `/doctor was removed. In a shell: polaris doctor.` |
+| `/env` | シェルで`polaris env set\|plan\|status\|recover`を使う（[環境構築](#環境構築)）。`/`を付けない`env …`の入力も直接操作ではなくなり、通常の文章としてモデルへ送る。 | `/env was removed. In a shell: polaris env set\|plan\|status\|recover.` |
+| `/fork` | `/new fork`を使う。 | `/fork was removed. Use /new fork.` |
+| `/goal` | 目標はメッセージ本文に書く。 | `/goal was removed. State the goal in your message.` |
+| `/history` | 画面で会話をスクロールする。書き出す場合は`/export`を使う。 | `/history was removed. Scroll the conversation, or save it with /export.` |
+| `/input` | 実行中は`Esc`を約2秒以内に2回押して停止を要求する。1回目は`Press Esc again to interrupt`と表示するだけで、入力欄は変わらない。 | `/input was removed. Press Esc twice to stop the running turn.` |
+| `/instruction` | 実行中に入力した文章は待ち行列へ入り、実行終了後の次のturnで処理される。 | `/instruction was removed. Text typed during a run is queued for the next turn.` |
+| `/phase` | 起動時の`--phase <段階>`（新しい会話だけ）か、設定の`[workflow] initial_phase`で指定する。 | `/phase was removed. Start polaris with --phase <name> (new chats only).` |
+| `/pwd` | `/status`の`Project root`行で、project rootを見る。 | `/pwd was removed. /status shows the project root.` |
+| `/review` | レビューを通常の文章で依頼する。 | `/review was removed. Ask polaris in plain words to review your changes.` |
+| `/roles` | TUIにはrole定義を表示しない。role定義は`agents/<型名>/SKILL.md`にあり、探す場所は[subagent](subagents.md)に書いてある。 | `/roles was removed. Role definitions live in agents/<name>/SKILL.md.` |
+| `/run` | `Esc`で実行を止める。turn上限は起動時の`--max-turns <n>`で指定する。 | `/run was removed. Esc stops a run; set --max-turns at launch.` |
+| `/sandbox` | `/status`の`sandbox`・`Writable roots`・`Approval`の各行で、sandboxと承認方針を見る。sandboxの変更は、新しい起動の`--sandbox`で行う。エージェントを介さずsandbox内で実行する操作は、CLIの`polaris sandbox -- <実行物>`に残っている。 | `/sandbox was removed. /status shows the sandbox and the approval policy.` |
+| `/session` | `/status`で対話ID・モデル・providerを見る。モデルは`/model`で選ぶ。履歴方式は`/memory configure <方式>`か起動時の`--history-mode`で指定する。保存したprovider・モデルの表示と`/session configure`はなくなった。 | `/session was removed. /status shows the session; /model sets the model.` |
+| `/setting` | シェルで`polaris setting git`を使う（Linuxだけで使えた`/setting git`の代わり）。 | `/setting was removed. In a shell: polaris setting git.` |
+| `/skills` | `/status`の`skills`行で、いまの段階が使うskillを見る。 | `/skills was removed. /status lists the skills in use for this phase.` |
+| `/subagents` | `Esc`で実行を止める。実行中の子にも停止を要求する。 | `/subagents was removed. Esc stops the run and asks its subagents to stop.` |
+| `/tool-memory` | 起動時の`--tool-memory off\|history\|retrieval`で選び、埋め込みは`--tool-memory-embedding-url`と`--tool-memory-embedding-model`を組で指定する。`/memory configure`などで設定を保存した会話では、保存した設定が優先する。 | `/tool-memory was removed. Start polaris with --tool-memory <mode>.` |
+| `/workflow` | 保存済みの会話は`polaris --resume <ID> --workflow-mode manual\|adaptive\|off`で変える。新しい会話の既定は設定の`[workflow] enabled`・`mode`。 | `/workflow was removed. Use polaris --resume <ID> --workflow-mode <mode>.` |
+| `/mcp configure` | `/mcp setup`を使う。Unityの固定配置は、シェルの`polaris mcp configure`で行う。 | `/mcp configure was removed. Use /mcp setup, or polaris mcp configure.` |
+| `/mcp delete` | `/mcp disable <server>`でそのprojectでの利用を止める。認証情報は`/mcp secret delete <参照名>`で削除する。 | `/mcp delete was removed. Use /mcp disable <server> or /mcp secret delete.` |
+| `/sync join` | シェルで`polaris sync join`を使う。 | `/sync join was removed. In a shell: polaris sync join.` |
+
+末尾の3つ（`/mcp configure`・`/mcp delete`・`/sync join`）は、一覧に残るコマンドの一部の形だけを削除したものである。それぞれのコマンドの他の形は、これまでどおり使える。
 
 ## シェルで使うCLI
 
@@ -239,7 +224,7 @@ Rustの既存Command Line Toolsを使う場合は、起動時に`POLARIS_ENVKIT_
 
 | コマンド | 役割 | 主な出力 |
 | --- | --- | --- |
-| `polaris env set <profile> [--path <directory>] [--version <constraint>]` | TUIと同じownerで環境構築する。モデル認証は不要。 | 計画、`Execute this exact plan? [y/N]`、検証結果とreceipt/private runtimeの場所。 |
+| `polaris env set <profile> [--path <directory>] [--version <constraint>]` | 固定profileの環境を構築する。モデル認証は不要。 | 計画、`Execute this exact plan? [y/N]`、検証結果とreceipt/private runtimeの場所。 |
 | `polaris env plan <profile> ...` | 取得前の固定計画を確認・保存する。 | 対応版、資源、変更先、SHA-256と保存先。対象の構築はしない。 |
 | `polaris env set <profile> ... --plan-directory <retained-root> --approve-plan <SHA-256>` | まだ開始していない保存計画を、同じ対象・版・SHA-256への明示承認で実行する。 | 通常setと同じ。入力変更や開始済み計画は拒否する。 |
 | `polaris env status` | 定義と版を列挙する。 | 各profileの`available`と、組合せごとの検証状態についての案内。 |
@@ -297,7 +282,7 @@ Rustの既存Command Line Toolsを使う場合は、起動時に`POLARIS_ENVKIT_
 | `--mcp-prompt <SERVER/PROMPT>`、`--mcp-prompt-arg KEY=VALUE` | 初回要求の前に使うMCP promptを1件選ぶ。引数は複数指定可能。 |
 | `--web-search disabled\|cached\|live` | 現状はdisabledのみ利用可能。cached/liveは開始前に拒否。 |
 
-トップレベルに`--provider`引数はなく、providerは環境変数等で設定する。`POLARIS_PROVIDER=codex`はChatGPT認証、`openai`はAPIキーを使う。`polaris status`・`polaris session`は存在せず、TUI内で`/status`・`/session`を使う。
+トップレベルに`--provider`引数はなく、providerは環境変数等で設定する。`POLARIS_PROVIDER=codex`はChatGPT認証、`openai`はAPIキーを使う。`polaris status`・`polaris session`は存在せず、TUI内で`/status`を使う。
 
 ### 認証・アカウント
 
@@ -413,10 +398,9 @@ C08/C10の確定は端末での確認、または`--yes`を必要とする。結
 
 - バージョンはシェルで`polaris --version`。TUIの`/version`・`/usage`・`/effort`は存在しない。
 - `/web-search`・`/models`・`/browse`・`/attachment`・`/recipe`・`/handoff`・`/remember`・`/account`は削除した。モデル選択は`/model`、macOSでのファイル所在の表示は会話中のファイル名へのCtrl-click（端末対応時はCmd-click）を使う。エージェント内部のWeb検索経路と提供条件は維持している。
-- `polaris setting nextjs`と`/setting nextjs`は廃止した。環境構築は`polaris env set <profile>`／`/env set <profile>`へ移した。旧コマンドの別名ではなく、固定計画の確認と専用runtimeによる導入を行う。
+- `polaris setting nextjs`は廃止した。環境構築は`polaris env set <profile>`へ移した。旧コマンドの別名ではなく、固定計画の確認と専用runtimeによる導入を行う。
 - `read`や`skill`はツール名で、`/read`・`/skill`というコマンドではない。
 - `/model`で変更するのはモデル。推論強度の固定指定は起動時の`--effort`で行う。
-- `/subagents cancel`は停止要求の受付。終了状態は同じchild/attemptに対する`wait`で確認する。`outcome_unknown`は結果未確定を表す。
 - 巻き戻しは空の入力欄で待機中にEscを2回押す。正常完了して保存された対象を選び、変更予定を確認し、`r`で確定する。中断したturnは候補に含まれない。
 - `--web-search cached/live`は現在利用できない。`spare`も、名前から想定される一連の作業はまだ実行しない。
 - この一覧の確認では、認証・MCP・モデルへの実接続や、状態を変更するコマンドの再実行は行っていない。
@@ -424,8 +408,8 @@ C08/C10の確定は端末での確認、または`--yes`を必要とする。結
 ## 実装の参照先
 
 - TUIの名前・alias・構文：[slash.rs](../crates/polaris-tui/src/slash.rs)。画面とdispatch：[lib.rs](../crates/polaris-tui/src/lib.rs)、[render.rs](../crates/polaris-tui/src/render.rs)。
-- 会話設定・goal：[session_commands.rs](../crates/polaris-tui/src/session_commands.rs)。subagents：[runtime_commands.rs](../crates/polaris-tui/src/runtime_commands.rs)。
-- TUIのローカル変更：[local_actions.rs](../crates/polaris-tui/src/local_actions.rs)、管理操作：[workspace_commands.rs](../crates/polaris-tui/src/workspace_commands.rs)。
+- `/memory configure`：[session_commands.rs](../crates/polaris-tui/src/session_commands.rs)。
+- TUIのローカル変更：[local_actions.rs](../crates/polaris-tui/src/local_actions.rs)。
 - TUIの認証・MCP・記憶：[account.rs](../crates/polaris-tui/src/account.rs)、[mcp_commands.rs](../crates/polaris-tui/src/mcp_commands.rs)、[memory_commands.rs](../crates/polaris-tui/src/memory_commands.rs)。
 - CLIの引数・入口：[main.rs](../crates/polaris-cli/src/main.rs)。管理処理：[mcp.rs](../crates/polaris-cli/src/mcp.rs)、[memory.rs](../crates/polaris-cli/src/memory.rs)、[sync.rs](../crates/polaris-cli/src/sync.rs)、[account.rs](../crates/polaris-cli/src/account.rs)。
 - ツールの定義：[polaris-tools/lib.rs](../crates/polaris-tools/src/lib.rs)。公開条件と実行：[agent.rs](../crates/polaris-core/src/agent.rs)。
