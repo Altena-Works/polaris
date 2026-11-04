@@ -390,17 +390,12 @@ async fn a_chat_with_saved_settings_and_a_record_opens_on_the_record() {
     let mut fixture = Fixture::new();
     // The settings were confirmed while the hosted model was in use ...
     fixture
-        .call(
-            "session configure codex gpt-6-astra auto",
-            KeyCode::Char('y'),
-            false,
-            None,
-        )
+        .call("memory configure on", KeyCode::Char('y'), false, None)
         .unwrap();
     // ... and `/model` moved the chat to a local model afterwards.
     record(&fixture, ("ollama", "qwen3:8b"), None);
     let state = fixture.snapshot().state;
-    assert_eq!(state.session_settings.unwrap().model, "gpt-6-astra");
+    assert_eq!(state.session_settings.unwrap().model, "gpt-5.6-sol");
     assert_eq!(state.held_with.unwrap().model, "qwen3:8b");
 
     let endpoint = fake_ollama(&["qwen3:8b"], true).await;
