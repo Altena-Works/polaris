@@ -24,6 +24,7 @@ v0.3.0-rcの配布対象はmacOS arm64のCLI/TUI。RCパッケージは未公開
 | 原文保存、検索、圧縮、埋め込み | [コンテキスト効率化](context-efficiency.md) |
 | subagentの制限と出力 | [subagent](subagents.md) |
 | ツール候補の選別 | [tool preselection](tool-preselection.md) |
+| Windows・Linux版の引き継ぎと仕様（案） | [引き継ぎ](windows-linux-handoff.md) |
 | macOSアプリの組立てと保存境界 | [macOSの説明](../apps/macos/README.md)（GUIは今回の配布対象外） |
 
 ## 過去の測定・評価

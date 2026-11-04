@@ -1791,6 +1791,7 @@ UPDATE_FILEMAP=1 cargo test -p polaris-core --test filemap
 - `testing.md` — テスト
 - `tool-preselection.md` — ツールの事前選定
 - `usage.md` — 利用ガイド
+- `windows-linux-handoff.md` — Windows・Linux 版の引き継ぎと仕様
 
 ## `docs/releases`
 
