@@ -228,6 +228,12 @@ pub struct ConversationStateV2 {
         skip_serializing_if = "crate::session_settings::SavedSessionDraftV1::is_initial"
     )]
     pub draft: crate::session_settings::SavedSessionDraftV1,
+    /// The provider and model the conversation is held with. Apart from
+    /// `session_settings`, which only a confirmed settings command writes.
+    /// Older markers have none, and a marker without one is written without
+    /// the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_with: Option<crate::session_settings::SavedBindingV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<crate::desktop_store::SavedGoal>,
     pub recent_turn_ids: Vec<u64>,
@@ -270,6 +276,7 @@ impl ConversationStateV2 {
             history_mode: HistoryMode::Legacy,
             session_settings: None,
             draft: crate::session_settings::SavedSessionDraftV1::default(),
+            held_with: None,
             goal: None,
             recent_turn_ids: Vec::new(),
             visible_summary_ids: Vec::new(),
@@ -291,6 +298,9 @@ impl ConversationStateV2 {
             settings.validate()?;
         }
         self.draft.validate()?;
+        if let Some(binding) = &self.held_with {
+            binding.validate()?;
+        }
         if let Some(goal) = &self.goal {
             goal.validate().map_err(io::Error::other)?;
         }
@@ -1989,6 +1999,7 @@ fn rewind_branch_candidate_plan(
     let mut state = ConversationStateV2::new(boundary.project_id.clone(), child_id.into())?;
     state.history_mode = boundary.source_state.history_mode;
     state.session_settings = boundary.source_state.session_settings.clone();
+    state.held_with = boundary.source_state.held_with.clone();
     state.goal = boundary.source_state.goal.clone();
     state.workflow_config = boundary.source_state.workflow_config.clone();
     state.workflow = boundary.source_state.workflow.clone();
@@ -2174,6 +2185,7 @@ fn fork_plan(
     let mut initial = ConversationStateV2::new(source.state.project_id.clone(), child_id.into())?;
     initial.history_mode = source.state.history_mode;
     initial.session_settings = source.state.session_settings.clone();
+    initial.held_with = source.state.held_with.clone();
     initial.workflow_config = source.state.workflow_config.clone();
     initial.workflow = source.state.workflow.clone();
     initial.gates = source.state.gates.for_fork(artifact_hash);
@@ -2991,6 +3003,14 @@ mod tests {
             target: "main".into(),
             artifact_hash: "old".into(),
         });
+        let held = crate::session_settings::SavedBindingV1::new(
+            "ollama".into(),
+            "qwen3:8b".into(),
+            String::new(),
+            None,
+        )
+        .unwrap();
+        next.held_with = Some(held.clone());
         lock.publish(&snapshot, next).unwrap();
         let expected = expected_fork_snapshot(
             &lock.snapshot().unwrap(),
@@ -3015,6 +3035,9 @@ mod tests {
         );
         assert_eq!(fork.events.len(), 10);
         assert_eq!(fork.state.history_mode, HistoryMode::Strict10);
+        // A fork is held with what its parent was; the host corrects it at its
+        // first send if the binding in use has moved on.
+        assert_eq!(fork.state.held_with, Some(held));
         assert_eq!(fork.events[0].message.content, "turn 3");
         assert!(fork.state.gates.external_grants.is_empty());
         assert!(fork.state.gates.verification.unwrap().stale);

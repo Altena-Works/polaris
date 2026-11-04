@@ -1329,6 +1329,7 @@ async fn selected_mcp_prompt_and_input_survive_sidechat_restart_together() {
         false,
         root.path(),
         true,
+        None,
         Some(TuiPromptRequest {
             host: &host,
             choice: &choice,
@@ -1430,6 +1431,7 @@ async fn selected_mcp_prompt_and_input_survive_sidechat_restart_together() {
         root.path(),
         false,
         None,
+        None,
     )
     .await;
     assert!(matches!(retry, Err(TuiAdmissionFailure::Retryable(_))));
@@ -1518,6 +1520,7 @@ async fn failed_or_timed_out_mcp_prompt_does_not_commit_tui_input() {
             false,
             root.path(),
             true,
+            None,
             Some(TuiPromptRequest {
                 host: &host,
                 choice: &choice,
@@ -1561,6 +1564,7 @@ async fn distinct_tui_input_uses_an_empty_durable_sidechat_and_terminal_receipt(
     use polaris_core::{
         conversation_state::HistoryMode,
         session_manager::{AdmissionState, TerminalStatus},
+        session_settings::SavedBindingV1,
         session_store::PersistedSession,
         workflow::{SessionWorkflow, WorkflowConfig},
     };
@@ -1587,6 +1591,9 @@ async fn distinct_tui_input_uses_an_empty_durable_sidechat_and_terminal_receipt(
     let mut meta_path = session_path.with_extension("meta.json");
     let mut started = 1;
     let mut local_lines = Vec::new();
+    // What the send gate saved for the parent: a local model chosen with `/model`.
+    let held =
+        SavedBindingV1::new("ollama".into(), "qwen3:8b".into(), String::new(), None).unwrap();
 
     let (turn, notice, rewind_boundary, selected_runtime) = admit_tui_input(
         &mut session,
@@ -1603,6 +1610,7 @@ async fn distinct_tui_input_uses_an_empty_durable_sidechat_and_terminal_receipt(
         false,
         root.path(),
         true,
+        Some(&held),
         None,
     )
     .await
@@ -1612,6 +1620,11 @@ async fn distinct_tui_input_uses_an_empty_durable_sidechat_and_terminal_receipt(
     let admission_id = turn.admission_id.clone();
     let sidechat = session.persistence.as_ref().unwrap().snapshot().unwrap();
     assert_ne!(sidechat.state.session_id, parent_id);
+    // The sidechat is held with that binding before the model sees its first
+    // request, through the record only: no settings command saved anything.
+    assert_eq!(sidechat.state.held_with, Some(held));
+    assert_eq!(sidechat.state.session_settings, None);
+    assert_eq!(parent.snapshot().unwrap().state.held_with, None);
     assert_eq!(sidechat.events.len(), 1);
     assert_eq!(
         sidechat.events[0].message.content,
@@ -1653,6 +1666,7 @@ async fn distinct_tui_input_uses_an_empty_durable_sidechat_and_terminal_receipt(
         root.path(),
         true,
         None,
+        None,
     )
     .await;
     assert!(matches!(denied, Err(TuiAdmissionFailure::Retryable(_))));
@@ -1682,6 +1696,7 @@ async fn distinct_tui_input_uses_an_empty_durable_sidechat_and_terminal_receipt(
         root.path(),
         false,
         None,
+        None,
     )
     .await
     .unwrap();
@@ -1701,6 +1716,119 @@ async fn distinct_tui_input_uses_an_empty_durable_sidechat_and_terminal_receipt(
     );
     assert_ne!(next.admission_id, admission_id);
     next.finish(TerminalStatus::Completed).unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_sidechat_opened_under_a_local_model_is_reopened_on_it_or_sends_nothing() {
+    use crate::{
+        model_menu::LocalEndpoints,
+        session_activation::{
+            apply_saved_binding,
+            fixtures::{Process, closed_endpoint, fake_ollama},
+            read_saved_activation,
+        },
+    };
+    use polaris_core::{
+        conversation_state::HistoryMode,
+        session_manager::TerminalStatus,
+        session_settings::{SavedBindingV1, SavedSessionSettingsV1},
+        session_store::PersistedSession,
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let state_dir = root.path().join("state");
+    let sessions_dir = root.path().join("sessions");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    let database = root.path().join("memory.sqlite3");
+    let parent =
+        PersistedSession::create(root.path(), &database, "project", HistoryMode::Legacy, None)
+            .unwrap();
+    let parent_id = parent.snapshot().unwrap().state.session_id;
+    let mut session = polaris_core::session::Session::new();
+    session.attach(parent).unwrap();
+    let mut session_path = sessions_dir.join(format!("{parent_id}.jsonl"));
+    let mut meta_path = session_path.with_extension("meta.json");
+    let mut started = 1;
+    let mut local_lines = Vec::new();
+    // A local model chosen with `/model`, and no settings command ever run.
+    let held =
+        SavedBindingV1::new("ollama".into(), "qwen3:8b".into(), String::new(), None).unwrap();
+
+    // The first turn of a sidechat is also its last one before the process ends.
+    let (turn, ..) = admit_tui_input(
+        &mut session,
+        "unrelated isolated task",
+        Some(&DistinctContextJudge),
+        &state_dir,
+        &sessions_dir,
+        &mut session_path,
+        &mut meta_path,
+        &mut started,
+        &mut local_lines,
+        None,
+        None,
+        false,
+        root.path(),
+        true,
+        Some(&held),
+        None,
+    )
+    .await
+    .unwrap();
+    turn.finish(TerminalStatus::Completed).unwrap();
+    let sidechat_id = session
+        .persistence
+        .as_ref()
+        .unwrap()
+        .snapshot()
+        .unwrap()
+        .state
+        .session_id;
+    assert_ne!(sidechat_id, parent_id);
+    drop(session);
+
+    // `--resume` or `/resume` of that sidechat, in a process started on a hosted provider.
+    let hosted =
+        SavedSessionSettingsV1::new("codex".into(), "gpt-6.1-sol".into(), "auto".into()).unwrap();
+    let serving = fake_ollama(&["qwen3:8b"], true).await;
+    let silent = closed_endpoint().await;
+    for (endpoint, served) in [(&serving, true), (&silent, false)] {
+        let mut resumed = polaris_core::session::Session::new();
+        resumed
+            .attach(
+                PersistedSession::open(root.path(), &database, "project", &sidechat_id).unwrap(),
+            )
+            .unwrap();
+        let activation = read_saved_activation(&resumed, &hosted, "gpt-6.1-sol", true)
+            .unwrap()
+            .expect("a saved conversation");
+        let endpoints = LocalEndpoints {
+            ollama: endpoint,
+            lm_studio: endpoint,
+        };
+        let mut process = Process::started_on("codex", "gpt-6.1-sol");
+        let needs = apply_saved_binding(
+            &activation,
+            true,
+            &mut hosted.clone(),
+            &mut process.binding(&endpoints),
+        )
+        .await;
+        if served {
+            assert_eq!(needs, None);
+            assert_eq!(process.provider_name, "ollama");
+            assert_eq!(process.model_name, "qwen3:8b");
+        } else {
+            // Without the record the hosted provider would carry on with its history.
+            let line = needs.expect("the sidechat cannot be served here, so nothing is sent");
+            assert!(
+                line.contains("ollama") && line.contains("qwen3:8b"),
+                "{line}"
+            );
+            assert_eq!(process.provider_name, "codex");
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -1770,7 +1898,7 @@ async fn recovery_blocks_a_new_turn_after_an_unstarted_committed_input() {
     };
     let mut parent_session = polaris_core::session::Session::new();
     parent_session.attach(parent).unwrap();
-    let mut sidechat = empty_sidechat_session(&parent_session, session_id).unwrap();
+    let mut sidechat = empty_sidechat_session(&parent_session, session_id, None).unwrap();
     assert!(
         sidechat
             .push_admitted_user("durable input", &admission.id, &prepared.payload_hash)
@@ -1826,6 +1954,7 @@ async fn recovery_blocks_a_new_turn_after_an_unstarted_committed_input() {
         false,
         root.path(),
         true,
+        None,
         None,
     )
     .await;
@@ -6463,7 +6592,7 @@ fn an_unserved_chat_sends_nothing_gets_its_text_back_and_shows_what_it_needs() {
     let mut paused = false;
     let mut status = Status::Idle;
 
-    refuse_unserved_submission(
+    refuse_before_send(
         needs,
         "fix the parser".into(),
         6,
@@ -6484,7 +6613,7 @@ fn an_unserved_chat_sends_nothing_gets_its_text_back_and_shows_what_it_needs() {
     let mut buffer = "half a thought".to_string();
     let mut cursor = 4;
     queue.push_back("later request".into());
-    refuse_unserved_submission(
+    refuse_before_send(
         needs,
         "queued request".into(),
         0,
@@ -6502,6 +6631,47 @@ fn an_unserved_chat_sends_nothing_gets_its_text_back_and_shows_what_it_needs() {
         VecDeque::from(["queued request".into(), "later request".into()])
     );
     assert!(paused);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_refused_instruction_returns_to_the_head_of_its_queue_and_the_loop_stops_dispatching_it() {
+    let mut queued = VecDeque::from(["first".to_string(), "second".to_string()]);
+    let mut active = None;
+    let mut paused = false;
+    let mut dispatches = 0;
+
+    // Five passes of the loop with the send gate refusing every instruction.
+    for _ in 0..5 {
+        next_instruction(&mut active, &mut queued, paused);
+        if active.is_some() {
+            dispatches += 1;
+            assert!(hold_back(&mut active, &mut queued, &mut paused));
+        }
+    }
+    assert_eq!(
+        dispatches, 1,
+        "an instruction held in `active` is taken forever"
+    );
+    assert!(paused);
+    // Neither sent nor lost, and still first in line.
+    assert!(active.is_none());
+    assert_eq!(
+        queued,
+        VecDeque::from(["first".to_string(), "second".to_string()])
+    );
+
+    // Resuming the queue, as any submission does, dispatches the same one.
+    paused = false;
+    next_instruction(&mut active, &mut queued, paused);
+    assert_eq!(active.as_deref(), Some("first"));
+    assert_eq!(queued, VecDeque::from(["second".to_string()]));
+
+    // Holding back when nothing is being dispatched changes nothing.
+    let mut nothing: Option<String> = None;
+    let mut stopped = false;
+    assert!(!hold_back(&mut nothing, &mut queued, &mut stopped));
+    assert!(!stopped && queued.len() == 1);
 }
 
 #[test]

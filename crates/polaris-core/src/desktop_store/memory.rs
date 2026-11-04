@@ -265,6 +265,7 @@ fn project(
             workflow_config: None,
             session_settings: None,
             draft: Default::default(),
+            held_with: None,
             goal: None,
             schema_version: 2,
             project_id: p.marker.project_id.as_str().into(),

@@ -5,6 +5,8 @@
 pub mod account;
 pub mod approver;
 mod auth_browser;
+#[cfg(unix)]
+mod binding_record;
 mod clipboard;
 #[cfg(unix)]
 mod command_dispatch;
@@ -1300,9 +1302,13 @@ pub fn recover_admission_owner(
     Ok(())
 }
 
+/// `held_with` is the binding the host just saved for `parent`. The sidechat is
+/// created with it: admission already holds the project, and `binding_record`
+/// cannot write while it does.
 fn empty_sidechat_session(
     parent: &polaris_core::session::Session,
     destination: &polaris_core::session_manager::SessionId,
+    held_with: Option<&polaris_core::session_settings::SavedBindingV1>,
 ) -> Result<polaris_core::session::Session, String> {
     let previous = parent
         .persistence
@@ -1321,13 +1327,14 @@ fn empty_sidechat_session(
                 .map_err(|error| error.to_string())?,
         );
     }
-    let persistence = polaris_core::session_store::PersistedSession::create_with_id(
+    let persistence = polaris_core::session_store::PersistedSession::create_held_with(
         &previous.data_root,
         &previous.database,
         &snapshot.state.project_id,
         destination.as_str(),
         snapshot.state.history_mode,
         next.workflow.as_ref(),
+        held_with.cloned(),
     )
     .map_err(|error| error.to_string())?;
     next.attach(persistence)
@@ -1351,6 +1358,7 @@ async fn admit_tui_input(
     tool_memory_enabled: bool,
     project: &Path,
     auto_route: bool,
+    held_with: Option<&polaris_core::session_settings::SavedBindingV1>,
     prompt_request: Option<TuiPromptRequest<'_>>,
 ) -> Result<
     (
@@ -1523,7 +1531,7 @@ async fn admit_tui_input(
     };
     let switched = destination != current;
     let mut sidechat = if switched {
-        Some(empty_sidechat_session(session, &destination)?)
+        Some(empty_sidechat_session(session, &destination, held_with)?)
     } else {
         None
     };
@@ -2585,12 +2593,36 @@ fn restore_rejected_new_submission(
     }
 }
 
-/// Nothing is sent while the open conversation's own provider or model cannot
-/// be served here. The text goes back where it came from, so the person loses
-/// nothing, and the status carries the one line saying what the chat needs.
+/// The loop takes the next admitted instruction, unless the queue is stopped or
+/// one is already being dispatched.
+#[cfg(unix)]
+fn next_instruction<T>(active: &mut Option<T>, queued: &mut VecDeque<T>, paused: bool) {
+    if active.is_none() && !paused {
+        *active = queued.pop_front();
+    }
+}
+
+/// A check before the send refused the instruction being dispatched. It goes
+/// back to the head of its queue, which stops, so the loop neither sends it nor
+/// takes it again until the person resumes the queue. It is not queued input:
+/// its text stays in the instruction. False when no instruction was dispatched.
+#[cfg(unix)]
+fn hold_back<T>(active: &mut Option<T>, queued: &mut VecDeque<T>, paused: &mut bool) -> bool {
+    let Some(instruction) = active.take() else {
+        return false;
+    };
+    queued.push_front(instruction);
+    *paused = true;
+    true
+}
+
+/// Nothing is sent while the open conversation cannot be served here, or the
+/// binding it is held with cannot be saved. The text goes back where it came
+/// from, so the person loses nothing, and the status carries the one line
+/// saying why.
 #[allow(clippy::too_many_arguments)]
-fn refuse_unserved_submission(
-    needs: &str,
+fn refuse_before_send(
+    message: &str,
     submitted: String,
     cursor: usize,
     queued: bool,
@@ -2609,7 +2641,7 @@ fn refuse_unserved_submission(
         queued_inputs,
         queued_inputs_paused,
     );
-    *status = Status::Error(needs.to_owned());
+    *status = Status::Error(message.to_owned());
 }
 
 /// Resume always rebuilds the projection after the picker returns. A successful
@@ -3055,6 +3087,14 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
     let cloud_provider = args.provider.clone();
     let cloud_provider_name = args.provider_name.clone();
     let mut provider_name = cloud_provider_name.clone();
+    // Where the `openai` provider sends: polaris-cli builds it from the same
+    // variable, so a chat held through one server is told from another.
+    #[cfg(unix)]
+    let openai_endpoint = (cloud_provider_name == "openai").then(|| {
+        polaris_core::session_settings::SavedEndpointV1::from_base_url(
+            std::env::var("POLARIS_BASE_URL").ok().as_deref(),
+        )
+    });
     let local_router = polaris_core::local_execution::LocalRouter::new(args.spawn_concurrency);
     args.mcp_selection_provider = args
         .mcp_selection_provider
@@ -3764,6 +3804,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                         usage_meter: &usage_meter,
                         local_router: &local_router,
                         endpoints: &model_menu::LOOPBACK_ENDPOINTS,
+                        endpoint: openai_endpoint.as_ref(),
                     },
                 )
                 .await;
@@ -3810,13 +3851,8 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
             // use that current binding; durable settings still take precedence.
             initial_saved_settings.provider.clone_from(&provider_name);
             initial_saved_settings.model.clone_from(&model_name);
-            initial_saved_settings.effort = if is_local_provider(&provider_name) {
-                String::new()
-            } else {
-                args.initial_effort_name
-                    .clone()
-                    .unwrap_or_else(|| "auto".into())
-            };
+            initial_saved_settings.effort =
+                binding_record::effort(&provider_name, args.initial_effort_name.as_deref());
         }
         attach_process_services(
             &mut session,
@@ -3835,9 +3871,11 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
         // begins its turn.
         let mut draft_after_queued_dispatch = None;
         #[cfg(unix)]
-        if active_instruction.is_none() && !queued_inputs_paused {
-            active_instruction = queued_instructions.pop_front();
-        }
+        next_instruction(
+            &mut active_instruction,
+            &mut queued_instructions,
+            queued_inputs_paused,
+        );
         #[cfg(unix)]
         let instruction_text = active_instruction
             .as_ref()
@@ -4863,6 +4901,23 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                             }
                             if chosen {
                                 unserved_binding = None;
+                                #[cfg(unix)]
+                                if let Err(error) = binding_record::record(
+                                    (
+                                        &session,
+                                        &initial_saved_settings,
+                                        rewind_workspace.as_ref().expect("startup owner"),
+                                        &management_effects,
+                                    ),
+                                    &provider_name,
+                                    &model_name,
+                                    args.initial_effort_name.as_deref(),
+                                    openai_endpoint.as_ref(),
+                                ) {
+                                    status = Status::Error(format!(
+                                        "model set to {model_name}, but it is not saved with this chat yet ({error}); it is saved before the next send"
+                                    ));
+                                }
                             }
                             continue;
                         }
@@ -5713,6 +5768,23 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                     }
                     if chosen {
                         unserved_binding = None;
+                        #[cfg(unix)]
+                        if let Err(error) = binding_record::record(
+                            (
+                                &session,
+                                &initial_saved_settings,
+                                rewind_workspace.as_ref().expect("startup owner"),
+                                &management_effects,
+                            ),
+                            &provider_name,
+                            &model_name,
+                            args.initial_effort_name.as_deref(),
+                            openai_endpoint.as_ref(),
+                        ) {
+                            status = Status::Error(format!(
+                                "model set to {model_name}, but it is not saved with this chat yet ({error}); it is saved before the next send"
+                            ));
+                        }
                     }
                     continue;
                 }
@@ -5890,9 +5962,48 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
             status = Status::Error(error.into());
             continue;
         }
-        if let Some(needs) = &unserved_binding {
-            refuse_unserved_submission(
-                needs,
+        // Nothing is sent while the chat cannot be served here, or while the
+        // binding it is held with cannot be saved with it: reopened elsewhere,
+        // it would not know which model it needs. `held_with` is what the
+        // sidechat this input may open is created with.
+        #[cfg(unix)]
+        let (refusal, held_with) = match &unserved_binding {
+            Some(needs) => (Some(needs.clone()), None),
+            None => match binding_record::record(
+                (
+                    &session,
+                    &initial_saved_settings,
+                    rewind_workspace.as_ref().expect("startup owner"),
+                    &management_effects,
+                ),
+                &provider_name,
+                &model_name,
+                args.initial_effort_name.as_deref(),
+                openai_endpoint.as_ref(),
+            ) {
+                Ok(binding) => (None, Some(binding)),
+                Err(error) => (
+                    Some(format!(
+                        "Cannot save the model this chat is held with: {error}"
+                    )),
+                    None,
+                ),
+            },
+        };
+        #[cfg(not(unix))]
+        let (refusal, held_with) = (unserved_binding.clone(), None);
+        if let Some(message) = refusal {
+            #[cfg(unix)]
+            if hold_back(
+                &mut active_instruction,
+                &mut queued_instructions,
+                &mut queued_inputs_paused,
+            ) {
+                status = Status::Error(message);
+                continue;
+            }
+            refuse_before_send(
+                &message,
                 text,
                 cursor_before_submit,
                 dispatching_queued_input,
@@ -6239,6 +6350,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                 args.tool_memory.is_some(),
                 &args.cwd,
                 args.sidechat_auto,
+                held_with.as_ref(),
                 prompt_request,
             )
             .await

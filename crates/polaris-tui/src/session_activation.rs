@@ -7,7 +7,9 @@ use std::sync::Arc;
 use polaris_core::local_execution::LocalRouter;
 use polaris_core::session::Session;
 #[cfg(unix)]
-use polaris_core::session_settings::{SavedSessionSettingsV1, ToolMemoryModeV1};
+use polaris_core::session_settings::{
+    SavedBindingV1, SavedEndpointV1, SavedSessionSettingsV1, ToolMemoryModeV1,
+};
 use polaris_core::tool_memory::RetentionMode;
 use polaris_provider::Provider;
 #[cfg(unix)]
@@ -19,13 +21,63 @@ use crate::model_menu::{self, LocalEndpoints, LocalMiss};
 use crate::{draft::DraftAutosave, input};
 use crate::{memory, persist, tool_memory};
 
+/// What a conversation is held with, as one of its two records says: the
+/// provider and model, and for an OpenAI-compatible provider where it was
+/// reached. Only the held-with record knows the endpoint.
+#[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Held {
+    provider: String,
+    model: String,
+    endpoint: Option<SavedEndpointV1>,
+}
+
+#[cfg(unix)]
+impl Held {
+    fn of_settings(settings: &SavedSessionSettingsV1) -> Self {
+        Self {
+            provider: settings.provider.clone(),
+            model: settings.model.clone(),
+            endpoint: None,
+        }
+    }
+
+    fn of_record(binding: &SavedBindingV1) -> Self {
+        Self {
+            provider: binding.provider.clone(),
+            model: binding.model.clone(),
+            endpoint: binding.endpoint.clone(),
+        }
+    }
+}
+
 #[cfg(unix)]
 pub(super) struct SavedActivationRead {
+    /// The saved settings, or the live binding with the launch's flags when the
+    /// conversation never saved any. Memory is activated from these.
     settings: SavedSessionSettingsV1,
-    /// False when the conversation never saved settings: `settings` is then
-    /// only the live binding, and there is nothing to follow.
-    recorded: bool,
+    /// What the saved settings say. None when the conversation never saved
+    /// settings: `settings` is then only the live binding.
+    from_settings: Option<Held>,
+    /// What the held-with record says, which follows `/model`. None for a
+    /// conversation that has not been sent to since the record existed.
+    from_record: Option<Held>,
     draft: Option<String>,
+}
+
+#[cfg(unix)]
+impl SavedActivationRead {
+    /// What there is to follow. Opening a conversation prefers the record, which
+    /// keeps up with `/model`. A refresh of the same conversation follows only
+    /// the settings: they are what a settings command just changed, and the
+    /// record catches up with the live binding before the next send.
+    fn held(&self, open: bool) -> Option<&Held> {
+        if open {
+            self.from_record.as_ref().or(self.from_settings.as_ref())
+        } else {
+            self.from_settings.as_ref()
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -41,7 +93,12 @@ pub(super) fn read_saved_activation(
     let snapshot = saved
         .snapshot()
         .map_err(|error| format!("Cannot restore conversation settings: {error}"))?;
-    let recorded = snapshot.state.session_settings.is_some();
+    let from_settings = snapshot
+        .state
+        .session_settings
+        .as_ref()
+        .map(Held::of_settings);
+    let from_record = snapshot.state.held_with.as_ref().map(Held::of_record);
     let settings = snapshot.state.session_settings.unwrap_or_else(|| {
         let mut initial = initial_settings.clone();
         initial.model = current_model.to_owned();
@@ -50,7 +107,8 @@ pub(super) fn read_saved_activation(
     let draft = switched.then_some(snapshot.state.draft.text);
     Ok(Some(SavedActivationRead {
         settings,
-        recorded,
+        from_settings,
+        from_record,
         draft,
     }))
 }
@@ -71,6 +129,9 @@ pub(super) struct ModelBinding<'a> {
     pub(super) usage_meter: &'a UsageMeter,
     pub(super) local_router: &'a LocalRouter,
     pub(super) endpoints: &'a LocalEndpoints<'a>,
+    /// Where the `openai` provider this process started on sends. None when it
+    /// started on another provider, whose place is fixed.
+    pub(super) endpoint: Option<&'a SavedEndpointV1>,
 }
 
 /// Whether a change of conversation opens one. Opening selects what the
@@ -99,10 +160,11 @@ pub(super) fn opens_conversation(
 /// Selects the provider and model a conversation was saved with, when this
 /// process can serve them: a local model through the same selection and bind
 /// as `/model`'s `Local model`, a hosted one when it is the provider the
-/// process started on. When it cannot, the binding stays as it was and the
-/// result is the one line saying what the conversation needs. The caller then
-/// sends nothing: a conversation held with a local model must not reach a
-/// hosted provider unless the person chooses that in `/model`.
+/// process started on, and for `openai` when it sends to the same place. When
+/// it cannot, the binding stays as it was and the result is the one line saying
+/// what the conversation needs. The caller then sends nothing: a conversation
+/// held with a local model must not reach a hosted provider unless the person
+/// chooses that in `/model`.
 ///
 /// `open` marks a conversation opened from elsewhere (see
 /// `opens_conversation`). Otherwise, for a refresh or a fork or rewind child,
@@ -116,10 +178,13 @@ pub(super) async fn apply_saved_binding(
     live: &mut ModelBinding<'_>,
 ) -> Option<String> {
     effective_settings.clone_from(&activation.settings);
-    let saved = &activation.settings;
-    if !activation.recorded
-        || (*live.provider_name == saved.provider && *live.model_name == saved.model)
-    {
+    let saved = activation.held(open)?;
+    // A record without an endpoint says nothing about where it was sent.
+    let same_place = saved
+        .endpoint
+        .as_ref()
+        .is_none_or(|held| live.endpoint == Some(held));
+    if *live.provider_name == saved.provider && *live.model_name == saved.model && same_place {
         return None;
     }
     if let Some((runtime, endpoint)) = live.endpoints.runtime_for(&saved.provider) {
@@ -146,7 +211,7 @@ pub(super) async fn apply_saved_binding(
         };
     }
     let on_startup_provider = *live.provider_name == live.startup_name;
-    if saved.provider == live.startup_name && (open || on_startup_provider) {
+    if saved.provider == live.startup_name && same_place && (open || on_startup_provider) {
         live.startup_provider.set_model(&saved.model);
         if live.startup_provider.model().as_deref() == Some(saved.model.as_str()) {
             if !on_startup_provider {
@@ -163,7 +228,7 @@ pub(super) async fn apply_saved_binding(
 }
 
 #[cfg(unix)]
-fn needs_local(saved: &SavedSessionSettingsV1, miss: LocalMiss) -> String {
+fn needs_local(saved: &Held, miss: LocalMiss) -> String {
     let what = format!("This chat needs {} ({})", saved.provider, saved.model);
     match miss {
         LocalMiss::NotReachable => format!(
@@ -179,13 +244,24 @@ fn needs_local(saved: &SavedSessionSettingsV1, miss: LocalMiss) -> String {
 }
 
 #[cfg(unix)]
-fn needs_restart(saved: &SavedSessionSettingsV1) -> String {
-    let how = match saved.provider.as_str() {
+fn needs_restart(saved: &Held) -> String {
+    let mut how = match saved.provider.as_str() {
         "llamacpp" => format!("POLARIS_PROVIDER=llamacpp and --model {}", saved.model),
         provider => format!("POLARIS_PROVIDER={provider}"),
     };
+    let place = match &saved.endpoint {
+        None => String::new(),
+        Some(SavedEndpointV1::Default) => {
+            how.push_str(" and POLARIS_BASE_URL unset");
+            " on the default OpenAI endpoint".to_owned()
+        }
+        Some(SavedEndpointV1::Custom(url)) => {
+            how.push_str(&format!(" and POLARIS_BASE_URL={url}"));
+            format!(" on {url}")
+        }
+    };
     format!(
-        "This chat needs {} ({}). Restart with {how}, or choose a model with /model.",
+        "This chat needs {} ({}){place}. Restart with {how}, or choose a model with /model.",
         saved.provider, saved.model
     )
 }
@@ -481,6 +557,7 @@ pub(crate) mod fixtures {
         pub(crate) effort_name: String,
         usage: UsageMeter,
         router: LocalRouter,
+        endpoint: Option<SavedEndpointV1>,
     }
 
     impl Process {
@@ -495,7 +572,14 @@ pub(crate) mod fixtures {
                 effort_name: "high".to_owned(),
                 usage: UsageMeter::default(),
                 router: LocalRouter::new(1),
+                endpoint: None,
             }
+        }
+
+        /// Where this process's `openai` provider sends.
+        pub(crate) fn sending_to(mut self, endpoint: SavedEndpointV1) -> Self {
+            self.endpoint = Some(endpoint);
+            self
         }
 
         pub(crate) fn binding<'a>(
@@ -513,6 +597,7 @@ pub(crate) mod fixtures {
                 usage_meter: &self.usage,
                 local_router: &self.router,
                 endpoints,
+                endpoint: self.endpoint.as_ref(),
             }
         }
 
@@ -591,12 +676,29 @@ mod tests {
     use super::*;
 
     fn saved(provider: &str, model: &str) -> SavedActivationRead {
+        let settings =
+            SavedSessionSettingsV1::new(provider.into(), model.into(), "auto".into()).unwrap();
         SavedActivationRead {
-            settings: SavedSessionSettingsV1::new(provider.into(), model.into(), "auto".into())
-                .unwrap(),
-            recorded: true,
+            from_settings: Some(Held::of_settings(&settings)),
+            settings,
+            from_record: None,
             draft: None,
         }
+    }
+
+    /// A conversation that never saved settings but has its held-with record,
+    /// as one chosen with `/model` and then sent to is.
+    fn held_with(
+        provider: &str,
+        model: &str,
+        endpoint: Option<SavedEndpointV1>,
+    ) -> SavedActivationRead {
+        let mut activation = saved(provider, model);
+        activation.from_settings = None;
+        activation.from_record = Some(Held::of_record(
+            &SavedBindingV1::new(provider.into(), model.into(), String::new(), endpoint).unwrap(),
+        ));
+        activation
     }
 
     async fn apply(
@@ -732,7 +834,7 @@ mod tests {
         let closed = closed_endpoint().await;
         let mut process = Process::started_on("codex", "gpt-6.1-sol");
         let mut activation = saved("ollama", "qwen3:8b");
-        activation.recorded = false;
+        activation.from_settings = None;
         assert_eq!(open(&mut process, &activation, &closed).await, None);
         assert_eq!(process.provider_name, "codex");
         assert_eq!(process.model_name, "gpt-6.1-sol");
@@ -842,5 +944,164 @@ mod tests {
         );
         assert_eq!(process.provider_name, "ollama");
         assert!(process.bound_local_endpoint());
+    }
+
+    #[tokio::test]
+    async fn a_local_model_chosen_with_model_is_selected_on_opening_though_no_settings_were_saved()
+    {
+        let endpoint = fake_ollama(&["qwen3:8b"], true).await;
+        let mut process = Process::started_on("codex", "gpt-6.1-sol");
+        let startup = process.startup.clone();
+        let activation = held_with("ollama", "qwen3:8b", None);
+        assert!(activation.from_settings.is_none());
+        assert_eq!(open(&mut process, &activation, &endpoint).await, None);
+        assert_eq!(process.provider_name, "ollama");
+        assert_eq!(process.model_name, "qwen3:8b");
+        assert!(!Arc::ptr_eq(&process.provider, &startup));
+        assert!(process.bound_local_endpoint());
+        assert_eq!(startup.model().as_deref(), Some("gpt-6.1-sol"));
+    }
+
+    #[tokio::test]
+    async fn a_local_chat_without_saved_settings_is_not_served_by_a_process_that_cannot_reach_it() {
+        let closed = closed_endpoint().await;
+        let without_model = fake_ollama(&["other:1b"], true).await;
+        for (endpoint, reason) in [
+            (closed, "not reachable"),
+            (without_model, "does not list that model"),
+        ] {
+            let mut process = Process::started_on("codex", "gpt-6.1-sol");
+            let startup = process.startup.clone();
+            let line = open(
+                &mut process,
+                &held_with("ollama", "qwen3:8b", None),
+                &endpoint,
+            )
+            .await
+            .expect("the chat cannot be served here, so nothing may be sent");
+            for expected in ["ollama", "qwen3:8b", "/model", reason] {
+                assert!(line.contains(expected), "{expected} missing from {line}");
+            }
+            assert_eq!(process.provider_name, "codex");
+            assert_eq!(process.model_name, "gpt-6.1-sol");
+            assert!(Arc::ptr_eq(&process.provider, &startup));
+            assert!(!process.bound_local_endpoint());
+        }
+    }
+
+    #[tokio::test]
+    async fn opening_prefers_the_record_to_the_saved_settings_but_a_refresh_follows_the_settings() {
+        let endpoint = fake_ollama(&["qwen3:8b"], true).await;
+        // The settings were saved while the hosted model was in use; `/model`
+        // moved the chat to a local one afterwards, which only the record shows.
+        let mut activation = held_with("ollama", "qwen3:8b", None);
+        let settings = saved("codex", "gpt-6-astra");
+        activation.settings = settings.settings;
+        activation.from_settings = settings.from_settings;
+
+        let mut process = Process::started_on("codex", "gpt-6.1-sol");
+        assert_eq!(open(&mut process, &activation, &endpoint).await, None);
+        assert_eq!(process.provider_name, "ollama");
+
+        // A settings command on the open chat is a refresh, and it follows the
+        // settings it just changed.
+        let mut process = Process::started_on("codex", "gpt-6.1-sol");
+        assert_eq!(
+            apply(&mut process, &activation, false, &endpoint).await,
+            None
+        );
+        assert_eq!(process.provider_name, "codex");
+        assert_eq!(process.model_name, "gpt-6-astra");
+    }
+
+    #[tokio::test]
+    async fn a_chat_held_through_a_local_openai_compatible_server_is_not_served_by_the_default_endpoint()
+     {
+        let closed = closed_endpoint().await;
+        let local = SavedEndpointV1::from_base_url(Some("http://127.0.0.1:8080/v1"));
+        let record = held_with("openai", "local-model", Some(local.clone()));
+        // A different model, and the very same one: only where it is sent differs.
+        for model in ["gpt-6.1-sol", "local-model"] {
+            let mut process =
+                Process::started_on("openai", model).sending_to(SavedEndpointV1::Default);
+            let startup = process.startup.clone();
+            let line = open(&mut process, &record, &closed)
+                .await
+                .expect("the default OpenAI endpoint is not where this chat was held");
+            for expected in [
+                "openai",
+                "local-model",
+                "http://127.0.0.1:8080/v1",
+                "POLARIS_BASE_URL=http://127.0.0.1:8080/v1",
+                "/model",
+            ] {
+                assert!(line.contains(expected), "{expected} missing from {line}");
+            }
+            assert_eq!(process.provider_name, "openai");
+            assert_eq!(process.model_name, model);
+            assert!(Arc::ptr_eq(&process.provider, &startup));
+            assert_eq!(startup.model().as_deref(), Some(model));
+        }
+
+        // Where it was held, it is served, and its model is selected.
+        let mut process = Process::started_on("openai", "gpt-6.1-sol").sending_to(local.clone());
+        assert_eq!(open(&mut process, &record, &closed).await, None);
+        assert_eq!(process.model_name, "local-model");
+        assert_eq!(process.provider.model().as_deref(), Some("local-model"));
+    }
+
+    #[tokio::test]
+    async fn a_chat_held_with_the_default_endpoint_is_not_served_by_a_custom_one() {
+        let closed = closed_endpoint().await;
+        let local = SavedEndpointV1::from_base_url(Some("http://127.0.0.1:8080/v1"));
+        let record = held_with("openai", "gpt-6.1-sol", Some(SavedEndpointV1::Default));
+        let mut process = Process::started_on("openai", "gpt-6.1-sol").sending_to(local);
+        let line = open(&mut process, &record, &closed)
+            .await
+            .expect("not served");
+        for expected in [
+            "on the default OpenAI endpoint",
+            "POLARIS_BASE_URL unset",
+            "/model",
+        ] {
+            assert!(line.contains(expected), "{expected} missing from {line}");
+        }
+        let mut process =
+            Process::started_on("openai", "gpt-6.1-sol").sending_to(SavedEndpointV1::Default);
+        assert_eq!(open(&mut process, &record, &closed).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_chat_that_needs_a_custom_endpoint_says_so_to_a_process_on_another_provider() {
+        let closed = closed_endpoint().await;
+        let local = SavedEndpointV1::from_base_url(Some("http://127.0.0.1:8080/v1"));
+        let mut process = Process::started_on("codex", "gpt-6.1-sol");
+        let line = open(
+            &mut process,
+            &held_with("openai", "local-model", Some(local)),
+            &closed,
+        )
+        .await
+        .expect("not served");
+        assert!(
+            line.contains("POLARIS_PROVIDER=openai and POLARIS_BASE_URL=http://127.0.0.1:8080/v1"),
+            "{line}"
+        );
+        assert_eq!(process.provider_name, "codex");
+    }
+
+    #[tokio::test]
+    async fn settings_that_know_no_endpoint_do_not_refuse_an_openai_process() {
+        // A conversation whose only record is its settings, written before the
+        // endpoint was kept, follows the provider and model alone.
+        let closed = closed_endpoint().await;
+        let mut process = Process::started_on("openai", "gpt-6.1-sol").sending_to(
+            SavedEndpointV1::from_base_url(Some("http://127.0.0.1:8080/v1")),
+        );
+        assert_eq!(
+            open(&mut process, &saved("openai", "gpt-6-astra"), &closed).await,
+            None
+        );
+        assert_eq!(process.model_name, "gpt-6-astra");
     }
 }

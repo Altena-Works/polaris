@@ -103,6 +103,16 @@ impl SessionSettingsOwnerV1<'_> {
                 };
                 expected_revision
             }
+            SessionSettingsCommandV1::Binding { binding } => {
+                // Not the generic arm below: that one creates `session_settings`
+                // from the host's launch flags when a conversation has none.
+                binding.validate()?;
+                if before.state.held_with.as_ref() == Some(&binding) {
+                    return Err(SessionSettingsError::NoChange);
+                }
+                candidate.held_with = Some(binding);
+                0
+            }
             SessionSettingsCommandV1::Goal {
                 expected_revision,
                 operation,
@@ -167,7 +177,7 @@ impl SessionSettingsOwnerV1<'_> {
                             candidate.history_mode = mode;
                         }
                     }
-                    _ => unreachable!("draft and goal handled above"),
+                    _ => unreachable!("draft, binding and goal handled above"),
                 }
                 settings.validate()?;
                 if before.state.session_settings.as_ref() == Some(&settings)

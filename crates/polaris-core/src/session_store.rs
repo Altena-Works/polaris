@@ -6,6 +6,7 @@ use crate::{
         AdmissionReceiptV1, ConversationSnapshot, ConversationStateV2, ConversationStore,
         HistoryMode, RewindBoundaryV1, RewindEffectStatusV1, RewindEligibilityV1,
     },
+    session_settings::SavedBindingV1,
     workflow::{
         ActiveEvidenceArtifactsV1, ConvergenceInputV1, ObservedEvidenceSubjectV1,
         build_owner_convergence, validate_owner_convergence,
@@ -92,7 +93,6 @@ impl PersistedSession {
     /// Ordinary callers should use [`Self::create`]; accepting an explicit ID
     /// lets the session-manager ledger and raw store share one recoverable
     /// sidechat identity.
-    #[cfg(any(unix, all(test, windows)))]
     pub fn create_with_id(
         data_root: &Path,
         database: &Path,
@@ -101,7 +101,26 @@ impl PersistedSession {
         mode: HistoryMode,
         workflow: Option<&SessionWorkflow>,
     ) -> io::Result<Self> {
-        let state = Self::new_state(project_id, session_id, mode, workflow)?;
+        Self::create_held_with(
+            data_root, database, project_id, session_id, mode, workflow, None,
+        )
+    }
+
+    /// [`Self::create_with_id`] for a conversation whose first saved state
+    /// already records the binding it is held with, so there is no moment in
+    /// which it exists, or takes a turn, without one.
+    #[cfg(any(unix, all(test, windows)))]
+    pub fn create_held_with(
+        data_root: &Path,
+        database: &Path,
+        project_id: &str,
+        session_id: &str,
+        mode: HistoryMode,
+        workflow: Option<&SessionWorkflow>,
+        held_with: Option<SavedBindingV1>,
+    ) -> io::Result<Self> {
+        let mut state = Self::new_state(project_id, session_id, mode, workflow)?;
+        state.held_with = held_with;
         #[cfg(all(test, windows))]
         let _creation_guard = windows_creation_guard(data_root, &state)?;
         let mut memory = open_session_memory(database, true)?;
@@ -131,13 +150,14 @@ impl PersistedSession {
     }
 
     #[cfg(not(any(unix, all(test, windows))))]
-    pub fn create_with_id(
+    pub fn create_held_with(
         _data_root: &Path,
         _database: &Path,
         _project_id: &str,
         _session_id: &str,
         _mode: HistoryMode,
         _workflow: Option<&SessionWorkflow>,
+        _held_with: Option<SavedBindingV1>,
     ) -> io::Result<Self> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -1958,6 +1978,67 @@ mod tests {
             .is_err()
         );
         assert!(!broken.path().join("sessions-v2").exists(), "nothing saved");
+    }
+
+    #[test]
+    fn a_conversation_created_held_with_a_binding_has_it_in_its_first_saved_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("memory.sqlite3");
+        let binding =
+            SavedBindingV1::new("ollama".into(), "qwen3:8b".into(), String::new(), None).unwrap();
+        let id = new_session_id().unwrap();
+        let saved = PersistedSession::create_held_with(
+            dir.path(),
+            &database,
+            "project",
+            &id,
+            HistoryMode::Legacy,
+            None,
+            Some(binding.clone()),
+        )
+        .unwrap();
+        // Nothing was published after the creation: this is the state it began in.
+        let first = saved.snapshot().unwrap().state;
+        assert_eq!(first.generation, 0);
+        assert_eq!(first.held_with, Some(binding.clone()));
+        assert_eq!(first.session_settings, None);
+        let reopened = PersistedSession::open(dir.path(), &database, "project", &id).unwrap();
+        assert_eq!(reopened.snapshot().unwrap().state.held_with, Some(binding));
+
+        // A conversation created the ordinary way records none.
+        let other_id = new_session_id().unwrap();
+        let other = PersistedSession::create_with_id(
+            dir.path(),
+            &database,
+            "project",
+            &other_id,
+            HistoryMode::Legacy,
+            None,
+        )
+        .unwrap();
+        assert_eq!(other.snapshot().unwrap().state.held_with, None);
+
+        // A binding that could not be read back creates nothing to be lost.
+        let unreadable_id = new_session_id().unwrap();
+        let unreadable = SavedBindingV1 {
+            provider: String::new(),
+            model: "qwen3:8b".into(),
+            effort: String::new(),
+            endpoint: None,
+        };
+        assert!(
+            PersistedSession::create_held_with(
+                dir.path(),
+                &database,
+                "project",
+                &unreadable_id,
+                HistoryMode::Legacy,
+                None,
+                Some(unreadable),
+            )
+            .is_err()
+        );
+        assert!(!dir.path().join("sessions-v2").join(&unreadable_id).exists());
     }
 
     #[test]
