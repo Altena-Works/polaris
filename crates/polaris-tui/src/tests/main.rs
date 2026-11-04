@@ -2426,6 +2426,56 @@ fn working_turn_accepts_and_queues_prompts_and_commands_in_order() {
     assert_eq!(history.older(""), None);
 }
 
+/// One Esc during a turn: whether it interrupts, and the status line and
+/// hint deadline it leaves behind. The handler is given neither the draft nor
+/// the queue, so no Esc can change them; the signature holds that, not an
+/// assertion.
+fn inflight_escape(
+    gesture: &mut rewind_ui::DoubleEscape,
+    at: Instant,
+) -> (bool, Status, Option<Instant>) {
+    let mut status = Status::Thinking {
+        elapsed: Duration::ZERO,
+    };
+    let mut notice_until = None;
+    let interrupts = inflight_escape_interrupts(gesture, at, &mut status, &mut notice_until);
+    (interrupts, status, notice_until)
+}
+
+#[test]
+fn the_first_escape_during_a_turn_only_shows_a_hint() {
+    let start = Instant::now();
+    let (interrupts, status, notice_until) =
+        inflight_escape(&mut rewind_ui::DoubleEscape::default(), start);
+    assert!(!interrupts);
+    assert!(matches!(&status, Status::Notice(hint) if hint == "Press Esc again to interrupt"));
+    // The hint stays up as long as a second Esc still counts.
+    assert_eq!(notice_until, Some(start + INTERRUPT_CONFIRM_WINDOW));
+}
+
+#[test]
+fn a_second_escape_inside_the_window_interrupts() {
+    let start = Instant::now();
+    let mut gesture = rewind_ui::DoubleEscape::default();
+    inflight_escape(&mut gesture, start);
+    let last_moment = start + INTERRUPT_CONFIRM_WINDOW - Duration::from_millis(1);
+    assert!(inflight_escape(&mut gesture, last_moment).0);
+}
+
+#[test]
+fn a_second_escape_after_the_window_starts_over() {
+    let start = Instant::now();
+    let mut gesture = rewind_ui::DoubleEscape::default();
+    inflight_escape(&mut gesture, start);
+    let late = start + INTERRUPT_CONFIRM_WINDOW + Duration::from_millis(1);
+    let (interrupts, status, notice_until) = inflight_escape(&mut gesture, late);
+    assert!(!interrupts);
+    assert!(matches!(&status, Status::Notice(hint) if hint == "Press Esc again to interrupt"));
+    assert_eq!(notice_until, Some(late + INTERRUPT_CONFIRM_WINDOW));
+    // The late press is the first of a new pair, so the next one interrupts.
+    assert!(inflight_escape(&mut gesture, late + Duration::from_millis(1)).0);
+}
+
 #[test]
 fn slash_completion_preserves_recalled_and_queued_commands() {
     let mut history = input::History::new();

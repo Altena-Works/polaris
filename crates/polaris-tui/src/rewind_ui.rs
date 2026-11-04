@@ -16,9 +16,15 @@ pub(crate) struct DoubleEscape {
 impl DoubleEscape {
     /// Returns true only for a second idle Esc within the gesture window.
     pub(crate) fn press(&mut self, now: Instant) -> bool {
+        self.press_within(now, DOUBLE_ESCAPE_WINDOW)
+    }
+
+    /// Returns true only for a second Esc at most `window` after the first.
+    /// A later one starts a new pair instead.
+    pub(crate) fn press_within(&mut self, now: Instant, window: Duration) -> bool {
         if self
             .first
-            .is_some_and(|first| now.saturating_duration_since(first) <= DOUBLE_ESCAPE_WINDOW)
+            .is_some_and(|first| now.saturating_duration_since(first) <= window)
         {
             self.first = None;
             true

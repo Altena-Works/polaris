@@ -432,7 +432,7 @@ fn the_status_line_shows_thinking_while_a_turn_is_in_flight() {
     let content = render_footer_to_string("", &status, &header, &[], 0, 60, 6);
     assert!(content.contains("Working"));
     assert!(content.contains("3s"));
-    assert!(content.contains("esc to interrupt"));
+    assert!(content.contains("esc twice to interrupt"));
 }
 
 /// Regression test for the input box sitting well above the terminal's

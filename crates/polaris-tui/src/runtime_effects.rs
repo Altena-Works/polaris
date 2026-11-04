@@ -125,6 +125,8 @@ mod tests {
     struct Key(KeyCode);
     impl KeyReader for Key {
         fn read_key(&mut self) -> std::io::Result<KeyCode> {
+            // An answer typed inside the approver's guard period does not count.
+            std::thread::sleep(crate::approver::ANSWER_GUARD);
             Ok(self.0)
         }
     }

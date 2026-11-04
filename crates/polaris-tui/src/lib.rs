@@ -428,6 +428,10 @@ impl approver::KeyReader for LinuxSignalAwareKeyReader {
             || signal::pending_linux_process_shutdown().is_some(),
         )
     }
+
+    fn discard_pending(&mut self) -> std::io::Result<()> {
+        approver::discard_waiting_events()
+    }
 }
 
 /// How often an idle composer wakes to let the draft autosave run.
@@ -2152,6 +2156,10 @@ const MOUSE_SCROLL_LINES: usize = 3;
 /// that it doesn't look stuck once the user has seen it.
 const MID_TURN_NOTICE_DURATION: Duration = Duration::from_millis(1500);
 
+/// How long a second Esc still interrupts a turn after the first; later, the
+/// first is forgotten. The "Press Esc again" hint stays up as long.
+const INTERRUPT_CONFIRM_WINDOW: Duration = Duration::from_secs(2);
+
 #[derive(Debug, Default)]
 struct ExitConfirmation {
     armed: bool,
@@ -2511,6 +2519,23 @@ fn apply_inflight_key(
         }
         InputAction::Quit => InflightInputAction::Interrupt,
     }
+}
+
+/// Esc while a turn is in flight. A first press only shows a hint; it is given
+/// neither the draft nor the queue, so it cannot touch them. True means a second
+/// press inside `INTERRUPT_CONFIRM_WINDOW`: interrupt the turn.
+fn inflight_escape_interrupts(
+    gesture: &mut rewind_ui::DoubleEscape,
+    now: Instant,
+    status: &mut Status,
+    notice_until: &mut Option<Instant>,
+) -> bool {
+    if gesture.press_within(now, INTERRUPT_CONFIRM_WINDOW) {
+        return true;
+    }
+    *status = Status::Notice("Press Esc again to interrupt".into());
+    *notice_until = Some(now + INTERRUPT_CONFIRM_WINDOW);
+    false
 }
 
 fn record_submission(
@@ -6667,7 +6692,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
             // `agent_future` is only ever polled here, in one place, so
             // dropping it on interrupt is real cancellation: Rust futures
             // stop making progress the moment nothing polls them again,
-            // which is what "esc to interrupt" means in practice — this
+            // which is what "esc twice to interrupt" means in practice — this
             // doesn't kill an already-spawned OS subprocess a tool call
             // may have started, only stops *waiting* on the turn.
             // The tick-redraw branch below only redraws the footer
@@ -6732,6 +6757,10 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
             // would only ever survive until the very next tick (at most
             // 100ms later), which reads as no feedback at all.
             let mut mid_turn_notice_until: Option<Instant> = None;
+            // A first Esc waits here for its second. Per turn, so an Esc
+            // pressed near the end of the last turn cannot count toward
+            // interrupting this one.
+            let mut interrupt_gesture = rewind_ui::DoubleEscape::default();
 
             let turn_outcome = loop {
                 // A queued run may have restored a draft. These keys are
@@ -6918,7 +6947,9 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                                     }
                                     SlashCompletionAction::PassThrough => {}
                                 }
-                                // Esc interrupts the in-flight turn;
+                                // A second Esc interrupts the in-flight turn
+                                // (the first only shows a hint and leaves
+                                // the draft alone);
                                 // PageUp/PageDown still scroll the
                                 // conversation history while a turn is
                                 // running, the same saturating-add/sub as
@@ -6928,15 +6959,17 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                                 // as the idle-loop handler.
                                 match key.code {
                                     KeyCode::Esc => {
-                                        #[cfg(unix)]
-                                        {
-                                            let context = runtime_commands::RuntimeMutationContext {effects:&management_effects,lease:&_project_activity,session_id:&durable_session_id,generation:runtime_generation,accepted:true};
-                                            match runtime_effects::begin(&context,"D23",durable_session_id.as_bytes()) {
-                                                Ok(started)=>interruption_effect=started,
-                                                Err(error)=>{*runtime_error.borrow_mut()=Some(error);break TurnOutcome::Fatal;}
+                                        if inflight_escape_interrupts(&mut interrupt_gesture, Instant::now(), &mut status, &mut mid_turn_notice_until) {
+                                            #[cfg(unix)]
+                                            {
+                                                let context = runtime_commands::RuntimeMutationContext {effects:&management_effects,lease:&_project_activity,session_id:&durable_session_id,generation:runtime_generation,accepted:true};
+                                                match runtime_effects::begin(&context,"D23",durable_session_id.as_bytes()) {
+                                                    Ok(started)=>interruption_effect=started,
+                                                    Err(error)=>{*runtime_error.borrow_mut()=Some(error);break TurnOutcome::Fatal;}
+                                                }
                                             }
+                                            break TurnOutcome::Interrupted;
                                         }
-                                        break TurnOutcome::Interrupted;
                                     },
                                     KeyCode::PageUp => {
                                         conversation_view.scroll_offset =
