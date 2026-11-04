@@ -369,14 +369,18 @@ fn refers_to(value: &str, rest: &str) -> bool {
 }
 
 /// How much of `rest`, the text after `value`, goes with the value when it is
-/// a secret's, or `None` if it only refers to one or has no letter or digit in
-/// it (the `&` of `&'a str`, `****`). A bare value that blanks and words follow
-/// takes them to the end of the line (`correct horse battery staple`), unless
-/// they are code (`mysql -e "select version()"` after `MYSQL_PWD=hunter2`):
-/// then it is the value alone, as before.
+/// a secret's, or `None` if it only refers to one or is a bare borrow or mask
+/// that no words follow (the `&` of `&'a str`, `****`). A quoted value of
+/// marks alone (`"!@#$%^&*"`) is still a secret. A bare value that blanks and
+/// words follow takes them to the end of the line (`correct horse battery
+/// staple`), unless they are code (`mysql -e "select version()"` after
+/// `MYSQL_PWD=hunter2`): then it is the value alone, as before.
 fn takes(value: &str, rest: &str) -> Option<usize> {
     let (quote, inner) = unquote(value);
-    if !inner.chars().any(char::is_alphanumeric) {
+    if quote.is_empty()
+        && !rest.starts_with([' ', '\t'])
+        && inner.chars().all(|c| c == '&' || c == '*')
+    {
         return None;
     }
     if !quote.is_empty() {
@@ -657,6 +661,13 @@ mod tests {
         ("TOKEN=${X};hunter2value", "hunter2value"),
         ("PASSWORD=<abc>,hunter2value", "hunter2value"),
         ("PASSWORD=%NAME%;hunter2value", "hunter2value"),
+        // Marks alone are a secret unless they are a bare borrow or mask.
+        ("password: \"!@#$%^&*\"", "!@#$%^&*"),
+        ("password: !@#$%^&*", "!@#$%^&*"),
+        (
+            "password: * correct horse battery staple",
+            "correct horse battery staple",
+        ),
         // A bare value with words after it takes them to the end of the line.
         (
             "password: correct horse battery staple",
