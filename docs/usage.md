@@ -74,7 +74,7 @@ macOS arm64では、例えば空の対象directoryで次を実行する。
 polaris env set nextjs --path /absolute/path/to/project
 ```
 
-対象・対応版・固定資源・作成先を1回確認し、専用runtimeとcacheを使ってoffline導入・build/smoke・記録まで進む。対応profileは`polaris env status`で確認する。モデルへの問い合わせは行わず、認証がない状態でもCLIから使える。TUIでは`/env set nextjs`または完全一致の`env set nextjs`を使う。
+対象・対応版・固定資源・作成先を1回確認し、専用runtimeとcacheを使ってoffline導入・build/smoke・記録まで進む。対応profileは`polaris env status`で確認する。モデルへの問い合わせは行わず、認証がない状態でもCLIから使える。TUIの`/env`は削除した。
 
 既存manifest/lock/sourceと既存の導入先は保持する。安全に対応できない依存や版は理由を表示して停止し、online modeや別package managerへ暗黙に切り替えない。globalなNode/Python/Rust/Goやshell設定は変更しない。版やruntimeの参照先は完了時のreceiptを参照する。
 
@@ -101,7 +101,7 @@ implement = ["builtin:implement"]
 review = ["user:review-rules"]
 ```
 
-比較などで無効にする場合は`[workflow] enabled = false`を明示する。`--phase <段階>`はworkflowが有効な起動だけで使える。`--resume <v2 UUID>`は保存済みv2会話を続け、`--fork <v2 UUID>`は指定会話から新しいUUIDを作る。両方は同時に指定できない。旧JSONLのIDを`--resume`へ渡した場合は、新しいv2 UUIDへ一度だけ取り込む。workflow状態を含む保存済み会話を、workflowを無効にして再開することはできない。
+比較などで無効にする場合は`[workflow] enabled = false`を明示する。`--phase <段階>`はworkflowが有効な起動だけで使える。`--resume <v2 UUID>`は保存済みv2会話を続け、`--fork <v2 UUID>`は指定会話から新しいUUIDを作る。両方は同時に指定できない。旧JSONLのIDを`--resume`へ渡した場合は、新しいv2 UUIDへ一度だけ取り込む。保存済みの会話は保存したworkflowの設定で再開し、起動時の`[workflow]`設定では変わらない。実行方式を変えるには、再開時に`--workflow-mode manual|adaptive|off`を指定し、確認画面で承認する。
 
 履歴方式の既定は`legacy`である。`--history-mode strict10`は直近10個の実ユーザーターンを保持し、固定したローカル埋め込み設定を必要とする。設定方法と保存境界は[コンテキスト効率化](context-efficiency.md)を参照。
 
@@ -289,37 +289,34 @@ SwiftUIの作業画面は、選択したプロジェクトと会話を専用の�
 
 失敗ターンの使用量は累計表示へ反映されない。プロバイダがusageを返さないときは`0`と表示する。会話の履歴は、PageUp・PageDownとマウスホイールでスクロールできる。PageUp・PageDownはターンの実行中も使える。
 
-`/model`はホスト型モデルと`Local model`を選ぶピッカーを表示する。`Local model`を選ぶと、接続済みのOllamaとLM Studioからモデルを取得し、次の一覧で選択できる。ツール対応を確認できたモデルだけを採用し、次のターンから反映する。推論強度はこのピッカーでは選ばない。`/permissions`では起動時の承認境界を超える選択を拒否し、固定のsandboxと再起動用の引数を表示する。`/skills`は閲覧専用である。
+`/model`はホスト型モデルと`Local model`を選ぶピッカーを表示する。`Local model`を選ぶと、接続済みのOllamaとLM Studioからモデルを取得し、次の一覧で選択できる。ツール対応を確認できたモデルだけを採用し、次のターンから反映する。推論強度はこのピッカーでは選ばない。`/permissions`では起動時の承認境界を超える選択を拒否し、固定のsandboxと再起動用の引数を表示する。
 
 `/resume`の一覧は、現在の作業ディレクトリを最初に置き、ほかのディレクトリは最後の会話日時の新しい順に並べる。各行には相対時刻、メッセージ数、最初のユーザーメッセージの60文字プレビューを表示する。30日を超えた会話は絶対日時で表示する。legacyでは壊れた行より前までを読むが、v2の破損・世代不一致は原文を切り捨てず拒否する。
 
-別の会話を開くとき（`--resume`での起動、`/resume`）は、その会話に保存したproviderとモデルが最初から選ばれる。この設定は`/session`の`Saved provider`・`model`に出るもので、`/session configure`・`/memory configure`・`/tool-memory`などで設定を一度保存した会話に入る。設定を保存していない会話は、従来どおり現在の選択で動く。保存したローカルモデル（OllamaまたはLM Studio）は、`/model`の`Local model`と同じ経路で選ぶ。loopbackのサーバーから在庫を取得し、保存したモデルがあってツール対応を確認できたときだけ採用する。保存したホスト型のモデルは、起動したprovider（`codex`または`openai`）が同じときに選ぶ。`/fork`と巻き戻しは、今開いている会話の子を作る操作なので選び直さず、今使っているproviderを引き継ぐ。`/model`で選んだローカルモデルは、子でも続く。
+別の会話を開くとき（`--resume`での起動、`/resume`）は、その会話に保存したproviderとモデルが最初から選ばれる。この設定が入るのは、`/memory configure`などで設定を一度保存した会話である。設定を保存していない会話は、従来どおり現在の選択で動く。保存したローカルモデル（OllamaまたはLM Studio）は、`/model`の`Local model`と同じ経路で選ぶ。loopbackのサーバーから在庫を取得し、保存したモデルがあってツール対応を確認できたときだけ採用する。保存したホスト型のモデルは、起動したprovider（`codex`または`openai`）が同じときに選ぶ。`/new fork`と巻き戻しは、今開いている会話の子を作る操作なので選び直さず、今使っているproviderを引き継ぐ。`/model`で選んだローカルモデルは、子でも続く。
 
-保存したproviderをこのプロセスが提供できないとき（ローカルのサーバーが動いていない、モデルが無い、ツール対応を確認できない、起動したproviderが違う、`llamacpp`で保存した会話を別のproviderの起動で開く、など）も、会話は開いて履歴を表示する。ただし何も送らない。送ろうとした入力は入力欄へ戻り、ステータス行が、会話の必要とするproviderとモデルと入手方法（サーバーの起動、`POLARIS_PROVIDER=...`での再起動など）を1行で示す。設定を保存した会話では、ローカルモデルで行った会話が、人が選ばないままホスト型へ送られることはない（設定を保存していない会話は対象外）。この会話から`/fork`や巻き戻しで作った会話も、同じく何も送れない。`/model`でモデルを選べば、開いている会話はその選択で送れる。
+保存したproviderをこのプロセスが提供できないとき（ローカルのサーバーが動いていない、モデルが無い、ツール対応を確認できない、起動したproviderが違う、`llamacpp`で保存した会話を別のproviderの起動で開く、など）も、会話は開いて履歴を表示する。ただし何も送らない。送ろうとした入力は入力欄へ戻り、ステータス行が、会話の必要とするproviderとモデルと入手方法（サーバーの起動、`POLARIS_PROVIDER=...`での再起動など）を1行で示す。設定を保存した会話では、ローカルモデルで行った会話が、人が選ばないままホスト型へ送られることはない（設定を保存していない会話は対象外）。この会話から`/new fork`や巻き戻しで作った会話も、同じく何も送れない。`/model`でモデルを選べば、開いている会話はその選択で送れる。
 
 ### スラッシュコマンド
 
-`/`で候補を絞り込み、`↑`/`↓`とEnterで実行する。状態照会や設定変更はローカルで処理し、`/review`はモデルを使う。Linux限定の`/apply run`もモデル実行を伴う。Linuxにしか経路がない`/setting`と`/apply`は、macOSでは`/help`にも候補にも出ない。履歴の圧縮は自動で行い、手動で起動するコマンドはない。全コマンドの構文・出力は[コマンド一覧](command-reference.md)にまとめる。
+`/`で候補を絞り込み、`↑`/`↓`とEnterで実行する。コマンドは次の15個で、`/help`・候補・補完に同じ順で出る。状態照会や設定変更はローカルで処理する。履歴の圧縮は自動で行い、手動で起動するコマンドはない。削除した名前（`/doctor`・`/skills`・`/clear`・`/review`など）は、何も実行せず、代わりの操作を1行で答える。全コマンドの構文・出力と、削除した名前の一覧は[コマンド一覧](command-reference.md)にまとめる。
 
 | コマンド | 内容 |
 | --- | --- |
-| `/help`、`/status`、`/doctor` | ヘルプ（今のOSで使えるコマンドだけを載せる）、現在の状態（project rootを含む）、診断を表示する。`/doctor`は設定済み・利用可能・観測済みを分けて示し、認証・モデル・MCPには接続しない。利用可能の欄にはsandboxの可否、provider解決、容量の観測を含む。 |
-| `/decided`、`/decided add <文章>` | 保存された決定事項を読み、または確認後に文章を加工せず追記する。追記はmacOSとLinuxで使える。 |
-| `/sync`、`/sync status` | 共有の状態を、この端末に残した記録から表示する。先頭の行が示すとおりremoteには接続せず、remoteの現在の状態ではない。 |
-| `/phase` | workflowが有効なら現在の段階を表示し、`/phase implement`のように次ターンから使う段階を保存する。 |
-| `/skills` | 検出したskillを一覧表示する。 |
-| `/new`、`/resume`、`/fork`、`/clear` | 会話を新規作成、再開、複製、現在epochを消去する。`/clear`でも過去の証拠は保持する。 |
-| `/init` | カレントディレクトリに`AGENTS.md`の雛形を作成する。既存時は何もしない。 |
 | `/model`、`/permissions` | モデル、起動時の境界内で承認ポリシーを選び直す。推論強度の固定は起動時の`--effort`で指定する。 |
+| `/new`、`/new fork`、`/resume` | 会話を新規作成、複製（分岐）、再開する。 |
+| `/status`、`/diff`、`/help` | 現在の状態（project rootを含む）、未コミットの変更、コマンドとキーの一覧を表示する。 |
 | `/mcp` | 登録・外部接続上限と認証情報の参照名を表示する。`setup`で検出・登録、`check <server>`でカタログ取得、`enable <server>`・`disable <server>`でプロジェクトの有効化を変更する。 |
 | `/mcp materialize <名前>` | 検出したパッケージを確認後に取得・固定する。登録は別途確認する。取得処理の終了までは待つ必要がある。 |
 | `/mcp secret set`、`/mcp secret delete <参照名>` | 専用画面で秘密値を入力し、または保存済みの認証情報を確認後に削除する。`set`の引数へ値を書かない。値も文字数も表示せず、Esc・Ctrl-Cで入力を取り消せる。 |
-| `/subagents list`、`/subagents wait <child-id> <attempt-id>`、`/subagents cancel <child-id> <attempt-id>` | 実行中の子を一覧からIDで選び、状態を取得するか、確認後に停止を要求する。停止要求の受付は終了証明ではなく、`outcome_unknown`は結果未確定を示す。 |
-| `/memory import <JSONL>`、`/memory search <query>`、`/memory get <session> <id>`、`/memory source <session> <id>`、`/memory forget <session>` | 記録の取り込み、検索・参照、確認後の記憶削除を行う。取り込みと削除は巻き戻しでは取り消せない。 |
-| `/diff`、`/review` | 変更点を表示し、またはレビュー指示を通常のモデルターンとして送る。 |
-| `/export` | 会話をMarkdownへ書き出す。ファイル名省略時はタイムスタンプ付きの名前を使う。 |
+| `/login`、`/login list`、`/login decider` | アカウントの登録、登録済みアカウントの一覧、判定器の選択を行う。判定器の選択は次の起動から有効になる。 |
 | `/logout [登録ID]` | 追加確認なしで指定認証を解除し、結果を表示する。省略時は使用中の認証が対象。 |
-| `/quit`、`/exit` | polarisを終了する。 |
+| `/memory search <query>`、`/memory get <session> <id>`、`/memory source <session> <id>`、`/memory import <JSONL>`、`/memory forget <session>` | 記録の取り込み、検索・参照、確認後の記憶削除を行う。取り込みと削除は巻き戻しでは取り消せない。 |
+| `/memory configure on\|off` | 圧縮前履歴の記憶設定を、開いている会話に保存する。 |
+| `/sync`、`/sync status` | 共有の状態を、この端末に残した記録から表示する。先頭の行が示すとおりremoteには接続せず、remoteの現在の状態ではない。 |
+| `/export` | 会話をMarkdownへ書き出す。ファイル名省略時はタイムスタンプ付きの名前を使う。 |
+| `/init` | カレントディレクトリに`AGENTS.md`の雛形を作成する。既存時は何もしない。 |
+| `/quit`、`/exit`、`/q` | polarisを終了する。 |
 
 `/resume`は作業ディレクトリ別に会話をグループ化し、現在のディレクトリを先頭に表示する。選んだ会話への送信は既存ファイルへ追記する。
 
@@ -368,7 +365,7 @@ auto_regenerate = true
 
 この設定はroot起点の自動更新だけを止める。`spawn`による明示的なsubagent実行は維持される。
 
-コマンドの一覧は`/help`で確認できる。今のOSで経路があるコマンドだけを載せ、未対応の操作は明示的に拒否する。`/usage`は`/status`のトークン表示と重なるため設けない。
+コマンドとキーの一覧は`/help`で確認できる。載せるのは上の15個だけで、削除した名前は代わりの操作を1行で答える。`/usage`は`/status`のトークン表示と重なるため設けない。
 
 ## subagent
 

@@ -1694,7 +1694,6 @@ UPDATE_FILEMAP=1 cargo test -p polaris-core --test filemap
 - `continuation_tests.rs` — Shared continuation recovery through real raw/receipt owners and fake backends.
 - `conversation_view.rs` — 会話のtranscript表示だけを所有する。
 - `draft.rs` — An unsent draft belongs to its conversation and never enters raw history.
-- `environment_commands.rs` — Direct local management commands. Work stays on a retained host worker;
 - `file_input.rs` — File links remain ordinary Markdown in admission, drafts, and history.
 - `file_reveal.rs` — Reveal an explicitly clicked local file in Finder. No file body is opened.
 - `input.rs` — Pure keystroke-to-action mapping for the input box. Kept separate from
@@ -1708,27 +1707,26 @@ UPDATE_FILEMAP=1 cargo test -p polaris-core --test filemap
 - `model_menu.rs` — Model inventory and selection using the existing provider lifetime.
 - `onboarding.rs` — The onboarding screen: shown by `polaris-cli` when the interactive TUI
 - `persist.rs` — Session persistence: one JSON `Message` per line.
+- `private_state.rs` — Linux startup: tighten the project state directory to private before first use.
 - `render.rs` — Pure rendering: turns a `Session` + input state into terminal cells.
 - `resume_effect.rs` — Exact saved-session selection before a host activates a prepared candidate.
 - `rewind_ui.rs` — TUI-only rewind interaction state. Checkpoint eligibility and file changes
 - `role_commands.rs` — Role bindings select existing fixed tier providers; they create no provider.
-- `runtime_commands.rs` — Commands over the live host control plane; no desktop-state mirror.
+- `runtime_commands.rs` — The proof a runtime management request carries: the stop record and journalled approvals.
 - `runtime_effects.rs` — Runtime management requests use the bound activity lease, never source mutation.
 - `screen_selection.rs` — Selection of visible terminal cells only; no input buffers or persistence.
 - `selection.rs` — Mouse drag-to-select over the conversation history. Operates entirely
 - `session_activation.rs` — 保存会話の設定とプロセス所有サービスを実行中のセッションへ適用する。
-- `session_commands.rs` — Saved session controls use the conversation owner and shared project lease.
+- `session_commands.rs` — `/memory configure` saves the remember and history-mode settings of the open conversation.
 - `sessions.rs` — Enumerates saved conversations under `~/.polaris/sessions/` for the
 - `signal.rs` — Linux process-signal capture for the interactive terminal lifetime.
 - `slash.rs` — Slash commands: local, client-side commands recognized when the input
-- `source_apply.rs` — Linux terminal adapter for the existing source-bound native owner.
 - `status_view.rs` — Status projection over the existing session and management owners.
 - `terminal.rs` — Shared visible-cell selection across TUI screens, with no history or disk sink.
 - `time.rs` — A tiny, dependency-free UTC timestamp formatter — just enough to
 - `tool_memory.rs` — Immutable, scoped tool output storage behind the reserved memory read path.
 - `windows_admission_tests.rs` — Windows TUI admission and slash command tests that preserve rejected work and state.
 - `windows_read_only.rs` — Provider-free Windows browsing while native mutation owners are unavailable.
-- `workspace_commands.rs` — Workspace projections remain UI-only and bound to the startup source.
 
 ## `crates/polaris-tui/src/mcp_commands`
 
@@ -1748,7 +1746,7 @@ UPDATE_FILEMAP=1 cargo test -p polaris-core --test filemap
 
 ## `crates/polaris-tui/src/session_commands`
 
-- `tests.rs` — TUI session settings and history controls without provider requests.
+- `tests.rs` — `/memory configure` saves the remember and history settings without provider requests.
 
 ## `crates/polaris-tui/src/terminal`
 

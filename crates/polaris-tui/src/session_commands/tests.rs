@@ -1,30 +1,17 @@
-//! TUI session settings and history controls without provider requests.
+//! `/memory configure` saves the remember and history settings without provider requests.
 
 use super::*;
 use polaris_core::{
     conversation_memory::{
         EmbeddingModel, StrictEmbedder, StrictHistory, StrictSummaryProvider, SummaryRequest,
     },
+    conversation_state::ConversationSnapshot,
     management_effect::ManagementEffectStateV1,
     session_store::PersistedSession,
 };
-use polaris_provider::{CompletionRequest, CompletionResponse, Message, ProviderError};
+use polaris_provider::{Message, Provider};
 use ratatui::{backend::TestBackend, crossterm::event::KeyCode};
 use std::{collections::VecDeque, future::Future, io, pin::Pin, sync::Arc};
-
-struct CurrentProvider;
-#[async_trait::async_trait]
-impl Provider for CurrentProvider {
-    async fn complete(&self, _: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
-        panic!("settings never call a provider")
-    }
-    fn model(&self) -> Option<String> {
-        Some("gpt-5.6-sol".into())
-    }
-    fn set_model(&self, _: &str) {
-        panic!("root owns activation after commit")
-    }
-}
 
 struct Keys(VecDeque<KeyCode>);
 impl KeyReader for Keys {
@@ -111,7 +98,6 @@ impl Fixture {
             &self.initial,
             &self.workspace,
             &self.effects,
-            &CurrentProvider,
             factory,
             pending,
         )
@@ -138,13 +124,6 @@ impl Fixture {
 fn only_committed_settings_changes_request_binding_refresh() {
     let mut fixture = Fixture::new();
     let before = fixture.snapshot().state;
-    for request in ["session", "session current", "session history", "goal"] {
-        let result = fixture
-            .call_result(request, KeyCode::Esc, true, None)
-            .unwrap();
-        assert!(!result.settings_changed, "{request}");
-        assert!(!result.lines.is_empty(), "{request}");
-    }
     let cancelled = fixture
         .call_result("memory configure on", KeyCode::Esc, false, None)
         .unwrap();
@@ -155,53 +134,31 @@ fn only_committed_settings_changes_request_binding_refresh() {
         .unwrap();
     assert!(committed.settings_changed);
     assert!(fixture.snapshot().state.session_settings.unwrap().remember);
-    let goal = fixture
-        .call_result("goal set finish", KeyCode::Char('y'), false, None)
-        .unwrap();
-    assert!(!goal.settings_changed);
-    assert!(fixture.snapshot().state.goal.unwrap().active);
 }
 
 #[test]
-fn m3c_helper_settings_goal_rows_save_normal_values_and_refuse_unique_inputs() {
+fn memory_configure_saves_remember_and_refuses_every_other_request() {
     let mut fixture = Fixture::new();
-    for request in [
-        "memory configure on",
-        "memory configure off",
-        "tool-memory history",
-        "tool-memory retrieval",
-        "tool-memory off",
-        "tool-memory endpoint http://localhost:8080/v1 embed-1",
-        "tool-memory model embed-2",
-        "session configure codex gpt-6-astra auto",
-        "goal set 実装を完了する",
-        "goal stop",
-        "goal resume",
-        "goal clear",
-    ] {
+    for request in ["memory configure on", "memory configure off"] {
         fixture
             .call(request, KeyCode::Char('y'), false, None)
             .unwrap();
     }
-    let state = fixture.snapshot().state;
-    let saved = state.session_settings.unwrap();
+    let saved = fixture.snapshot().state.session_settings.unwrap();
     assert!(!saved.remember);
-    assert_eq!(saved.tool_memory, ToolMemoryModeV1::Off);
-    assert_eq!(saved.tool_memory_embedding.unwrap().model, "embed-2");
-    assert_eq!(saved.model, "gpt-6-astra");
-    assert_eq!(CurrentProvider.model().as_deref(), Some("gpt-5.6-sol"));
-    assert!(!state.goal.unwrap().active);
+    // What the removed `/session`, `/goal`, `/tool-memory` and `/history`
+    // used to save or show is not served here: nothing changes.
     for request in [
         "memory configure unsupported",
-        "tool-memory external",
-        "tool-memory endpoint https://example.com/v1 model",
-        "tool-memory model",
+        "session configure codex gpt-6-astra auto",
+        "session history strict10",
+        "session current",
+        "tool-memory history",
+        "tool-memory endpoint http://localhost:8080/v1 embed-1",
+        "goal set 実装を完了する",
+        "goal",
         "compact threshold 1000",
-        "compact threshold off",
-        "session configure other-provider gpt-6-astra auto",
-        "session configure codex unavailable-model auto",
-        "session configure codex gpt-6-astra high",
-        "goal set",
+        "history 20",
     ] {
         fixture.refuse(request);
     }
@@ -212,10 +169,6 @@ fn m3c_helper_settings_goal_rows_save_normal_values_and_refuse_unique_inputs() {
             .is_err()
     );
     assert_eq!(fixture.snapshot().state, before);
-    fixture
-        .call("tool-memory endpoint off", KeyCode::Char('y'), false, None)
-        .unwrap();
-    fixture.refuse("tool-memory model embed-3");
     assert!(
         fixture
             .effects
@@ -348,13 +301,11 @@ async fn resuming_a_conversation_saved_with_a_local_model_selects_it_before_the_
 async fn a_conversation_saved_with_the_hosted_model_opens_on_it_in_a_hosted_process() {
     use crate::session_activation::fixtures::{Process, closed_endpoint};
     let mut fixture = Fixture::new();
+    // Its first saved setting records the binding the conversation was held with.
+    fixture.initial =
+        SavedSessionSettingsV1::new("codex".into(), "gpt-6-astra".into(), "auto".into()).unwrap();
     fixture
-        .call(
-            "session configure codex gpt-6-astra auto",
-            KeyCode::Char('y'),
-            false,
-            None,
-        )
+        .call("memory configure off", KeyCode::Char('y'), false, None)
         .unwrap();
     let mut process = Process::started_on("codex", "gpt-6.1-sol");
     let (needs, _) = reopen(&fixture, &mut process, &closed_endpoint().await).await;
@@ -409,7 +360,7 @@ impl StrictEmbedder for NoInference {
 #[test]
 fn m3c_helper_history_requires_backend_and_initializes_only_empty_conversations() {
     let mut fixture = Fixture::new();
-    fixture.refuse("session history strict10");
+    fixture.refuse("memory configure strict10");
     assert!(fixture.session.strict_history.is_none());
     let backend = Arc::new(NoInference {
         metadata: EmbeddingModel {
@@ -424,7 +375,7 @@ fn m3c_helper_history_requires_backend_and_initializes_only_empty_conversations(
     let before = fixture.snapshot().state;
     fixture
         .call(
-            "session history strict10",
+            "memory configure strict10",
             KeyCode::Esc,
             false,
             Some(&factory),
@@ -434,7 +385,7 @@ fn m3c_helper_history_requires_backend_and_initializes_only_empty_conversations(
     assert!(fixture.session.strict_history.is_none());
     fixture
         .call(
-            "session history strict10",
+            "memory configure strict10",
             KeyCode::Char('y'),
             false,
             Some(&factory),
@@ -461,29 +412,5 @@ fn m3c_helper_history_requires_backend_and_initializes_only_empty_conversations(
         .unwrap()
         .append(Message::user("actual history"), true, None)
         .unwrap();
-    fixture.refuse("session history legacy");
-}
-
-#[test]
-fn m3c_helper_read_views_work_while_input_is_queued_and_the_transcript_page_is_gone() {
-    let mut fixture = Fixture::new();
-    assert!(
-        fixture
-            .call("session current", KeyCode::Esc, true, None)
-            .unwrap()
-            .iter()
-            .any(|line| line.to_string().contains("gpt-5.6-sol"))
-    );
-    assert!(
-        fixture
-            .call("goal current", KeyCode::Esc, true, None)
-            .unwrap()[0]
-            .to_string()
-            .contains("No saved goal")
-    );
-    // `/history` was removed from the TUI: no transcript page is served.
-    for request in ["history", "history 0", "history 20"] {
-        fixture.refuse(request);
-    }
-    assert!(fixture.effects.effects().unwrap().is_empty());
+    fixture.refuse("memory configure legacy");
 }

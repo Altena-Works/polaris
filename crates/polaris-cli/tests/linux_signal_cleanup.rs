@@ -1331,17 +1331,18 @@ fn linux_tui_local_acceptance_commands_draft_refusal_and_clean_exit() {
         let filename = "PTY_GIT_\t\x1b]0;POLARIS_GIT\x07.txt";
         fs::write(project.join(filename), "baseline\n")?;
         run_git(project, &["add", "--", filename]).map_err(io::Error::other)?;
-        fs::write(project.join(filename), "baseline\n\x1b]0;POLARIS_DIFF\x07\x1b[31mPTY_DIFF_OUTPUT\x01\n")?;
-        private_dir(&project.join(".polaris/skills"))?;
-        private_dir(&project.join(".polaris/skills/fixture"))?;
-        fs::write(project.join(".polaris/skills/fixture/SKILL.md"), "---\nname: fixture\ndescription: Local terminal fixture only\n---\nNo external operations.\n")
-    }).expect("private product PTY");
+        fs::write(
+            project.join(filename),
+            "baseline\n\x1b]0;POLARIS_DIFF\x07\x1b[31mPTY_DIFF_OUTPUT\x01\n",
+        )
+    })
+    .expect("private product PTY");
     let scenario = (|| -> Result<(), String> {
         case.marker(IDLE_MARKER, SCREEN_DEADLINE)?;
         for (command, result) in [
             ("/help", "commands listed"),
             ("/status", "Status displayed"),
-            ("/doctor", "Diagnostic results"),
+            ("/doctor", "removed"),
             ("/pwd", "removed"),
             ("/mcp", "External MCP"),
             ("/diff", "diff:"),
@@ -1358,12 +1359,6 @@ fn linux_tui_local_acceptance_commands_draft_refusal_and_clean_exit() {
         let offset = case.raw.len();
         case.write_key(b"\x1b")?;
         case.marker_since(offset, IDLE_MARKER, SCREEN_DEADLINE)?;
-        let offset = case.raw.len();
-        case.write_key(b"/skills\r")?;
-        case.marker_since(offset, "skills discovered in this project", SCREEN_DEADLINE)?;
-        case.marker_since(offset, "Local terminal fixture only", SCREEN_DEADLINE)?;
-        case.write_key(b"\x1b")?;
-        case.marker(IDLE_MARKER, SCREEN_DEADLINE)?;
         for (columns, rows) in [(40, 10), (120, 40)] {
             let size = libc::winsize {
                 ws_row: rows,
@@ -1385,14 +1380,14 @@ fn linux_tui_local_acceptance_commands_draft_refusal_and_clean_exit() {
             case.capture().map_err(|error| error.to_string())?;
         }
         case.write_key(b"\x1b[5~\x1b[6~")?;
-        case.write_key(format!("/review {INFLIGHT_PROMPT}").as_bytes())?;
+        case.write_key(INFLIGHT_PROMPT.as_bytes())?;
         case.write_key(b"\r")?;
-        // Drain redraws while the product processes the typed slash command.
+        // Drain redraws while the product processes the typed prompt.
         case.marker(REPLY, SCREEN_DEADLINE)?;
         fixture.await_request()?;
         let offset = case.raw.len();
         case.write_key(b"/subagents list\r")?;
-        case.marker_since(offset, "Execution state", SCREEN_DEADLINE)?;
+        case.marker_since(offset, "removed", SCREEN_DEADLINE)?;
         // Recall an older input while retaining the independent live draft.
         // Move to the start by byte-safe repeated Left on this ASCII fixture.
         case.write_key(b"DRAFT")?;

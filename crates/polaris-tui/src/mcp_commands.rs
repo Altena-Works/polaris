@@ -13,7 +13,6 @@ mod journal;
 #[cfg(test)]
 mod management_tests;
 mod operations;
-pub(crate) use operations::confirm_card as confirm_environment_card;
 mod secret;
 
 pub(crate) fn state_lines(
@@ -161,12 +160,6 @@ pub(crate) async fn handle_host<B: Backend, R: KeyReader>(
     let parts: Vec<_> = request.split_whitespace().collect();
     let command = parts[0];
     match command {
-        "configure" | "delete" => {
-            return Err(
-                "This MCP operation is not provided. Manage detected registrations with /mcp setup."
-                    .into(),
-            );
-        }
         "prompt" => {
             return Err(
                 "/mcp prompt <server>/<prompt> [key=value ...] is handled by the next-input selection screen."

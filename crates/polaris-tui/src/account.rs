@@ -156,7 +156,7 @@ pub(crate) async fn handle<B: Backend, R: KeyReader>(
                 AccountChangeV1::LegacyLogout { identity }
             }
         }
-        _ => return Err("/login [new [label]|reauth <registration-id>|use <registration-id>|label <registration-id> <display-name>], /logout [registration-id], /status".into()),
+        _ => return Err("/login [list|new [label]|reauth <registration-id>|use <registration-id>|label <registration-id> <display-name>|decider], /logout [registration-id], /status".into()),
     };
     let (ready, after_callback) = tokio::sync::oneshot::channel();
     execute_change(
@@ -681,7 +681,7 @@ mod tests {
         let project = home.join("project");
         std::fs::create_dir(&project).unwrap();
         let state = polaris_core::project::state_dir(&project).unwrap();
-        crate::source_apply::prepare_state(&project, &state).unwrap();
+        crate::private_state::prepare_state(&project, &state).unwrap();
         let workspace = WorkspaceOwner::open(
             &project,
             &state.join("rewind-workspace"),

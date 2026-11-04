@@ -100,13 +100,6 @@ pub fn append_message(path: &Path, message: &Message) -> io::Result<()> {
     writeln!(file, "{line}")
 }
 
-/// Empties the persisted session file. Used by the `/clear` slash command
-/// — the in-memory `Session` is cleared by the caller; this keeps the file
-/// on disk from resurrecting the old conversation on the next launch.
-pub fn clear_session(path: &Path) -> io::Result<()> {
-    rewrite(path, &[])
-}
-
 /// Recorded once per saved conversation, alongside its `<id>.jsonl`
 /// message log — the directory it was started from and when, so
 /// `/resume` can group and sort conversations without re-deriving that
@@ -392,7 +385,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rewrite_replaces_a_long_log_and_clear_leaves_no_tail() {
+    fn rewrite_replaces_a_long_log_and_an_empty_rewrite_leaves_no_tail() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
         append_message(&path, &Message::user("old".repeat(1024))).unwrap();
@@ -401,7 +394,7 @@ mod tests {
         assert!(!truncated);
         assert_eq!(session.messages.len(), 1);
         assert_eq!(session.messages[0].content, "short");
-        clear_session(&path).unwrap();
+        rewrite(&path, &[]).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }

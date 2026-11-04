@@ -117,10 +117,11 @@ pub fn last_agent_message_text(session: &polaris_core::session::Session) -> Opti
         .map(|m| m.content.as_str())
 }
 
-/// The `/copy` command's core logic, with the actual clipboard write
-/// injected so tests can exercise the "nothing to copy" / "copied" /
-/// "can't copy" status text without ever touching a real tty. Production
-/// callers pass `copy_to_clipboard` itself.
+/// The core logic of `Ctrl+O` where no confirmation card guards the copy,
+/// with the actual clipboard write injected so tests can exercise the
+/// "nothing to copy" / "copied" / "can't copy" status text without ever
+/// touching a real tty. Production callers pass `copy_to_clipboard` itself.
+#[cfg(any(test, not(unix)))]
 pub fn copy_last_reply_with(
     session: &polaris_core::session::Session,
     copy_fn: impl FnOnce(&str) -> Result<(), String>,
@@ -135,6 +136,7 @@ pub fn copy_last_reply_with(
 /// the in-flight turn there, so it captures the pre-turn reply text once,
 /// up front, and passes it here on every `Ctrl+O` instead of re-reading
 /// `session`.
+#[cfg(any(test, not(unix)))]
 pub fn copy_text_with(
     text: Option<&str>,
     copy_fn: impl FnOnce(&str) -> Result<(), String>,

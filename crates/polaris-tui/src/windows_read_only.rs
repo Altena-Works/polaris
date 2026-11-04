@@ -127,7 +127,6 @@ impl ReadOnlyView {
                 slash::matching(prefix)
                     .into_iter()
                     .filter(|command| supported(&slash::action_for(command.name)))
-                    .map(read_only_command)
                     .collect()
             })
     }
@@ -318,30 +317,8 @@ impl ReadOnlyView {
 fn supported(action: &slash::Action) -> bool {
     matches!(
         action,
-        slash::Action::Help
-            | slash::Action::Status
-            | slash::Action::Doctor
-            | slash::Action::Quit
-            | slash::Action::Phase(_)
-            | slash::Action::Workflow(_)
-            | slash::Action::Decided(_)
+        slash::Action::Help | slash::Action::Status | slash::Action::Quit
     ) && action.allowed_without_mutation_owner()
-}
-
-fn read_only_command(command: &'static slash::SlashCommand) -> &'static slash::SlashCommand {
-    const PHASE: slash::SlashCommand = slash::SlashCommand {
-        name: "phase",
-        description: "show phase availability (read-only)",
-    };
-    const WORKFLOW: slash::SlashCommand = slash::SlashCommand {
-        name: "workflow",
-        description: "show workflow availability (read-only)",
-    };
-    match command.name {
-        "phase" => &PHASE,
-        "workflow" => &WORKFLOW,
-        _ => command,
-    }
 }
 
 fn command_lines(action: &slash::Action, cwd: &Path) -> Result<Vec<String>, String> {
@@ -349,10 +326,9 @@ fn command_lines(action: &slash::Action, cwd: &Path) -> Result<Vec<String>, Stri
         slash::Action::Help => slash::COMMANDS
             .iter()
             .filter(|command| supported(&slash::action_for(command.name)))
-            .map(read_only_command)
             .map(|command| format!("/{} — {}", command.name, command.description))
             .collect(),
-        slash::Action::Status | slash::Action::Doctor => vec![
+        slash::Action::Status => vec![
             "Windows browsing only".into(),
             "Model connection, conversation, storage: not started".into(),
             "Authentication, MCP, saved sessions: not loaded (Windows protection mechanisms unsupported)".into(),
@@ -363,13 +339,7 @@ fn command_lines(action: &slash::Action, cwd: &Path) -> Result<Vec<String>, Stri
                 polaris_core::project::resolve_root(cwd).display()
             ),
         ],
-        slash::Action::Decided(value) if matches!(value.as_str(), "" | "list") => {
-            return decided_read_lines(cwd)
-                .map(|lines| lines.iter().map(ToString::to_string).collect());
-        }
-        slash::Action::Phase(value) | slash::Action::Workflow(value) if value.is_empty() => {
-            vec!["No conversation started. Saved workflow is not loaded".into()]
-        }
+        slash::Action::Removed(notice) => vec![(*notice).into()],
         _ => return Err(WINDOWS_OWNER_UNAVAILABLE.into()),
     };
     Ok(lines)

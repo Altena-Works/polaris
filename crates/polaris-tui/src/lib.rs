@@ -13,8 +13,6 @@ mod continuation_tests;
 mod conversation_view;
 #[cfg(unix)]
 mod draft;
-#[cfg(target_os = "macos")]
-mod environment_commands;
 mod file_input;
 #[cfg(target_os = "macos")]
 mod file_reveal;
@@ -39,6 +37,8 @@ mod memory_commands;
 pub mod onboarding;
 pub mod persist;
 #[cfg(target_os = "linux")]
+mod private_state;
+#[cfg(target_os = "linux")]
 mod resume_effect;
 #[cfg(unix)]
 mod role_commands;
@@ -49,8 +49,6 @@ mod runtime_effects;
 mod session_activation;
 #[cfg(unix)]
 mod session_commands;
-#[cfg(target_os = "linux")]
-mod workspace_commands;
 pub use memory::{configure_archive, configure_memory, lock_memory};
 mod model_menu;
 pub mod render;
@@ -62,8 +60,6 @@ pub mod sessions;
 #[doc(hidden)]
 pub mod signal;
 pub mod slash;
-#[cfg(target_os = "linux")]
-mod source_apply;
 mod status_view;
 mod terminal;
 use model_menu::handle_model;
@@ -493,16 +489,6 @@ fn active_saved_session_id(
         .map_err(|e| e.to_string())
 }
 
-/// `/subagents` is the only runtime control `slash::parse` produces.
-#[cfg(unix)]
-async fn handle_runtime_command(
-    request: &str,
-    control: Option<&Arc<RootDelegationControlV1>>,
-) -> Result<Vec<String>, String> {
-    let (_, extra) = request.split_once(' ').unwrap_or((request, ""));
-    runtime_commands::subagents(control, extra, None).await
-}
-
 /// Everything `run()` needs, already built by `polaris-cli::main()` the
 /// same way the one-shot path builds it. `polaris-tui` never constructs a
 /// provider or a sandbox policy itself.
@@ -516,7 +502,7 @@ pub struct RunArgs<'a> {
     /// A fixed independent selector; model-picker changes affect only the primary.
     pub mcp_selection_provider: Option<Arc<dyn Provider>>,
     /// The same typed judge and tier selector used by one-shot runs. TUI
-    /// sessions retain them across `/new`, `/fork`, and `/resume`.
+    /// sessions retain them across `/new`, `/new fork`, and `/resume`.
     pub decider: Option<Arc<dyn polaris_provider::decision::Decider>>,
     pub decision_configuration: polaris_core::config::DecisionConfig,
     pub decision_colocation: polaris_core::decision_capacity::colocation::ColocationSources,
@@ -1421,7 +1407,7 @@ async fn admit_tui_input(
         .submit(request, manager.revision)
         .map_err(|error| match error {
             polaris_core::session_manager::AdmissionError::Capacity(_) => {
-                "This conversation has insufficient storage capacity. Continue with /fork once processing is idle"
+                "This conversation has insufficient storage capacity. Continue with /new fork once processing is idle"
                     .to_owned()
             }
             _ => error.to_string(),
@@ -1454,7 +1440,7 @@ async fn admit_tui_input(
         .check_receipt_capacity(&receipts)
         .map_err(|error| match error {
             polaris_core::session_manager::AdmissionError::Capacity(_) => {
-                "This conversation has insufficient storage capacity. Continue with /fork once processing is idle"
+                "This conversation has insufficient storage capacity. Continue with /new fork once processing is idle"
                     .to_owned()
             }
             _ => error.to_string(),
@@ -1470,7 +1456,7 @@ async fn admit_tui_input(
         )
         .map_err(|error| match error {
             polaris_core::desktop_store::StoreError::Capacity(_) => {
-                "This conversation has insufficient storage capacity. Continue with /fork once processing is idle"
+                "This conversation has insufficient storage capacity. Continue with /new fork once processing is idle"
                     .to_owned()
             }
             _ => error.to_string(),
@@ -2630,17 +2616,14 @@ fn reset_conversation_view_after_resume(
 ///
 /// The shrink-guard below (`*printed_messages > session.messages.len()`,
 /// and its `local_lines` twin) fires whenever a caller resets a session
-/// out from under this function without resetting the two counters —
-/// today that's only `/clear`'s `apply_slash_action` branch, which clears
-/// `session.messages`/`local_lines` but has no access to `history` to
-/// re-seed. Deliberately, this function does *not* try to re-seed the
+/// out from under this function without resetting the two counters.
+/// Deliberately, this function does *not* try to re-seed the
 /// header itself when that guard fires: doing so would need a
 /// `HeaderInfo`/width threaded all the way into a function whose only
 /// other job is diffing two counters against two slices, for the sake of
 /// one caller. Instead every wholesale-reset path calls
 /// `ConversationViewState::reset` explicitly (see every call
-/// site in `run()`, including the one right after `/clear`'s
-/// `apply_slash_action` call) *before* falling through to the next
+/// site in `run()`) *before* falling through to the next
 /// `append_new_history` call, so by the time this function's own
 /// shrink-guard would fire, it instead finds `history` already correctly
 /// re-seeded and `printed_messages`/`printed_local_lines` already at 0 —
@@ -3069,7 +3052,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
     }
 
     #[cfg(target_os = "linux")]
-    if let Err(error) = source_apply::prepare_state(&args.cwd, &args.state_dir) {
+    if let Err(error) = private_state::prepare_state(&args.cwd, &args.state_dir) {
         eprintln!("Cannot prepare storage: {error}");
         return ExitCode::FAILURE;
     }
@@ -3379,9 +3362,6 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
         .mcp_selection_provider
         .map(|provider| polaris_core::audit::observe_arbitration(provider, audit.clone()));
 
-    #[cfg(target_os = "linux")]
-    let mut source_frontend = source_apply::Frontend::open(&args, audit.clone());
-
     // Shared via `RefCell`, not held exclusively — the agent-turn loop
     // below redraws the screen concurrently with `agent::run` (to animate
     // the status row while it's in flight), including while `agent::run`
@@ -3573,7 +3553,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
     let mut selected_suggestion: usize = 0;
     // Local-only output appended after the real conversation — e.g.
     // `/diff`'s result. Never touches `session.messages`, never sent to
-    // the model, never persisted; cleared by `/clear`/`/new` along with
+    // the model, never persisted; cleared by `/new` along with
     // the real history.
     let mut local_lines: Vec<ratatui::text::Line<'static>> = Vec::new();
 
@@ -3641,26 +3621,6 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
     // Conversations already told that a saved role binding no longer resolves.
     #[cfg(unix)]
     let mut role_notices = role_commands::StoppedNotices::default();
-    #[cfg(target_os = "linux")]
-    let workspace_commands = {
-        use std::os::unix::fs::MetadataExt;
-        let root = rewind_workspace
-            .as_ref()
-            .expect("startup owner")
-            .project_root()
-            .to_owned();
-        std::fs::symlink_metadata(&root)
-            .map_err(|e| e.to_string())
-            .and_then(|meta| {
-                workspace_commands::WorkspaceCommands::new(
-                    root,
-                    polaris_desktop_service::WorkspaceSourceIdentity {
-                        device: meta.dev(),
-                        inode: meta.ino(),
-                    },
-                )
-            })
-    };
     let mut tool_memory_path: Option<PathBuf> = None;
     #[cfg(target_os = "macos")]
     let mut pending_c10_job: Option<C10TuiJob> = None;
@@ -3722,7 +3682,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
         if redact_inline_secret_value(&mut input_buffer, &mut input_cursor, &mut input_history) {
             status = Status::Error("Secrets cannot be entered in the normal input field".into());
         }
-        // `/new`, `/fork`, and `/resume` replace the conversation owner.
+        // `/new`, `/new fork`, and `/resume` replace the conversation owner.
         // Reattach process-owned services and selectors before accepting the
         // next input; none of these belong to durable conversation state.
         #[cfg(unix)]
@@ -3928,7 +3888,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
             selected_suggestion = 0;
         }
         // Print anything new since the last iteration (typically the
-        // previous turn's assistant reply, or a `/resume`/`/new`/`/fork`
+        // previous turn's assistant reply, or a `/resume`/`/new`/`/new fork`
         // reset) before redrawing the small footer viewport — printing is
         // one-shot and must happen before the footer draw so the newly
         // printed lines appear above it, not interleaved mid-frame.
@@ -4154,7 +4114,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                                             &slash::Action::Copy,
                                             &terminal,
                                             &mut key_reader,
-                                            &mut session,
+                                            &session,
                                             rewind_workspace.as_ref().expect("startup owner"),
                                             &management_effects,
                                             &args.cwd,
@@ -4363,13 +4323,6 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
             rewind_gesture.cancel();
         }
 
-        // `/review` isn't a local command like the others — it expands
-        // into a real user message and falls through to the normal model
-        // turn below, so both places that can resolve it (accepting a
-        // highlighted suggestion, and typing the full name) funnel into
-        // this instead of calling `apply_slash_action`.
-        let mut review_text: Option<String> = None;
-
         // While the popup is open, Up/Down move the highlight and Enter
         // accepts whichever row is highlighted — mirroring codex's own
         // picker. Typing the full command name and pressing Enter still
@@ -4416,7 +4369,6 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                         &mut session,
                         (
                             &initial_saved_settings,
-                            args.provider.as_ref(),
                             args.history_backend_factory.as_ref(),
                         ),
                         (
@@ -4440,69 +4392,14 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                         continue;
                     }
                     match action {
-                        #[cfg(target_os = "linux")]
-                        slash::Action::WorkspaceControl(request) => {
-                            let (verb, extra) = request.split_once(' ').unwrap_or((&request, ""));
-                            let result = match workspace_commands.as_ref() {
-                                Ok(owner) => match verb {
-                                    "setting" => owner.setting(
-                                        extra,
-                                        &terminal,
-                                        &mut key_reader,
-                                        rewind_workspace.as_ref().expect("startup owner"),
-                                        &management_effects,
-                                        has_pending_inputs,
-                                    ),
-                                    _ => Err("No target operation".into()),
-                                },
-                                Err(error) => Err(error.clone()),
-                            };
-                            match result {
-                                Ok(lines) => {
-                                    local_lines.extend(lines);
-                                    status = Status::Notice("Read result displayed".into());
-                                }
-                                Err(error) => status = Status::Error(error),
-                            }
-                            continue;
-                        }
-                        #[cfg(target_os = "linux")]
-                        slash::Action::Decided(request) if request.starts_with("add ") => {
-                            let result = workspace_commands
-                                .as_ref()
-                                .map_err(Clone::clone)
-                                .and_then(|owner| {
-                                    owner.decided(
-                                        request.strip_prefix("add ").unwrap_or_default(),
-                                        &format!("{}", now_millis()),
-                                        &terminal,
-                                        &mut key_reader,
-                                        rewind_workspace.as_ref().expect("startup owner"),
-                                        &management_effects,
-                                        has_pending_inputs,
-                                    )
-                                });
-                            match result {
-                                Ok(lines) => {
-                                    local_lines.extend(lines);
-                                    status =
-                                        Status::Notice("Decision record result displayed".into());
-                                }
-                                Err(error) => status = Status::Error(error),
-                            }
-                            continue;
-                        }
                         #[cfg(unix)]
-                        slash::Action::Clear
-                        | slash::Action::Init
-                        | slash::Action::Export(_)
-                        | slash::Action::Copy => {
+                        slash::Action::Init | slash::Action::Export(_) => {
                             let operation = &action;
                             let result = local_actions::handle(
                                 operation,
                                 &terminal,
                                 &mut key_reader,
-                                &mut session,
+                                &session,
                                 rewind_workspace.as_ref().expect("startup owner"),
                                 &management_effects,
                                 &args.cwd,
@@ -4511,47 +4408,10 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                             );
                             match result {
                                 Ok(lines) => {
-                                    if matches!(operation, slash::Action::Clear)
-                                        && lines.iter().any(|line| {
-                                            line.to_string().starts_with("T08 complete")
-                                        })
-                                    {
-                                        local_lines.clear();
-                                        let width =
-                                            terminal.borrow().size().map(|s| s.width).unwrap_or(80);
-                                        conversation_view.reset(
-                                            &render::HeaderInfo {
-                                                provider_name: &provider_name,
-                                                model_name: &model_name,
-                                                usage: cumulative_usage,
-                                                cwd: &cwd_display,
-                                                cwd_short: &cwd_footer_display,
-                                                effort_name: &effort_name,
-                                            },
-                                            width,
-                                        );
-                                    }
                                     local_lines.extend(lines);
                                     status = Status::Notice(
                                         "Management operation result displayed".into(),
                                     );
-                                }
-                                Err(error) => status = Status::Error(error),
-                            }
-                            continue;
-                        }
-                        #[cfg(unix)]
-                        slash::Action::RuntimeControl(request) => {
-                            let result = handle_runtime_command(
-                                &request,
-                                session.delegation_control.as_ref(),
-                            )
-                            .await;
-                            match result {
-                                Ok(lines) => {
-                                    local_lines
-                                        .extend(lines.into_iter().map(ratatui::text::Line::from));
-                                    status = Status::Notice("Execution state displayed".into());
                                 }
                                 Err(error) => status = Status::Error(error),
                             }
@@ -4629,35 +4489,6 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                             );
                             status = Status::Notice("Status displayed".into());
                             continue;
-                        }
-                        slash::Action::Doctor => {
-                            local_lines.extend(doctor_lines(
-                                &provider_name,
-                                &model_name,
-                                &args.cwd,
-                                &args.sandbox,
-                                approval_policy,
-                                args.mcp_external,
-                            ));
-                            #[cfg(unix)]
-                            local_lines.extend(management_effect_diagnostic(
-                                &polaris_core::project::resolve_root(&args.cwd),
-                                &management_effects,
-                                workflow_recovery_issue.as_deref(),
-                            ));
-                            local_lines
-                                .extend(cat_diagnostic_lines(args.answer_finalizer.as_deref()));
-                            #[cfg(unix)]
-                            local_lines.extend(rewind_candidate_diagnostic(
-                                rewind_workspace.as_ref(),
-                                &args.sessions_dir,
-                                &args.cwd,
-                            ));
-                            status = Status::Notice("Diagnostic results displayed".into());
-                            continue;
-                        }
-                        slash::Action::Review(extra) => {
-                            review_text = Some(review_prompt(&extra));
                         }
                         slash::Action::Resume => {
                             #[cfg(target_os = "linux")]
@@ -4866,29 +4697,8 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                             }
                             continue;
                         }
-                        slash::Action::Skills => {
-                            run_skills_picker(&terminal, &mut key_reader, &effective_skills);
-                            status = Status::Idle;
-                            continue;
-                        }
                         slash::Action::Decider => {
                             status = run_decider_command(&terminal, &mut key_reader, &args.cwd);
-                            continue;
-                        }
-                        #[cfg(unix)]
-                        action @ (slash::Action::Phase(_) | slash::Action::Workflow(_)) => {
-                            handle_managed_workflow_action(
-                                &terminal,
-                                &mut key_reader,
-                                action,
-                                &mut session,
-                                &effective_skills,
-                                rewind_workspace.as_ref().expect("Unix workspace owner"),
-                                &management_effects,
-                                &args.state_dir,
-                                has_pending_inputs || dispatching_queued_input,
-                                &mut status,
-                            );
                             continue;
                         }
                         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -4938,65 +4748,21 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                             );
                             continue;
                         }
-                        #[cfg(target_os = "linux")]
-                        slash::Action::Apply(requested) => {
-                            handle_source_apply_action(
-                                &terminal,
-                                &mut key_reader,
-                                &args,
-                                audit.clone(),
-                                &mut source_frontend,
-                                &requested,
-                                has_pending_inputs || dispatching_queued_input,
-                                &session,
-                                &mut status,
-                                &mut local_lines,
-                            )
-                            .await;
-                            continue;
-                        }
                         action => {
-                            // `apply_slash_action` clears `session.messages`/
-                            // `local_lines` for `Clear` but has no access to
-                            // `history`/`scroll_offset` to re-seed the header
-                            // and reset the scroll position — do that here
-                            // instead of relying on `append_new_history`'s
-                            // shrink-guard to (not) do it (see that
-                            // function's doc comment).
-                            let clear_view = matches!(action, slash::Action::Clear);
                             match apply_slash_action(
                                 action,
                                 &mut session,
-                                &session_path,
                                 &mut status,
                                 &provider_name,
                                 &model_name,
                                 usage_meter.snapshot(),
-                                &effective_skills,
                                 &args.cwd,
                                 &args.state_dir,
                                 &args.sessions_dir,
                                 args.mcp_external,
                                 &mut local_lines,
                             ) {
-                                SlashOutcome::Continue => {
-                                    if clear_view {
-                                        let width =
-                                            terminal.borrow().size().map(|s| s.width).unwrap_or(80);
-                                        conversation_view.reset(
-                                            &render::HeaderInfo {
-                                                provider_name: &provider_name,
-                                                model_name: &model_name,
-                                                usage: cumulative_usage,
-                                                cwd: &cwd_display,
-                                                cwd_short: &cwd_footer_display,
-                                                effort_name: &effort_name,
-                                            },
-                                            width,
-                                        );
-                                    }
-                                    continue;
-                                }
+                                SlashOutcome::Continue => continue,
                                 SlashOutcome::Quit => {
                                     #[cfg(unix)]
                                     if !queued_instructions.is_empty()
@@ -5082,8 +4848,8 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
             }
         }
 
-        // Ctrl+O copies the last reply to the clipboard — same hotkey and
-        // behavior as codex's own `/copy`/`Ctrl+O` (see `slash::Action::Copy`).
+        // Ctrl+O copies the last reply to the clipboard — the same hotkey
+        // as codex's own `Ctrl+O` (see `slash::Action::Copy`).
         if key.kind == ratatui::crossterm::event::KeyEventKind::Press
             && key.code == ratatui::crossterm::event::KeyCode::Char('o')
             && key
@@ -5100,7 +4866,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                     &slash::Action::Copy,
                     &terminal,
                     &mut key_reader,
-                    &mut session,
+                    &session,
                     rewind_workspace.as_ref().expect("startup owner"),
                     &management_effects,
                     &args.cwd,
@@ -5130,9 +4896,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
         conversation_view.selection = None;
 
         let cursor_before_submit = input_cursor;
-        let text = if let Some(t) = review_text {
-            t
-        } else {
+        let text = {
             let action = match apply_admitted_key(&mut input_buffer, &mut input_cursor, key) {
                 Ok(action) => action,
                 Err(error) => {
@@ -5255,7 +5019,6 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                     &mut session,
                     (
                         &initial_saved_settings,
-                        args.provider.as_ref(),
                         args.history_backend_factory.as_ref(),
                     ),
                     (
@@ -5279,71 +5042,14 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                 continue;
             }
             match parsed_action {
-                #[cfg(target_os = "linux")]
-                Some(slash::Action::WorkspaceControl(request)) => {
-                    let (verb, extra) = request.split_once(' ').unwrap_or((&request, ""));
-                    let result = match workspace_commands.as_ref() {
-                        Ok(owner) => match verb {
-                            "setting" => owner.setting(
-                                extra,
-                                &terminal,
-                                &mut key_reader,
-                                rewind_workspace.as_ref().expect("startup owner"),
-                                &management_effects,
-                                has_pending_inputs,
-                            ),
-                            _ => Err("No target operation".into()),
-                        },
-                        Err(error) => Err(error.clone()),
-                    };
-                    match result {
-                        Ok(lines) => {
-                            local_lines.extend(lines);
-                            status = Status::Notice("Read result displayed".into());
-                        }
-                        Err(error) => status = Status::Error(error),
-                    }
-                    continue;
-                }
-                #[cfg(target_os = "linux")]
-                Some(slash::Action::Decided(request)) if request.starts_with("add ") => {
-                    let result =
-                        workspace_commands
-                            .as_ref()
-                            .map_err(Clone::clone)
-                            .and_then(|owner| {
-                                owner.decided(
-                                    request.strip_prefix("add ").unwrap_or_default(),
-                                    &format!("{}", now_millis()),
-                                    &terminal,
-                                    &mut key_reader,
-                                    rewind_workspace.as_ref().expect("startup owner"),
-                                    &management_effects,
-                                    has_pending_inputs,
-                                )
-                            });
-                    match result {
-                        Ok(lines) => {
-                            local_lines.extend(lines);
-                            status = Status::Notice("Decision record result displayed".into());
-                        }
-                        Err(error) => status = Status::Error(error),
-                    }
-                    continue;
-                }
                 #[cfg(unix)]
-                Some(
-                    slash::Action::Clear
-                    | slash::Action::Init
-                    | slash::Action::Export(_)
-                    | slash::Action::Copy,
-                ) => {
+                Some(slash::Action::Init | slash::Action::Export(_)) => {
                     let operation = &parsed_action.as_ref().expect("local action");
                     let result = local_actions::handle(
                         operation,
                         &terminal,
                         &mut key_reader,
-                        &mut session,
+                        &session,
                         rewind_workspace.as_ref().expect("startup owner"),
                         &management_effects,
                         &args.cwd,
@@ -5352,40 +5058,8 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                     );
                     match result {
                         Ok(lines) => {
-                            if matches!(operation, slash::Action::Clear)
-                                && lines
-                                    .iter()
-                                    .any(|line| line.to_string().starts_with("T08 complete"))
-                            {
-                                local_lines.clear();
-                                let width = terminal.borrow().size().map(|s| s.width).unwrap_or(80);
-                                conversation_view.reset(
-                                    &render::HeaderInfo {
-                                        provider_name: &provider_name,
-                                        model_name: &model_name,
-                                        usage: cumulative_usage,
-                                        cwd: &cwd_display,
-                                        cwd_short: &cwd_footer_display,
-                                        effort_name: &effort_name,
-                                    },
-                                    width,
-                                );
-                            }
                             local_lines.extend(lines);
                             status = Status::Notice("Management operation result displayed".into());
-                        }
-                        Err(error) => status = Status::Error(error),
-                    }
-                    continue;
-                }
-                #[cfg(unix)]
-                Some(slash::Action::RuntimeControl(request)) => {
-                    let result =
-                        handle_runtime_command(&request, session.delegation_control.as_ref()).await;
-                    match result {
-                        Ok(lines) => {
-                            local_lines.extend(lines.into_iter().map(ratatui::text::Line::from));
-                            status = Status::Notice("Execution state displayed".into());
                         }
                         Err(error) => status = Status::Error(error),
                     }
@@ -5463,31 +5137,6 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                     status = Status::Notice("Status displayed".into());
                     continue;
                 }
-                Some(slash::Action::Doctor) => {
-                    local_lines.extend(doctor_lines(
-                        &provider_name,
-                        &model_name,
-                        &args.cwd,
-                        &args.sandbox,
-                        approval_policy,
-                        args.mcp_external,
-                    ));
-                    #[cfg(unix)]
-                    local_lines.extend(management_effect_diagnostic(
-                        &polaris_core::project::resolve_root(&args.cwd),
-                        &management_effects,
-                        workflow_recovery_issue.as_deref(),
-                    ));
-                    local_lines.extend(cat_diagnostic_lines(args.answer_finalizer.as_deref()));
-                    #[cfg(unix)]
-                    local_lines.extend(rewind_candidate_diagnostic(
-                        rewind_workspace.as_ref(),
-                        &args.sessions_dir,
-                        &args.cwd,
-                    ));
-                    status = Status::Notice("Diagnostic results displayed".into());
-                    continue;
-                }
                 Some(slash::Action::Mcp(requested))
                     if requested.split_whitespace().next() == Some("prompt") =>
                 {
@@ -5511,7 +5160,6 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                     }
                     continue;
                 }
-                Some(slash::Action::Review(extra)) => review_prompt(&extra),
                 Some(slash::Action::Resume) => {
                     #[cfg(target_os = "linux")]
                     if let Some(code) = linux_pending_exit_code() {
@@ -5716,29 +5364,8 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                     }
                     continue;
                 }
-                Some(slash::Action::Skills) => {
-                    run_skills_picker(&terminal, &mut key_reader, &effective_skills);
-                    status = Status::Idle;
-                    continue;
-                }
                 Some(slash::Action::Decider) => {
                     status = run_decider_command(&terminal, &mut key_reader, &args.cwd);
-                    continue;
-                }
-                #[cfg(unix)]
-                Some(action @ (slash::Action::Phase(_) | slash::Action::Workflow(_))) => {
-                    handle_managed_workflow_action(
-                        &terminal,
-                        &mut key_reader,
-                        action,
-                        &mut session,
-                        &effective_skills,
-                        rewind_workspace.as_ref().expect("Unix workspace owner"),
-                        &management_effects,
-                        &args.state_dir,
-                        has_pending_inputs || dispatching_queued_input,
-                        &mut status,
-                    );
                     continue;
                 }
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -5788,60 +5415,21 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                     );
                     continue;
                 }
-                #[cfg(target_os = "linux")]
-                Some(slash::Action::Apply(requested)) => {
-                    handle_source_apply_action(
-                        &terminal,
-                        &mut key_reader,
-                        &args,
-                        audit.clone(),
-                        &mut source_frontend,
-                        &requested,
-                        has_pending_inputs || dispatching_queued_input,
-                        &session,
-                        &mut status,
-                        &mut local_lines,
-                    )
-                    .await;
-                    continue;
-                }
                 Some(action) => {
-                    // Same reasoning as the popup-selection path above:
-                    // `apply_slash_action` can't re-seed `history`'s header
-                    // or reset `scroll_offset` itself for `Clear`.
-                    let clear_view = matches!(action, slash::Action::Clear);
                     match apply_slash_action(
                         action,
                         &mut session,
-                        &session_path,
                         &mut status,
                         &provider_name,
                         &model_name,
                         usage_meter.snapshot(),
-                        &effective_skills,
                         &args.cwd,
                         &args.state_dir,
                         &args.sessions_dir,
                         args.mcp_external,
                         &mut local_lines,
                     ) {
-                        SlashOutcome::Continue => {
-                            if clear_view {
-                                let width = terminal.borrow().size().map(|s| s.width).unwrap_or(80);
-                                conversation_view.reset(
-                                    &render::HeaderInfo {
-                                        provider_name: &provider_name,
-                                        model_name: &model_name,
-                                        usage: cumulative_usage,
-                                        cwd: &cwd_display,
-                                        cwd_short: &cwd_footer_display,
-                                        effort_name: &effort_name,
-                                    },
-                                    width,
-                                );
-                            }
-                            continue;
-                        }
+                        SlashOutcome::Continue => continue,
                         SlashOutcome::Quit => {
                             #[cfg(unix)]
                             if !queued_instructions.is_empty() || active_instruction.is_some() {
@@ -7017,7 +6605,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                                     }
                                     KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                         #[cfg(unix)]
-                                        { status = Status::Notice("After execution finishes, confirm copying with /copy".into()); }
+                                        { status = Status::Notice("After execution finishes, confirm copying with Ctrl+O".into()); }
                                         #[cfg(not(unix))]
                                         {
                                             status = match require_action_owner(&slash::Action::Copy) {
@@ -7068,23 +6656,6 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
                                             break TurnOutcome::Fatal;
                                         }
                                         rendered_suggestion_count = suggestions.len();
-                                    }
-                                    #[cfg(unix)]
-                                    KeyCode::Enter if input_buffer.starts_with("/subagents") => {
-                                        let request=std::mem::take(&mut input_buffer);
-                                        input_cursor=0;
-                                        let extra=request.strip_prefix("/subagents").unwrap_or_default();
-                                        #[cfg(target_os="linux")]
-                                        let mut cancellation_reader=LinuxSignalAwareKeyReader;
-                                        #[cfg(not(target_os="linux"))]
-                                        let mut cancellation_reader=approver::CrosstermKeyReader;
-                                        let accepted = !extra.trim().starts_with("cancel ") || account::confirm(&terminal,&mut cancellation_reader,"Request subagent stop",extra.trim(),"Send a stop request only to the current child/attempt. Verify termination with wait.");
-                                        let result = runtime_commands::subagents(Some(&turn_control),extra.trim(),Some(runtime_commands::RuntimeMutationContext{effects:&management_effects,lease:&_project_activity,session_id:&durable_session_id,generation:runtime_generation,accepted})).await;
-                                        match result {
-                                            Ok(lines)=>{conversation_view.extend_text_lines(lines);status=Status::Notice("Execution state displayed".into());},
-                                            Err(error)=>status=Status::Error(error),
-                                        }
-                                        mid_turn_notice_until=Some(Instant::now()+MID_TURN_NOTICE_DURATION);
                                     }
                                     _ => match apply_inflight_key(
                                         &mut input_buffer,
@@ -7620,17 +7191,6 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
         }
     } else {
         exit_code
-    };
-    #[cfg(target_os = "linux")]
-    let exit_code = match source_frontend {
-        Ok(owner) => match owner.shutdown().await {
-            Ok(()) => exit_code,
-            Err(error) => {
-                fatal_message = Some(error);
-                ExitCode::FAILURE
-            }
-        },
-        Err(_) => exit_code,
     };
     #[cfg(target_os = "linux")]
     let (exit_code, restoration_error) = linux_exit_after_terminal_restoration(
@@ -8304,9 +7864,11 @@ fn sync_action(
     if !inspect
         && words != ["apply"]
         && !recovering
-        && !matches!(words.first(), Some(&"join" | &"pull" | &"leave" | &"push"))
+        && !matches!(words.first(), Some(&"pull" | &"leave" | &"push"))
     {
-        return Err("Usage: /sync [status|join <remote> <share-id> <invite-id> <expires> [excluded-name... ]|pull|leave|apply|recover <displayed-operation-id>]".into());
+        return Err(
+            "Usage: /sync [status|pull|leave|apply|recover <displayed-operation-id>]".into(),
+        );
     }
     if !inspect && has_queued_input {
         return Err("Clear queued input before changing shared content".into());
@@ -8320,7 +7882,7 @@ fn sync_action(
     }
     // Retain the same owner from inspection through confirmation and commit.
     let owner = ApplyOwnerV1::acquire(&project).map_err(|e| e.to_string())?;
-    if matches!(words.first(), Some(&"join" | &"pull" | &"leave" | &"push")) {
+    if matches!(words.first(), Some(&"pull" | &"leave" | &"push")) {
         if words[0] == "push" {
             return Err(
                 "The shared send owner is not implemented. Sending requires credential verification on a real device.".into(),
@@ -8331,40 +7893,7 @@ fn sync_action(
             .map_err(|_| "Inspect the incomplete sharing operation")?;
         let classification = participation::read(&state).map_err(|e| e.to_string())?;
         let held = classification.participation();
-        let mut join = None;
         let (id, detail) = match words[0] {
-            "join" if words.len() >= 5 => {
-                let share = polaris_core::sync::share::ShareLink {
-                    remote: words[1].into(),
-                    share_id: words[2].into(),
-                    invitation_id: words[3].into(),
-                    expires_unix_seconds: words[4]
-                        .parse()
-                        .map_err(|_| "Specify the invitation expiry in UNIX seconds")?,
-                };
-                let now =
-                    u64::try_from(now_millis() / 1000).map_err(|_| "Cannot verify the invitation expiry")?;
-                share
-                    .accept(now)
-                    .map_err(|_| "Check the invitation URL, ID, and expiry. No changes were made.")?;
-                if held.is_some() {
-                    return Err("Already participating. The safe credential rebind owner is not implemented.".into());
-                }
-                let manifest = polaris_core::sync::share::ShareManifest {
-                    version: 1,
-                    excluded: words[5..].iter().map(|w| (*w).to_owned()).collect(),
-                };
-                let detail = format!(
-                    "Share: {}\nInvitation: {}\nremote: {}\nExpiry: {}\nExcluded: {:?}\nJoining changes only this device's storage. Peers and source files are unchanged.",
-                    share.share_id,
-                    share.invitation_id,
-                    share.remote_display(),
-                    share.expires_unix_seconds,
-                    manifest.excluded
-                );
-                join = Some((share, manifest, now));
-                ("C08 join", detail)
-            }
             "pull" if words.len() == 1 => {
                 let held = held.as_ref().ok_or("This project has not joined")?;
                 (
@@ -8387,10 +7916,7 @@ fn sync_action(
                     ),
                 )
             }
-            _ => return Err(
-                "/sync join <remote> <share-id> <invite-id> <expires> [excluded-name...] | pull | leave"
-                    .into(),
-            ),
+            _ => return Err("/sync pull | leave".into()),
         };
         let view = render::SyncConfirmView {
             recovering: false,
@@ -8403,19 +7929,6 @@ fn sync_action(
         };
         let accepted = confirm(&view);
         return match words[0] {
-            "join" => {
-                let (share, manifest, now) = join.expect("join validated");
-                owner
-                    .join_confirmed(share, manifest, now, accepted)
-                    .map(|p| {
-                        if p.is_some() {
-                            "Joined"
-                        } else {
-                            "Join cancelled"
-                        }
-                        .into()
-                    })
-            }
             "pull" => owner.pull_confirmed(accepted).map(|p| match p {
                 Some(exchange) => format!(
                     "Received: {} items, {} unresolved. Source files are unchanged.",
@@ -8679,10 +8192,7 @@ fn confirm_sync<B: ratatui::backend::Backend, R: approver::KeyReader>(
     reader: &mut R,
     view: &render::SyncConfirmView,
 ) -> bool {
-    if view.operation.starts_with("C08 ")
-        || view.operation.starts_with("C11 ")
-        || view.operation.starts_with("C13 ")
-    {
+    if view.operation.starts_with("C11 ") || view.operation.starts_with("C13 ") {
         return account::confirm(
             terminal,
             reader,
@@ -8742,44 +8252,6 @@ fn handle_sync_action<B: ratatui::backend::Backend, R: approver::KeyReader>(
                     .map(|line| ratatui::text::Line::from(render::sanitize(line))),
             );
             *status = Status::Notice("Shared apply state displayed".into());
-        }
-        Err(error) => *status = Status::Error(render::sanitize(&error)),
-    }
-}
-
-#[cfg(target_os = "linux")]
-#[allow(clippy::too_many_arguments)]
-async fn handle_source_apply_action<B: ratatui::backend::Backend, R: approver::KeyReader>(
-    terminal: &RefCell<ratatui::Terminal<B>>,
-    reader: &mut R,
-    args: &RunArgs<'_>,
-    audit: Arc<tokio::sync::Mutex<AuditLog>>,
-    frontend: &mut Result<source_apply::Frontend, String>,
-    requested: &str,
-    queued: bool,
-    session: &polaris_core::session::Session,
-    status: &mut Status,
-    lines: &mut Vec<ratatui::text::Line<'static>>,
-) {
-    let mutating = requested.starts_with("run ") || requested.starts_with("resolve ");
-    if mutating && (queued || session.check_persistence().is_err()) {
-        *status = Status::Error("Resolve queued input or storage errors before using D27".into());
-        return;
-    }
-    if frontend.is_err() {
-        *frontend = source_apply::Frontend::open(args, audit);
-    }
-    let result = match frontend {
-        Ok(owner) => owner.action(requested, terminal, reader).await,
-        Err(error) => Err(error.clone()),
-    };
-    match result {
-        Ok(text) => {
-            lines.extend(
-                text.lines()
-                    .map(|line| ratatui::text::Line::from(render::sanitize(line))),
-            );
-            *status = Status::Notice("D27 state displayed".into());
         }
         Err(error) => *status = Status::Error(render::sanitize(&error)),
     }
@@ -8930,115 +8402,6 @@ fn apply_confirmed_workflow_change(
         .map_err(|error| error.to_string())?;
     session.workflow = Some(candidate);
     Ok(WorkflowChangeResult::Changed)
-}
-
-#[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
-fn handle_managed_workflow_action<B: ratatui::backend::Backend, R: approver::KeyReader>(
-    terminal: &RefCell<ratatui::Terminal<B>>,
-    reader: &mut R,
-    action: slash::Action,
-    session: &mut polaris_core::session::Session,
-    skills: &[Skill],
-    workspace: &polaris_core::rewind_workspace::WorkspaceOwner,
-    effects: &polaris_core::management_effect::ManagementEffectStoreV1,
-    state_dir: &Path,
-    has_queued_input: bool,
-    status: &mut Status,
-) {
-    use polaris_core::management_effect::workflow_change::WorkflowEffectInventoryV1;
-
-    if has_queued_input {
-        *status = Status::Notice("Clear queued input before changing workflow settings".into());
-        return;
-    }
-    let result = (|| -> Result<Option<String>, String> {
-        session
-            .check_persistence()
-            .map_err(|error| error.to_string())?;
-        let current = session
-            .workflow
-            .as_ref()
-            .ok_or("Workflow is disabled for this session")?;
-        let (inventory, candidate, notice) = match action {
-            slash::Action::Phase(requested) => {
-                if requested.is_empty() {
-                    return Ok(Some(format!("Workflow phase: {}", current.state().phase)));
-                }
-                if !current.config.enabled {
-                    return Err(
-                        "Cannot change phase in a conversation with workflow disabled".into(),
-                    );
-                }
-                let phase = requested.parse::<polaris_core::workflow::Phase>()?;
-                let candidate = polaris_core::workflow::SessionWorkflow::restore_with_artifacts(
-                    current.config.clone(),
-                    current.gates.clone(),
-                    current.state(),
-                    current.artifact_graph().clone(),
-                )?;
-                candidate.request_phase(phase)?;
-                (
-                    WorkflowEffectInventoryV1::T03,
-                    candidate,
-                    format!("Workflow phase: {phase}"),
-                )
-            }
-            slash::Action::Workflow(requested) => {
-                if requested.is_empty() {
-                    return Ok(Some(format!(
-                        "workflow: {}",
-                        workflow_mode_name(&current.config)
-                    )));
-                }
-                let mut config = current.config.clone();
-                match requested.strip_prefix("mode ").unwrap_or(&requested) {
-                    "manual" => {
-                        config.enabled = true;
-                        config.mode = polaris_core::workflow::WorkflowMode::Manual;
-                    }
-                    "adaptive" => {
-                        config.enabled = true;
-                        config.mode = polaris_core::workflow::WorkflowMode::Adaptive;
-                    }
-                    "off" => {
-                        config.enabled = false;
-                        config.mode = polaris_core::workflow::WorkflowMode::Manual;
-                    }
-                    _ => return Err("Workflow mode must be manual, adaptive, or off".into()),
-                }
-                let candidate = polaris_core::workflow::SessionWorkflow::restore_with_artifacts(
-                    config,
-                    current.gates.clone(),
-                    current.state(),
-                    current.artifact_graph().clone(),
-                )?;
-                let notice = format!("workflow: {}", workflow_mode_name(&candidate.config));
-                (WorkflowEffectInventoryV1::T04, candidate, notice)
-            }
-            _ => return Err("Invalid workflow operation kind".into()),
-        };
-        if candidate.config.enabled {
-            drop(candidate.begin_turn_from_disk(skills)?);
-        }
-        match apply_confirmed_workflow_change(
-            session,
-            candidate,
-            inventory,
-            workspace,
-            effects,
-            state_dir,
-            |view| confirm_workflow_change(terminal, reader, view),
-        )? {
-            WorkflowChangeResult::Cancelled => Ok(None),
-            WorkflowChangeResult::NoChange | WorkflowChangeResult::Changed => Ok(Some(notice)),
-        }
-    })();
-    *status = match result {
-        Ok(Some(notice)) => Status::Notice(notice),
-        Ok(None) => Status::Notice("Workflow change cancelled".into()),
-        Err(error) => Status::Error(format!("Cannot save workflow: {error}")),
-    };
 }
 
 #[cfg(unix)]
@@ -10154,7 +9517,7 @@ fn handle_new_session_with(
     true
 }
 
-/// Handles `/fork`: like `/new`, rotates to a brand-new file/id without
+/// Handles `/new fork`: like `/new`, rotates to a brand-new file/id without
 /// touching the one being left, except the new one is seeded with every
 /// message so far instead of starting empty — codex's own `/fork`
 /// ("fork the current chat") does the same. The seeded messages are
@@ -10395,7 +9758,7 @@ fn handle_managed_fork(
     status: &mut Status,
 ) {
     if session.persistence.is_none() {
-        *status = Status::Notice("/fork with management records requires a v2 session".into());
+        *status = Status::Notice("/new fork with management records requires a v2 session".into());
         return;
     }
     let lease = match owner.try_mutation() {
@@ -10520,41 +9883,7 @@ fn handle_permissions<B: ratatui::backend::Backend, R: approver::KeyReader>(
     }
 }
 
-/// Runs the `/skills` picker: a blocking loop like the others, but with
-/// no selection outcome — Enter and Esc both just close it (see
-/// `render::render_skills_picker`'s docs on why: polaris has nothing
-/// analogous to codex's enable/disable state to act on). Up/Down move
-/// the highlight, and the renderer keeps its page visible.
-fn run_skills_picker<B: ratatui::backend::Backend, R: approver::KeyReader>(
-    terminal: &RefCell<ratatui::Terminal<B>>,
-    reader: &mut R,
-    skills: &[polaris_skills::Skill],
-) {
-    let mut selected = 0usize;
-    loop {
-        if terminal
-            .borrow_mut()
-            .draw(|f| render::render_skills_picker(f, skills, selected))
-            .is_err()
-        {
-            return;
-        }
-        if skills.is_empty() {
-            let _ = reader.read_key();
-            return;
-        }
-        use ratatui::crossterm::event::KeyCode;
-        match reader.read_key() {
-            Ok(KeyCode::Down) => selected = (selected + 1) % skills.len(),
-            Ok(KeyCode::Up) => selected = (selected + skills.len() - 1) % skills.len(),
-            Ok(KeyCode::Enter) | Ok(KeyCode::Esc) => return,
-            Ok(_) => continue,
-            Err(_) => return,
-        }
-    }
-}
-
-/// `/decider`: the onboarding decider step, reachable after sign-in. The
+/// `/login decider`: the onboarding decider step, reachable after sign-in. The
 /// running session keeps its decider; the change applies from the next launch.
 fn run_decider_command<B: ratatui::backend::Backend, R: approver::KeyReader>(
     terminal: &RefCell<ratatui::Terminal<B>>,
@@ -10668,21 +9997,6 @@ fn agents_md_template() -> String {
     )
 }
 
-const REVIEW_INSTRUCTION: &str =
-    "Review the current uncommitted changes (`git diff`) and point out any issues you find.";
-
-/// Expands `/review`'s carried text (empty if none was typed) into the
-/// actual user message sent to the model. The model already has `bash`
-/// and `read` to look at the diff itself — this only supplies the
-/// instruction, the same way typing it out by hand would.
-fn review_prompt(extra: &str) -> String {
-    if extra.is_empty() {
-        REVIEW_INSTRUCTION.to_string()
-    } else {
-        format!("{REVIEW_INSTRUCTION} Focus especially on: {extra}")
-    }
-}
-
 /// Renders the conversation so far as a plain markdown transcript, for
 /// `/export`. Deliberately simple — one `## ` heading per message, role
 /// as the heading text, content underneath — rather than trying to
@@ -10712,21 +10026,6 @@ fn export_messages(messages: &[polaris_provider::Message]) -> String {
     out
 }
 
-/// `Action::Copy`'s handler, pulled out of `apply_slash_action` so its
-/// success path — a session with a real reply, flowing through to
-/// `*status` — is unit-testable with a fake `copy_fn` instead of only
-/// ever being exercised through the real `clipboard::copy_to_clipboard`,
-/// which does actual OS-level I/O (unsafe to run unconditionally in
-/// automated tests — see `clipboard.rs`'s own tests for why that function
-/// is injectable in the first place).
-fn apply_copy_action(
-    session: &polaris_core::session::Session,
-    status: &mut Status,
-    copy_fn: impl FnOnce(&str) -> Result<(), String>,
-) {
-    *status = Status::Notice(clipboard::copy_last_reply_with(session, copy_fn));
-}
-
 /// Reveal only a file identified by a completed mouse click.
 #[cfg(target_os = "macos")]
 fn reveal_history_file(
@@ -10744,13 +10043,11 @@ fn reveal_history_file(
     })
 }
 
-/// `Up`'s copy handler for mouse drag-selection, mirroring
-/// `apply_copy_action`'s injectable-`copy_fn` pattern (see its own doc
-/// comment for why: real clipboard I/O must never run unconditionally in
-/// the test suite). Unlike `apply_copy_action`, this takes the text
-/// directly rather than looking it up from a `Session` — the caller
-/// (Tasks 8/11) already has it from `selection::extract_text`, and is
-/// expected to only call this when `text` is non-empty (an empty/zero-
+/// The copy handler for mouse drag-selection. `copy_fn` is injectable
+/// because real clipboard I/O must never run unconditionally in the test
+/// suite. It takes the text directly rather than looking it up from a
+/// `Session` — the caller already has it from `selection::extract_text`, and
+/// is expected to only call this when `text` is non-empty (an empty/zero-
 /// width selection copies nothing and shows no notice at all).
 #[cfg(any(test, not(unix)))]
 fn apply_selection_copy(text: &str, copy_fn: impl FnOnce(&str) -> Result<(), String>) -> String {
@@ -10760,13 +10057,6 @@ fn apply_selection_copy(text: &str, copy_fn: impl FnOnce(&str) -> Result<(), Str
     }
 }
 
-/// Runs one resolved slash command. Never touches `session.messages` or
-/// the model — `Clear` is the only variant here that touches persisted
-/// state, and it does so by emptying the session file in place, not by
-/// sending anything; `Init`/`Logout` touch the filesystem directly (a new
-/// `AGENTS.md`, the deleted credentials file) but likewise never go near
-/// the model or `session.messages`. `New` and `Resume` are never actually
-/// dispatched here — see their match arms below.
 /// What `/mcp` prints. Registration and admission only: nothing is
 /// connected to and no model is asked, so this is safe to run at any time
 /// and says nothing about whether a server is currently answering.
@@ -10808,257 +10098,6 @@ fn mcp_state_lines(cwd: &std::path::Path, external_enabled: bool) -> Vec<String>
         lines.push(format!("  {} — {state}", server.server_id));
     }
     lines
-}
-
-#[cfg(unix)]
-fn rewind_candidate_diagnostic(
-    owner: Option<&polaris_core::rewind_workspace::WorkspaceOwner>,
-    sessions_dir: &std::path::Path,
-    cwd: &std::path::Path,
-) -> Vec<ratatui::text::Line<'static>> {
-    let Some(owner) = owner else {
-        return vec!["Rewind candidates: cannot verify the workspace owner".into()];
-    };
-    let Some(data_root) = sessions_dir.parent() else {
-        return vec!["Rewind candidates: cannot locate storage".into()];
-    };
-    let project_root = polaris_core::project::resolve_root(cwd);
-    let project_id = match persist::project_identity(&project_root) {
-        Ok(project_id) => project_id,
-        Err(error) => {
-            return vec![format!("Rewind candidates: cannot verify the project: {error}").into()];
-        }
-    };
-    let diagnostics =
-        polaris_core::rewind_admission::candidate_diagnostics(owner, data_root, &project_id);
-    if diagnostics.is_empty() {
-        return vec!["Rewind candidates: none refused or indeterminate".into()];
-    }
-    let mut lines = vec![
-        format!(
-            "Rewind candidates: {} refused or indeterminate",
-            diagnostics.len()
-        )
-        .into(),
-    ];
-    for diagnostic in diagnostics.iter().take(128) {
-        lines.push(
-            format!(
-                "  {}: {}",
-                render::sanitize(&diagnostic.id),
-                render::sanitize(&diagnostic.reason)
-            )
-            .into(),
-        );
-    }
-    if diagnostics.len() > 128 {
-        lines.push(
-            format!(
-                "  {} more. Inspect storage while processing is stopped",
-                diagnostics.len() - 128
-            )
-            .into(),
-        );
-    }
-    lines
-}
-
-/// What a diagnostic can read without contacting anything: files and the host.
-struct DoctorFacts {
-    chatgpt_file: bool,
-    api_key_file: bool,
-    api_key_env: bool,
-    provider_env: Option<String>,
-    /// An API key a launch would find (environment or a readable file).
-    openai_key: bool,
-    /// A ChatGPT credential file or a registered account a launch would find.
-    codex_credentials: bool,
-    /// Whether a policy for each mode can be built for this project.
-    sandboxes: Vec<(&'static str, Result<String, String>)>,
-    capacity: Vec<String>,
-    state: String,
-    delivered: usize,
-}
-
-impl DoctorFacts {
-    fn read(cwd: &std::path::Path) -> Self {
-        use polaris_sandbox::SandboxMode;
-        let chatgpt_file = polaris_auth::store::default_path()
-            .ok()
-            .is_some_and(|path| path.is_file());
-        let key_path = polaris_auth::api_key::default_path().ok();
-        let api_key_file = key_path.as_deref().is_some_and(|path| path.is_file());
-        let api_key_env = std::env::var_os("POLARIS_API_KEY").is_some();
-        let openai_key = api_key_env
-            || key_path
-                .and_then(|path| polaris_auth::api_key::load_from(&path).ok().flatten())
-                .is_some();
-        let registered = match polaris_auth::accounts::store::AccountStore::read_only_snapshot() {
-            Ok(snapshot) => !snapshot.accounts.is_empty(),
-            Err(polaris_auth::AuthError::RecoveryRequired) => true,
-            Err(_) => false,
-        };
-        let project_root = polaris_core::project::resolve_root(cwd);
-        let storage_root = std::env::var_os("POLARIS_DATA_DIR")
-            .map(std::path::PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".polaris"))
-            });
-        let state = match storage_root {
-            Some(root) if root.is_absolute() => {
-                let path = root
-                    .join("state")
-                    .join(polaris_core::project::project_id(&project_root));
-                format!(
-                    "{} ({})",
-                    path.display(),
-                    if path.is_dir() {
-                        "present"
-                    } else {
-                        "not created"
-                    }
-                )
-            }
-            _ => "unavailable (cannot locate storage)".to_owned(),
-        };
-        Self {
-            chatgpt_file,
-            api_key_file,
-            api_key_env,
-            provider_env: std::env::var("POLARIS_PROVIDER").ok(),
-            openai_key,
-            codex_credentials: chatgpt_file || (!openai_key && registered),
-            sandboxes: [
-                ("read-only", SandboxMode::ReadOnly),
-                ("workspace-write", SandboxMode::WorkspaceWrite),
-            ]
-            .map(|(label, mode)| (label, sandbox_availability(cwd, mode)))
-            .into(),
-            capacity: polaris_core::decision_capacity::observation::diagnostic_lines(
-                &polaris_core::decision_capacity::observation::host_memory(),
-            ),
-            state,
-            delivered: polaris_core::constitution::reach(&project_root)
-                .iter()
-                .map(|rule| rule.delivered)
-                .sum(),
-        }
-    }
-}
-
-/// Whether a policy for `mode` can be built for this project, with the same
-/// writable roots a run gets (`build_sandbox_policy` in polaris-cli, which
-/// polaris-tui cannot depend on). Building the policy does not run anything.
-fn sandbox_availability(
-    cwd: &std::path::Path,
-    mode: polaris_sandbox::SandboxMode,
-) -> Result<String, String> {
-    let mut roots = Vec::new();
-    if mode == polaris_sandbox::SandboxMode::WorkspaceWrite {
-        roots.push(polaris_core::project::resolve_root(cwd));
-        roots.extend(
-            std::env::var_os("TMPDIR")
-                .map(std::path::PathBuf::from)
-                .filter(|path| path.is_absolute() && path.is_dir()),
-        );
-    }
-    polaris_sandbox::SandboxPolicy::new(mode, &roots)
-        .map(|policy| policy.describe())
-        .map_err(|error| error.to_string())
-}
-
-/// What `polaris` would pick as its provider on the next launch, by the rule
-/// of `default_provider_name` in polaris-cli.
-fn provider_resolution(
-    explicit: Option<&str>,
-    openai_key: bool,
-    codex_credentials: bool,
-) -> String {
-    match explicit {
-        Some(name) => format!("POLARIS_PROVIDER is set explicitly: {name}"),
-        None => format!(
-            "POLARIS_PROVIDER is not set; a new launch would default to {}",
-            if !openai_key && codex_credentials {
-                "codex"
-            } else {
-                "openai"
-            }
-        ),
-    }
-}
-
-/// `/doctor` keeps three kinds of statement apart. Configured is what this
-/// session was started with. Available is what local files and the host show
-/// could be used. Observed is what was actually seen on a live connection.
-fn doctor_report(
-    (provider_name, model_name): (&str, &str),
-    sandbox: &polaris_sandbox::SandboxPolicy,
-    approval: polaris_core::approval::ApprovalPolicy,
-    mcp_external: bool,
-    facts: &DoctorFacts,
-) -> Vec<String> {
-    let mut lines = vec![
-        "Diagnostics (read-only)".to_owned(),
-        format!("Configured: provider={provider_name}, model={model_name}"),
-        format!(
-            "Configured: sandbox={}, approval={approval:?}",
-            sandbox.describe()
-        ),
-        format!("Configured: external MCP={mcp_external}; inspect individual servers with /mcp"),
-        format!(
-            "Available: ChatGPT credential file={}, API key file={}, environment API key={}",
-            facts.chatgpt_file, facts.api_key_file, facts.api_key_env
-        ),
-        format!(
-            "Available: provider resolution: {}",
-            provider_resolution(
-                facts.provider_env.as_deref(),
-                facts.openai_key,
-                facts.codex_credentials
-            )
-        ),
-    ];
-    for (mode, availability) in &facts.sandboxes {
-        lines.push(match availability {
-            Ok(described) => format!("Available: sandbox {mode}: available ({described})"),
-            Err(error) => format!("Available: sandbox {mode}: NOT available ({error})"),
-        });
-    }
-    lines.push(format!(
-        "Available: state={}; delivered always-on instruction lines={}",
-        facts.state, facts.delivered
-    ));
-    lines.extend(
-        facts
-            .capacity
-            .iter()
-            .map(|line| format!("Available: decision capacity: {line}")),
-    );
-    lines.push(
-        "Observed: nothing. This diagnostic does not contact authentication, model, or MCP endpoints. Connection success and actual resource availability are unverified."
-            .to_owned(),
-    );
-    lines
-}
-
-fn doctor_lines(
-    provider_name: &str,
-    model_name: &str,
-    cwd: &std::path::Path,
-    sandbox: &polaris_sandbox::SandboxPolicy,
-    approval: polaris_core::approval::ApprovalPolicy,
-    mcp_external: bool,
-) -> Vec<ratatui::text::Line<'static>> {
-    doctor_report(
-        (provider_name, model_name),
-        sandbox,
-        approval,
-        mcp_external,
-        &DoctorFacts::read(cwd),
-    )
-    .into_iter()
-    .map(|line| ratatui::text::Line::from(render::sanitize(&line).escape_debug().to_string()))
-    .collect()
 }
 
 fn cat_diagnostic_lines(
@@ -11287,47 +10326,6 @@ fn memory_read_lines(
     Ok(lines)
 }
 
-fn decided_read_lines(cwd: &std::path::Path) -> Result<Vec<ratatui::text::Line<'static>>, String> {
-    use std::io::Read;
-
-    let root = polaris_core::project::resolve_root(cwd);
-    let ledger = root.join(polaris_core::decisions::PATH);
-    let mut data = Vec::new();
-    match std::fs::File::open(&ledger) {
-        Ok(file) => file
-            .take(1024 * 1024 + 1)
-            .read_to_end(&mut data)
-            .map_err(|error| format!("Cannot read decisions: {error}"))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
-        Err(error) => return Err(format!("Cannot read decisions: {error}")),
-    };
-    if data.len() > 1024 * 1024 {
-        return Err("The decision ledger exceeds 1 MiB and cannot be displayed in TUI".into());
-    }
-    let text = String::from_utf8(data).map_err(|_| "The decision ledger is not UTF-8")?;
-    let entries = polaris_core::decisions::parse(&text);
-    let mut lines = vec![ratatui::text::Line::from(format!(
-        "{} recorded decisions. Historical records, not current approvals.",
-        entries.len()
-    ))];
-    if entries.is_empty() {
-        lines.push(ratatui::text::Line::from("No records"));
-    }
-    let omitted = entries.len().saturating_sub(100);
-    if omitted > 0 {
-        lines.push(ratatui::text::Line::from(format!(
-            "Omitted {omitted} older records"
-        )));
-    }
-    for entry in entries.into_iter().skip(omitted) {
-        lines.push(ratatui::text::Line::from(render::sanitize(&format!(
-            "{}  {}",
-            entry.at, entry.what
-        ))));
-    }
-    Ok(lines)
-}
-
 fn clear_mcp_prompt_on_session_change(
     previous: &std::path::Path,
     current: &std::path::Path,
@@ -11434,18 +10432,10 @@ const OWNER_REQUIRED: &str = "This operation requires an active terminal and sto
 fn apply_slash_action(
     action: slash::Action,
     session: &mut polaris_core::session::Session,
-    session_path: &std::path::Path,
     status: &mut Status,
     _provider_name: &str,
     _model_name: &str,
     _usage_report: polaris_provider::UsageReport,
-    // No longer read here — `/skills` is intercepted in `run()` before
-    // dispatch (see `run_skills_picker`) now that it's a full-screen
-    // picker instead of a one-line `Status::Notice`. Kept as a parameter
-    // rather than removed, since removing it would mean touching every
-    // `apply_slash_action`/`call` call site (production and test) for a
-    // signature change with no behavior difference.
-    _skills: &[polaris_skills::Skill],
     cwd: &std::path::Path,
     state_dir: &std::path::Path,
     sessions_dir: &std::path::Path,
@@ -11457,34 +10447,11 @@ fn apply_slash_action(
         return SlashOutcome::Continue;
     }
     match action {
-        slash::Action::SessionControl(_)
-        | slash::Action::Environment(_)
-        | slash::Action::RuntimeControl(_) => {
-            *status = Status::Error(OWNER_REQUIRED.into());
-            SlashOutcome::Continue
-        }
-        #[cfg(target_os = "linux")]
-        slash::Action::WorkspaceControl(_) => {
+        slash::Action::MemoryConfigure(_) => {
             *status = Status::Error(OWNER_REQUIRED.into());
             SlashOutcome::Continue
         }
         slash::Action::Quit => SlashOutcome::Quit,
-        slash::Action::Clear => {
-            local_lines.clear();
-            let cleared = if session.persistence.is_some() {
-                session.clear_history()
-            } else {
-                session.messages.clear();
-                persist::clear_session(session_path)
-            };
-            match cleared {
-                Ok(()) => {
-                    *status = Status::Idle;
-                    SlashOutcome::Continue
-                }
-                Err(e) => SlashOutcome::Fatal(format!("Can't clear the persisted session: {e}")),
-            }
-        }
         slash::Action::Status => {
             *status = Status::Error("Cannot verify the /status display path".into());
             SlashOutcome::Continue
@@ -11505,69 +10472,10 @@ fn apply_slash_action(
             }
             SlashOutcome::Continue
         }
-        slash::Action::Decided(requested) => {
-            if !requested.is_empty() && requested != "list" {
-                *status = Status::Error("Usage: /decided [list] | /decided add <statement>".into());
-                return SlashOutcome::Continue;
-            }
-            match decided_read_lines(cwd) {
-                Ok(lines) => {
-                    local_lines.extend(lines);
-                    *status = Status::Notice("Decisions displayed".into());
-                }
-                Err(error) => *status = Status::Error(error),
-            }
-            SlashOutcome::Continue
-        }
-        #[cfg(target_os = "linux")]
-        slash::Action::Apply(_) => {
-            *status = Status::Error(
-                "D27 operations require a real terminal and source-bound owner".into(),
-            );
-            SlashOutcome::Continue
-        }
         slash::Action::Sync(_) => {
             *status = Status::Error(
                 "Shared apply requires a supported OS confirmation screen and sharing owner".into(),
             );
-            SlashOutcome::Continue
-        }
-        slash::Action::Phase(requested) => {
-            *status = if requested.is_empty() {
-                session.workflow.as_ref().map_or_else(
-                    || Status::Notice("Workflow is disabled for this session".into()),
-                    |workflow| {
-                        Status::Notice(format!("Workflow phase: {}", workflow.state().phase))
-                    },
-                )
-            } else {
-                Status::Error(
-                    "Phase changes require a management operation confirmation screen".into(),
-                )
-            };
-            SlashOutcome::Continue
-        }
-        slash::Action::Workflow(requested) => {
-            *status = if requested.is_empty() {
-                session.workflow.as_ref().map_or_else(
-                    || Status::Notice("Workflow is disabled for this session".into()),
-                    |workflow| {
-                        let mode = if workflow.config.enabled {
-                            match workflow.config.mode {
-                                polaris_core::workflow::WorkflowMode::Manual => "manual",
-                                polaris_core::workflow::WorkflowMode::Adaptive => "adaptive",
-                            }
-                        } else {
-                            "off"
-                        };
-                        Status::Notice(format!("workflow: {mode}"))
-                    },
-                )
-            } else {
-                Status::Error(
-                    "Workflow changes require a management operation confirmation screen".into(),
-                )
-            };
             SlashOutcome::Continue
         }
         slash::Action::Init => {
@@ -11601,10 +10509,6 @@ fn apply_slash_action(
                 local_lines.push(ratatui::text::Line::from(line));
             }
             *status = Status::Idle;
-            SlashOutcome::Continue
-        }
-        slash::Action::Copy => {
-            apply_copy_action(session, status, clipboard::copy_to_clipboard);
             SlashOutcome::Continue
         }
         slash::Action::Export(destination) => {
@@ -11703,21 +10607,19 @@ fn apply_slash_action(
                 SlashOutcome::Continue
             }
         }
-        slash::Action::Review(_)
-        | slash::Action::Doctor
-        | slash::Action::New
+        slash::Action::New
         | slash::Action::Resume
         | slash::Action::Permissions
         | slash::Action::Fork
         | slash::Action::Model
-        | slash::Action::Skills
-        | slash::Action::Decider => {
+        | slash::Action::Decider
+        | slash::Action::Copy => {
             // Never reached: `run()` recognizes all of these before
-            // dispatch — `Review` expands into a normal model turn;
-            // `New`/`Resume`/`Fork` are handled by
+            // dispatch — `New`/`Resume`/`Fork` are handled by
             // `handle_new_session`/`handle_resume`/`handle_fork`;
-            // `Permissions`/`Model`/`Skills` are handled by
-            // `handle_permissions`/`handle_model`/`run_skills_picker`.
+            // `Permissions`/`Model`/`Decider` are handled by
+            // `handle_permissions`/`handle_model`/`run_decider_command`;
+            // `Copy` is Ctrl+O and the mouse selection.
             // Every one of them needs state (`session_path`,
             // `approval_policy`, `model_name`, the terminal, ...) this
             // function doesn't have. This arm exists only so the match
@@ -11727,12 +10629,6 @@ fn apply_slash_action(
                 "internal: this command should have been handled before dispatch. \
                                  Please report this as a polaris bug."
                     .to_string(),
-            );
-            SlashOutcome::Continue
-        }
-        slash::Action::Compact => {
-            *status = Status::Notice(
-                "Compaction is automatic. /compact and /compact threshold were removed.".into(),
             );
             SlashOutcome::Continue
         }
@@ -11753,6 +10649,10 @@ fn apply_slash_action(
                     "/{} — {}",
                     command.name, command.description
                 )));
+            }
+            local_lines.push(ratatui::text::Line::from("keys:"));
+            for (keys, what) in slash::KEYS {
+                local_lines.push(ratatui::text::Line::from(format!("{keys} — {what}")));
             }
             *status = Status::Notice("commands listed above (scroll to see all)".to_string());
             SlashOutcome::Continue

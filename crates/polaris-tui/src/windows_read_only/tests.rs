@@ -61,7 +61,7 @@ fn windows_read_only_loop_displays_commands_without_creating_state() {
     let mut view = ReadOnlyView::new(root.path().to_owned());
     let mut terminal = ratatui::Terminal::new(TestBackend::new(100, 32)).unwrap();
     let mut events = VecDeque::new();
-    for text in ["/help", "/status", "/doctor", "/decided list", "/quit"] {
+    for text in ["/help", "/status", "/doctor", "/quit"] {
         events.push_back(Event::Paste(text.into()));
         events.push_back(enter());
     }
@@ -77,23 +77,30 @@ fn windows_read_only_loop_displays_commands_without_creating_state() {
         .iter()
         .map(|line| line.line.to_string())
         .collect::<Vec<_>>();
-    assert!(lines.iter().any(|line| line.contains("/help")));
-    assert!(
-        lines
-            .iter()
-            .any(|line| line == "/phase — show phase availability (read-only)")
-    );
-    assert!(
-        lines
-            .iter()
-            .any(|line| line == "/workflow — show workflow availability (read-only)")
-    );
+    // The help lists the commands this screen can answer, and no other.
+    for listed in ["/help — ", "/status — ", "/quit — "] {
+        assert!(
+            lines.iter().any(|line| line.starts_with(listed)),
+            "{listed}: {lines:?}"
+        );
+    }
+    for unlisted in ["/phase", "/workflow", "/doctor — ", "/decided"] {
+        assert!(
+            lines.iter().all(|line| !line.starts_with(unlisted)),
+            "{unlisted}: {lines:?}"
+        );
+    }
     assert!(
         lines
             .iter()
             .any(|line| line.contains("conversation, storage: not started"))
     );
-    assert!(lines.iter().any(|line| line.contains("No records")));
+    // A removed command answers where to go, and nothing else happens.
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("/doctor was removed."))
+    );
     let project_root = format!(
         "Project root: {}",
         polaris_core::project::resolve_root(root.path()).display()
@@ -111,18 +118,15 @@ fn windows_read_only_loop_preserves_mutation_and_unavailable_reader_drafts() {
     view.history.record("earlier command");
     for text in [
         "実行してください",
-        "/review",
-        "/clear",
         "/init",
         "/export file.md",
         "/model",
         "/resume",
+        "/new fork",
+        "/login decider",
         "/sync apply",
         "/mcp list",
         "/memory search fixture",
-        "/pwd",
-        "/compare left | right",
-        "/run details",
     ] {
         view.buffer = text.into();
         view.cursor = text.chars().next().unwrap().len_utf8();
@@ -187,19 +191,48 @@ fn windows_read_only_popup_and_resize_keep_read_only_presentation() {
             assert!(text.contains("C:\\project\\line\\n\\t"));
         }
     }
-    for (name, description) in [
-        ("phase", "show phase availability (read-only)"),
-        ("workflow", "show workflow availability (read-only)"),
-    ] {
+    // Removed commands are not offered either, nor are commands this screen cannot run.
+    for name in ["phase", "workflow", "doctor", "model"] {
         view.buffer = format!("/{name}");
         view.cursor = view.buffer.len();
-        let suggestions = view.suggestions();
-        assert_eq!(suggestions.len(), 1);
-        assert_eq!(suggestions[0].description, description);
-        let mut terminal = ratatui::Terminal::new(TestBackend::new(120, 32)).unwrap();
-        view.draw(&mut terminal).unwrap();
-        assert!(screen(&terminal).contains(description));
+        assert!(view.suggestions().is_empty(), "/{name}");
     }
+}
+
+#[test]
+fn windows_read_only_loop_answers_removed_commands_where_to_go_without_creating_state() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("journal.json"), b"journal before").unwrap();
+    let before = contents(root.path());
+    for (text, answer) in [
+        ("/review now", "/review was removed."),
+        ("/CLEAR", "/clear was removed."),
+        ("/pwd", "/pwd was removed."),
+        ("/compare left | right", "/compare was removed."),
+        ("/run details", "/run was removed."),
+        ("/phase implement", "/phase was removed."),
+        ("/decided add something", "/decided was removed."),
+        ("/mcp configure unity", "/mcp configure was removed."),
+        (
+            "/sync join remote share invite 9999999999",
+            "/sync join was removed.",
+        ),
+    ] {
+        let mut view = ReadOnlyView::new(root.path().to_owned());
+        view.buffer = text.into();
+        view.cursor = view.buffer.len();
+        assert!(!view.event(enter()));
+        assert!(view.buffer.is_empty(), "{text}");
+        assert!(matches!(&view.status, Status::Notice(_)), "{text}");
+        let lines = view
+            .lines
+            .iter()
+            .map(|line| line.line.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2, "{text}: the line typed, then one answer");
+        assert!(lines[1].starts_with(answer), "{text}: {lines:?}");
+    }
+    assert_eq!(contents(root.path()), before);
 }
 
 #[test]

@@ -9,7 +9,6 @@ use polaris_core::{
     approval::ApprovalPolicy, management_effect::ManagementEffectStoreV1,
     rewind_workspace::WorkspaceOwner, session::Session, session_settings::SavedSessionSettingsV1,
 };
-use polaris_provider::Provider;
 use ratatui::{Terminal, backend::Backend, text::Line};
 use std::{cell::RefCell, path::Path};
 
@@ -46,45 +45,18 @@ pub(super) async fn dispatch<B: Backend, R: KeyReader>(
     terminal: &RefCell<Terminal<B>>,
     reader: &mut R,
     session: &mut Session,
-    session_dependencies: (
-        &SavedSessionSettingsV1,
-        &dyn Provider,
-        Option<&HistoryBackendFactory>,
-    ),
+    session_dependencies: (&SavedSessionSettingsV1, Option<&HistoryBackendFactory>),
     management: (&WorkspaceOwner, &ManagementEffectStoreV1),
     paths: (&Path, &Path),
     embedding: Option<&(String, String)>,
     mcp: (bool, ApprovalPolicy),
     has_pending: bool,
 ) -> Option<CommandDispatchResult> {
-    let (initial, provider, history_factory) = session_dependencies;
+    let (initial, history_factory) = session_dependencies;
     let (workspace, effects) = management;
     let (cwd, state_dir) = paths;
     match action {
-        slash::Action::Environment(request) => {
-            #[cfg(target_os = "macos")]
-            let result = crate::environment_commands::handle(
-                request,
-                cwd,
-                terminal,
-                reader,
-                workspace,
-                effects,
-                mcp.1,
-                has_pending,
-            )
-            .await;
-            #[cfg(not(target_os = "macos"))]
-            let result: Result<Vec<Line<'static>>, String> = {
-                let _ = request;
-                Err("Environment setup currently supports macOS arm64".into())
-            };
-            Some(match result {
-                Ok(lines) => CommandDispatchResult::success(lines, "Environment result displayed"),
-                Err(error) => CommandDispatchResult::error(error),
-            })
-        }
-        slash::Action::SessionControl(request) => Some(
+        slash::Action::MemoryConfigure(request) => Some(
             match session_commands::handle(
                 request,
                 terminal,
@@ -93,7 +65,6 @@ pub(super) async fn dispatch<B: Backend, R: KeyReader>(
                 initial,
                 workspace,
                 effects,
-                provider,
                 history_factory,
                 has_pending,
             ) {
@@ -133,25 +104,6 @@ pub(super) async fn dispatch<B: Backend, R: KeyReader>(
                 },
             )
         }
-        // C35. Linux enters through `WorkspaceCommands` in the terminal loop,
-        // which also pins the startup folder. The save itself is the same.
-        #[cfg(not(target_os = "linux"))]
-        slash::Action::Decided(request) if request.starts_with("add ") => Some(
-            match crate::local_actions::decided(
-                request.strip_prefix("add ").unwrap_or_default(),
-                &crate::now_millis().to_string(),
-                terminal,
-                reader,
-                workspace,
-                effects,
-                has_pending,
-            ) {
-                Ok(lines) => {
-                    CommandDispatchResult::success(lines, "Decision record result displayed")
-                }
-                Err(error) => CommandDispatchResult::error(error),
-            },
-        ),
         slash::Action::Mcp(request) if request.split_whitespace().next() != Some("prompt") => Some(
             match mcp_commands::handle(
                 request,
@@ -188,23 +140,12 @@ pub(super) async fn dispatch<B: Backend, R: KeyReader>(
     }
 }
 
-#[cfg(all(test, not(target_os = "linux")))]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use polaris_provider::{CompletionRequest, CompletionResponse, ProviderError};
+    use polaris_core::{conversation_state::HistoryMode, session_store::PersistedSession};
     use ratatui::{backend::TestBackend, crossterm::event::KeyCode};
     use std::os::unix::fs::PermissionsExt;
-
-    struct NoProvider;
-    #[async_trait::async_trait]
-    impl Provider for NoProvider {
-        async fn complete(
-            &self,
-            _: CompletionRequest,
-        ) -> Result<CompletionResponse, ProviderError> {
-            panic!("decision commands never call a provider")
-        }
-    }
 
     struct Key(KeyCode);
     impl KeyReader for Key {
@@ -213,11 +154,12 @@ mod tests {
         }
     }
 
-    /// C35 on a platform whose terminal loop has no `WorkspaceCommands`: the
-    /// dispatcher claims `/decided add <statement>` and saves exactly the text
-    /// after the first `add `. The bare and `list` forms stay with the display.
+    /// `/memory configure` is the one session setting the TUI still saves. The
+    /// dispatcher claims it, reports a committed change only after the person
+    /// confirms, refuses it while input is queued, and leaves removed names to
+    /// the display path.
     #[tokio::test]
-    async fn decided_add_is_claimed_and_saves_the_statement_after_the_first_add() {
+    async fn memory_configure_is_claimed_and_removed_names_are_not() {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().canonicalize().unwrap();
         let project = root.join("project");
@@ -234,10 +176,27 @@ mod tests {
         let lease = workspace.try_mutation().unwrap();
         let effects = ManagementEffectStoreV1::open_at_state_dir(&project, &state, &lease).unwrap();
         drop(lease);
+        let persisted = PersistedSession::create(
+            &root,
+            &state.join("memory.sqlite3"),
+            project.to_str().unwrap(),
+            HistoryMode::Legacy,
+            None,
+        )
+        .unwrap();
+        let mut session = Session::new();
+        session.attach(persisted.clone()).unwrap();
         let initial =
             SavedSessionSettingsV1::new("fake".into(), "model".into(), "auto".into()).unwrap();
         let terminal = RefCell::new(Terminal::new(TestBackend::new(100, 30)).unwrap());
-        let mut session = Session::new();
+        let remembered = || {
+            persisted
+                .snapshot()
+                .unwrap()
+                .state
+                .session_settings
+                .is_some_and(|saved| saved.remember)
+        };
         let mut dispatch_line = async |line: &str, key: KeyCode, pending: bool| {
             let action = slash::parse(line).expect("a slash command");
             dispatch(
@@ -245,7 +204,7 @@ mod tests {
                 &terminal,
                 &mut Key(key),
                 &mut session,
-                (&initial, &NoProvider, None),
+                (&initial, None),
                 (&workspace, &effects),
                 (&project, &state),
                 None,
@@ -255,30 +214,26 @@ mod tests {
             .await
         };
 
-        let saved = dispatch_line(
-            "/decided add add retries to fetch",
-            KeyCode::Char('y'),
-            false,
-        )
-        .await
-        .expect("the dispatcher claims /decided add");
-        assert!(matches!(saved.status, Status::Notice(_)));
-        assert!(saved.lines[0].to_string().contains("Decision saved"));
-        let entries = polaris_core::decisions::load(&project);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].what, "add retries to fetch");
-
-        let declined = dispatch_line("/decided add not recorded", KeyCode::Esc, false)
-            .await
-            .expect("a declined save is still claimed");
-        assert!(declined.lines[0].to_string().contains("cancelled"));
-        let queued = dispatch_line("/decided add queued", KeyCode::Char('y'), true)
+        let queued = dispatch_line("/memory configure on", KeyCode::Char('y'), true)
             .await
             .expect("a queued-input refusal is still claimed");
         assert!(matches!(queued.status, Status::Error(_)));
-        assert_eq!(polaris_core::decisions::load(&project).len(), 1);
+        assert!(!queued.settings_changed);
+        let declined = dispatch_line("/memory configure on", KeyCode::Esc, false)
+            .await
+            .expect("a declined save is still claimed");
+        assert!(declined.lines[0].to_string().contains("cancelled"));
+        assert!(!declined.settings_changed);
+        assert!(!remembered());
 
-        for line in ["/decided", "/decided list", "/decided add"] {
+        let saved = dispatch_line("/memory configure on", KeyCode::Char('y'), false)
+            .await
+            .expect("the dispatcher claims /memory configure");
+        assert!(matches!(saved.status, Status::Notice(_)));
+        assert!(saved.settings_changed);
+        assert!(remembered());
+
+        for line in ["/doctor", "/session configure codex gpt-6-astra", "/status"] {
             assert!(
                 dispatch_line(line, KeyCode::Char('y'), false)
                     .await
@@ -286,5 +241,6 @@ mod tests {
                 "{line} stays with the display path"
             );
         }
+        assert!(remembered());
     }
 }
