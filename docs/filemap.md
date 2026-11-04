@@ -13,8 +13,8 @@ UPDATE_FILEMAP=1 cargo test -p polaris-core --test filemap
 
 - `CHANGELOG.md` — 変更履歴
 - `Cargo.toml` — workspace definition and shared dependencies
-- `README.en.md` — polaris
-- `README.md` — polaris
+- `README.en.md` — README.en.md
+- `README.md` — README.md
 - `rust-toolchain.toml` — pinned toolchain
 
 ## `agents/doc-writer`
