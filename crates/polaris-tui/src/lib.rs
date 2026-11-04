@@ -2814,6 +2814,9 @@ fn keep_or_roll_back(
     session: &mut polaris_core::session::Session,
     checkpoint: usize,
 ) -> std::io::Result<()> {
+    // The run is over, its future dropped or failed: the turn did not complete,
+    // so the memory drops what it took in of it.
+    session.discard_turn_memory();
     if session.messages[checkpoint.min(session.messages.len())..]
         .iter()
         .flat_map(|message| &message.tool_calls)

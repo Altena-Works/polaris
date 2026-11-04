@@ -9965,3 +9965,214 @@ async fn a_failed_turn_rolled_back_does_not_shift_the_next_turns_intake() {
         assert!(lines[n].starts_with(&expected), "{quote}");
     }
 }
+
+/// A store for tool results that keeps what it is given and names it.
+#[cfg(unix)]
+struct Archive;
+
+#[cfg(unix)]
+impl crate::tool_memory::ToolMemoryBackend for Archive {
+    fn save<'a>(
+        &'a self,
+        _: &'a ToolCall,
+        text: &'a str,
+    ) -> futures_util::future::BoxFuture<'a, std::io::Result<crate::tool_memory::SavedToolResult>>
+    {
+        Box::pin(async move {
+            Ok(crate::tool_memory::SavedToolResult {
+                id: "stored1".into(),
+                preview: String::new(),
+                bytes: text.len(),
+            })
+        })
+    }
+
+    fn read<'a>(
+        &'a self,
+        _: &'a str,
+        _: usize,
+        _: usize,
+    ) -> futures_util::future::BoxFuture<'a, std::io::Result<String>> {
+        Box::pin(async { Ok(String::new()) })
+    }
+}
+
+/// A reply that asks for `path` to be read.
+#[cfg(unix)]
+fn reads(path: &std::path::Path) -> CompletionResponse {
+    CompletionResponse {
+        tool_calls: vec![ToolCall {
+            id: "read-1".into(),
+            name: "read".into(),
+            arguments: serde_json::json!({ "path": path }),
+        }],
+        ..Default::default()
+    }
+}
+
+#[cfg(unix)]
+fn says(text: &str) -> CompletionResponse {
+    CompletionResponse {
+        text: text.into(),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn a_long_tool_result_is_in_the_log_whole_two_turns_later_though_the_history_cut_it_down() {
+    // A file of over 50 KB. The sentence in it that the question below asks
+    // about stands 2 KB from its end, where the excerpt that replaces the
+    // result in the history (a head and the last third of 2 KB) does not reach;
+    // the last line is in the excerpt, so it would be there either way.
+    let dir = tempfile::tempdir().expect("temp directory");
+    let path = dir.path().join("report.txt");
+    let line = |i: usize| {
+        format!("{i:04} the quick brown fox jumps over the lazy dog and keeps going all through.\n")
+    };
+    let mut body: String = (0..660).map(line).collect();
+    body.push_str(
+        "The vault rotation is scheduled for quartz-heron-umbra-7731 and nothing else.\n",
+    );
+    body.extend((660..685).map(line));
+    body.push_str("The report ends with omega-delta-5520.\n");
+    assert!(body.len() > 50_000, "{}", body.len());
+    std::fs::write(&path, &body).expect("write the report");
+
+    let p = Recording {
+        replies: Mutex::new(vec![
+            reads(&path),
+            says("Read it."),
+            says("Nothing else."),
+            says("Quartz."),
+        ]),
+        sent: Mutex::new(Vec::new()),
+    };
+    let mut session = Session::new();
+    session.quality = Some(crate::quality::Gates::default());
+    session.turn_memory_factory = Some(crate::turn_memory::factory(false, None, None));
+    session.tool_memory = Some(crate::tool_memory::ToolMemory {
+        backend: Arc::new(Archive),
+        mode: crate::tool_memory::RetentionMode::Retrieval,
+        threshold_bytes: 8192,
+    });
+    ask(&p, &mut session, "Read report.txt and summarise it.").await;
+    // The history cut the result down when the next request was built.
+    assert!(
+        session
+            .messages
+            .iter()
+            .any(|m| m.content.starts_with("[Stored tool result stored1")),
+        "the premise: the history holds a stub"
+    );
+    assert!(
+        session
+            .messages
+            .iter()
+            .all(|m| !m.content.contains("quartz-heron"))
+    );
+    ask(&p, &mut session, "Anything else?").await;
+    ask(
+        &p,
+        &mut session,
+        "What is the vault rotation scheduled for, quartz heron umbra 7731, and how does the report end, omega delta 5520?",
+    )
+    .await;
+    let quote = quoted(&p.sent.lock().expect("lock")).expect("the earlier turns are quoted");
+    assert!(
+        quote.contains(
+            "The vault rotation is scheduled for quartz-heron-umbra-7731 and nothing else."
+        ),
+        "{quote}"
+    );
+    assert!(
+        quote.contains("The report ends with omega-delta-5520."),
+        "{quote}"
+    );
+}
+
+/// Asks for a file to be read, then goes down.
+#[cfg(unix)]
+struct ReadsThenFails {
+    path: std::path::PathBuf,
+    asked: Mutex<usize>,
+}
+
+#[cfg(unix)]
+#[async_trait::async_trait]
+impl Provider for ReadsThenFails {
+    async fn complete(
+        &self,
+        _: CompletionRequest,
+    ) -> Result<CompletionResponse, polaris_provider::ProviderError> {
+        let mut asked = self.asked.lock().expect("lock");
+        *asked += 1;
+        if *asked > 1 {
+            return Err(polaris_provider::ProviderError::Http(
+                "the model is down".into(),
+            ));
+        }
+        Ok(reads(&self.path))
+    }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn a_turn_that_ends_in_an_error_leaves_nothing_of_it_in_the_memory() {
+    let dir = tempfile::tempdir().expect("temp directory");
+    let path = dir.path().join("notes.txt");
+    std::fs::write(&path, "ZEBRA-MARKER-4417 is written in this file.\n").expect("write the notes");
+    let named = Named::new(None);
+    let mut session = Session::new();
+    session.quality = Some(crate::quality::Gates::default());
+    session.turn_memory_factory = Some(crate::turn_memory::factory(false, None, None));
+    ask(&*named, &mut session, "first question").await;
+
+    // The second turn reads the file, which the memory takes in, and then the
+    // model goes down.
+    session.push_user("Read notes.txt for ZEBRA-MARKER-4417.");
+    let down = ReadsThenFails {
+        path,
+        asked: Mutex::new(0),
+    };
+    assert!(try_once(&down, &mut session).await.is_err());
+    assert!(
+        session
+            .messages
+            .iter()
+            .any(|m| m.content.contains("ZEBRA-MARKER-4417 is written")),
+        "the premise: the result was in the history"
+    );
+
+    // Closing what is pending closes nothing, and nothing of the turn is
+    // quoted: not the file, not the input, not a line for the turn.
+    let memory = session.turn_memory.clone().expect("the memory was made");
+    let mut memory = memory.lock().await;
+    memory.close(None).await;
+    let quote = memory
+        .recall("ZEBRA MARKER 4417 notes")
+        .await
+        .map_or_else(String::new, |m| m.content);
+    assert!(quote.contains("T1: asked=first question"), "{quote}");
+    assert!(!quote.contains("ZEBRA") && !quote.contains("T2"), "{quote}");
+}
+
+#[tokio::test]
+async fn a_finished_turn_left_in_the_history_without_a_close_is_closed_when_the_next_run_starts() {
+    let named = Named::new(None);
+    let mut session = Session::new();
+    session.quality = Some(crate::quality::Gates::default());
+    session.turn_memory_factory = Some(crate::turn_memory::factory(false, None, None));
+    // A turn the history holds and no run closed: one a host cut short, or one
+    // read back from storage.
+    session.push_user("Name the release branch `aurora-rc2`.");
+    session.push_assistant("Created aurora-rc2.", vec![]);
+    ask(&*named, &mut session, "Push aurora-rc2 now.").await;
+    let quote = quoted(&named.taken()).expect("the earlier turn is quoted");
+    assert!(
+        quote
+            .lines()
+            .any(|l| l.starts_with("T1: asked=Name the release branch")),
+        "{quote}"
+    );
+}

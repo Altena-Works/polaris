@@ -163,7 +163,7 @@ pub async fn run_with_mcp(
     session.check_persistence()?;
     let skill_query = real_user_query(session);
     session.request_prompt = Some(always_on.clone());
-    run_loop(
+    let outcome = run_loop(
         provider,
         session,
         audit,
@@ -182,7 +182,21 @@ pub async fn run_with_mcp(
         ctx,
         mcp,
     )
-    .await
+    .await;
+    // The turn-only memory: a turn that completed is closed into it, one that
+    // failed leaves nothing in it. A host that stops the run by dropping this
+    // future drops the pending turn itself (`Session::discard_turn_memory`),
+    // and the next run does too.
+    if let Some(memory) = session.turn_memory.clone() {
+        let mut memory = memory.lock().await;
+        if outcome.is_ok() {
+            memory.ingest(&session.messages);
+            memory.close(session.decider.as_deref()).await;
+        } else {
+            memory.discard();
+        }
+    }
+    outcome
 }
 
 /// Runs with a bounded desktop event sink. Cancellation stops polling the
@@ -1540,6 +1554,13 @@ pub(crate) async fn run_loop(
             return Err(AgentError::Stopped(r));
         }
 
+        // The turn-only memory takes in what is new before the results are cut
+        // down below, so that a long one is taken as it came.
+        if turn_only.is_some()
+            && let Some(memory) = session.turn_memory.clone()
+        {
+            memory.lock().await.ingest(&session.messages);
+        }
         if let Some(memory) = session.tool_memory.clone() {
             // ponytail: retention shrinks old results in place and
             // `reported_input` is not told, so until the next response

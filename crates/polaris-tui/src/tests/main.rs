@@ -4838,6 +4838,124 @@ async fn a_session_that_replaces_another_still_writes_through_the_attached_facto
     );
 }
 
+/// Asks for a file to be read, then waits for ever for the next answer, as a
+/// model does while the person presses Esc.
+#[cfg(unix)]
+struct ReadsThenWaits {
+    path: PathBuf,
+    asked: std::sync::atomic::AtomicUsize,
+    reached: tokio::sync::Notify,
+}
+
+#[cfg(unix)]
+#[async_trait::async_trait]
+impl Provider for ReadsThenWaits {
+    async fn complete(
+        &self,
+        _: polaris_provider::CompletionRequest,
+    ) -> Result<polaris_provider::CompletionResponse, polaris_provider::ProviderError> {
+        if self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            return Ok(polaris_provider::CompletionResponse {
+                tool_calls: vec![polaris_provider::ToolCall {
+                    id: "read-1".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({ "path": self.path }),
+                }],
+                ..Default::default()
+            });
+        }
+        self.reached.notify_one();
+        std::future::pending().await
+    }
+}
+
+/// One root turn on `session`, whose last message is the person's input.
+#[cfg(unix)]
+async fn run_turn(
+    session: &mut Session,
+    provider: Arc<dyn Provider>,
+    dir: &Path,
+) -> Result<agent::AgentOutcome, agent::AgentError> {
+    let sandbox = SandboxPolicy::new(polaris_sandbox::SandboxMode::ReadOnly, &[]).unwrap();
+    let mut gate = Gate::new(ApprovalPolicy::Never);
+    let mut approver = NeverAsked;
+    let mut context = ToolContext {
+        sandbox: &sandbox,
+        helper: Path::new("/unused-helper"),
+        gate: &mut gate,
+        approver: &mut approver,
+    };
+    agent::run(
+        provider.as_ref(),
+        session,
+        Arc::new(tokio::sync::Mutex::new(
+            AuditLog::open(&dir.join("audit.jsonl")).unwrap(),
+        )),
+        &mut StopTracker::new(6),
+        &polaris_core::prompt::assemble_always_on("", "", &[]),
+        &[],
+        &[],
+        provider.clone(),
+        1,
+        1,
+        None,
+        &mut context,
+    )
+    .await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_turn_stopped_by_esc_leaves_nothing_of_it_in_the_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let notes = dir.path().join("notes.txt");
+    std::fs::write(&notes, "ZEBRA-MARKER-4417 is written in this file.\n").unwrap();
+    let mut session = Session {
+        turn_memory_factory: Some(polaris_core::turn_memory::factory(false, None, None)),
+        ..Session::default()
+    };
+    session.push_user("first of the two");
+    run_turn(&mut session, Arc::new(Replies), dir.path())
+        .await
+        .unwrap();
+
+    // The second turn reads the file, which the memory takes in, and the
+    // person presses Esc while the model is still to answer: the TUI drops the
+    // run and rolls the history back to the input.
+    session.push_user("Read notes.txt for ZEBRA-MARKER-4417.");
+    let checkpoint = session.messages.len();
+    let waits = Arc::new(ReadsThenWaits {
+        path: notes,
+        asked: Default::default(),
+        reached: Default::default(),
+    });
+    tokio::select! {
+        _ = run_turn(&mut session, waits.clone(), dir.path()) => panic!("the model was not waiting"),
+        _ = waits.reached.notified() => {}
+    }
+    assert!(
+        session
+            .messages
+            .iter()
+            .any(|m| m.content.contains("ZEBRA-MARKER-4417 is written")),
+        "the premise: the result was in the history"
+    );
+    keep_or_roll_back(&mut session, checkpoint).unwrap();
+    assert_eq!(session.messages.len(), checkpoint);
+
+    // Closing what is pending closes nothing, and nothing of the turn is
+    // quoted: not the file, not the input, not a line for the turn.
+    let memory = session.turn_memory.clone().expect("the memory was made");
+    let mut memory = memory.lock().await;
+    memory.close(None).await;
+    let quote = memory
+        .recall("ZEBRA MARKER 4417 notes")
+        .await
+        .map_or_else(String::new, |m| m.content);
+    assert!(quote.contains("T1: asked=first of the two"), "{quote}");
+    assert!(!quote.contains("ZEBRA") && !quote.contains("T2"), "{quote}");
+}
+
 #[cfg(unix)]
 #[test]
 fn new_and_resume_are_never_actually_dispatched_through_apply_slash_action() {
