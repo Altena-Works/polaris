@@ -6655,12 +6655,49 @@ fn compact_answers_that_compaction_is_automatic_and_touches_nothing() {
 #[test]
 fn the_context_window_setting_reaches_local_providers_only() {
     for local in ["ollama", "lmstudio", "llamacpp"] {
-        assert_eq!(context_window_for(local, Some(8192)), Some(8192), "{local}");
-        assert_eq!(context_window_for(local, None), None, "{local}");
+        assert_eq!(
+            context_window_for(local, None, Some(8192)),
+            Some(8192),
+            "{local}"
+        );
+        assert_eq!(context_window_for(local, None, None), None, "{local}");
+    }
+    // `openai` is local while its base URL addresses this machine, as a
+    // `llama-server` that polaris did not start does.
+    for url in [
+        "http://127.0.0.1:8080/v1",
+        "http://localhost:8080/v1",
+        "http://[::1]:8080/v1",
+    ] {
+        let url = Some(url);
+        assert_eq!(
+            context_window_for("openai", url, Some(8192)),
+            Some(8192),
+            "{url:?}"
+        );
+        assert_eq!(context_window_for("openai", url, None), None, "{url:?}");
     }
     // A cloud model given a local window would compact almost every turn.
-    for cloud in ["codex", "openai", ""] {
-        assert_eq!(context_window_for(cloud, Some(8192)), None, "{cloud:?}");
+    for url in [
+        None,
+        Some("https://api.openai.com/v1"),
+        Some("http://192.0.2.1:8080/v1"),
+        Some("http://127.0.0.1.example.com/v1"),
+    ] {
+        assert_eq!(
+            context_window_for("openai", url, Some(8192)),
+            None,
+            "{url:?}"
+        );
+    }
+    // Only `openai` reads `POLARIS_BASE_URL`: a hosted codex stays cloud
+    // whatever the variable holds.
+    for cloud in ["codex", ""] {
+        assert_eq!(
+            context_window_for(cloud, Some("http://127.0.0.1:8080/v1"), Some(8192)),
+            None,
+            "{cloud:?}"
+        );
     }
 }
 

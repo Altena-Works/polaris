@@ -3371,8 +3371,11 @@ async fn run_native_turn(args: Args, tool_memory_embedding: Option<(String, Stri
             session.input_preparation = input_preparation;
             session.disable_files_md_auto_regenerate = !config.files_md_auto_regenerate;
             session.approval_auto = config.approval_auto;
-            session.context_window =
-                polaris_tui::context_window_for(&provider_name, config.context_window);
+            session.context_window = polaris_tui::context_window_for(
+                &provider_name,
+                std::env::var("POLARIS_BASE_URL").ok().as_deref(),
+                config.context_window,
+            );
             session.tier_decider = tier_decider.clone();
             session.decider = decider.clone();
             session.turn_memory_factory = turn_memory_factory.clone();

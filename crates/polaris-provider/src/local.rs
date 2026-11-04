@@ -103,6 +103,25 @@ impl Endpoint {
     }
 }
 
+/// Whether `url` addresses this machine: its host is `localhost` or a
+/// loopback IP address (127.0.0.0/8, `::1`), whatever the scheme, port or
+/// path. Anything that is not a URL with a host is not.
+///
+/// [`Endpoint::parse`] pins where polaris itself talks to a runtime and so
+/// refuses `localhost` and a path. This only classifies a base URL somebody
+/// else configured, such as `POLARIS_BASE_URL`.
+pub fn is_loopback_url(url: &str) -> bool {
+    Url::parse(url).ok().is_some_and(|url| {
+        url.host_str().is_some_and(|host| {
+            host == "localhost"
+                || host
+                    .trim_matches(['[', ']'])
+                    .parse::<IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        })
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Capability {
     Supported,

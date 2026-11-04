@@ -38,6 +38,39 @@ fn rejects_non_literal_or_non_origin_endpoints() {
     }
 }
 
+#[test]
+fn a_url_is_loopback_only_when_its_host_is_this_machine() {
+    for url in [
+        "http://127.0.0.1:8080/v1",
+        "http://127.0.0.2/v1",
+        "https://localhost/v1",
+        "http://LOCALHOST:8080/v1",
+        "http://[::1]:8080/v1",
+        // The userinfo is not the host.
+        "http://example.com@127.0.0.1:8080/v1",
+    ] {
+        assert!(is_loopback_url(url), "rejected {url}");
+    }
+    for url in [
+        "https://api.openai.com/v1",
+        "http://192.0.2.1:8080/v1",
+        "http://[2001:db8::1]:8080/v1",
+        "http://0.0.0.0:8080/v1",
+        // Text that merely contains the address or the name.
+        "http://127.0.0.1.example.com/v1",
+        "http://localhost.example.com/v1",
+        "http://127.0.0.1@example.com/v1",
+        "https://example.com/127.0.0.1",
+        "https://example.com/?host=localhost",
+        // Not a URL with a host.
+        "127.0.0.1:8080",
+        "localhost:8080/v1",
+        "",
+    ] {
+        assert!(!is_loopback_url(url), "accepted {url}");
+    }
+}
+
 async fn adapter(runtime: Runtime) -> (MockServer, LocalAdapter) {
     let server = MockServer::start().await;
     let client = LocalAdapter::new(runtime, Endpoint::parse(&server.uri()).unwrap()).unwrap();

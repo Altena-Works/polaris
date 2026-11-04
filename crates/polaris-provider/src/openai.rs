@@ -46,8 +46,33 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// 300 seconds was chosen as a value that leaves ample headroom (2.5x
 /// 2 minutes) for a healthy reasoning turn that can clearly exceed
 /// 2 minutes, while still detecting a dead connection within 5 minutes
-/// rather than never.
+/// rather than never. That is the value for a hosted endpoint; one on this
+/// machine gets [`LOCAL_READ_TIMEOUT`] (see [`read_timeout_for`]).
 const READ_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// The read timeout for an endpoint on this machine: one hour.
+///
+/// The reasoning above stands, with a different "normal wait for
+/// generation". A hosted model's turn takes minutes at most; a model on this
+/// machine writes at the speed of its hardware, such as a 27B model at about
+/// 7 tokens per second, which needs 5 minutes for only about 2,100 tokens.
+/// Nothing is sent until the answer is complete, so under [`READ_TIMEOUT`]
+/// every longer answer failed, with no retry. An hour holds about 25,000
+/// tokens at that speed. The wait costs little here: a server that is not
+/// running refuses the connection at once, so only a server that is up and
+/// stuck is waited for the whole hour.
+const LOCAL_READ_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
+/// The read timeout for requests to `base_url`: [`LOCAL_READ_TIMEOUT`] when
+/// it addresses this machine ([`crate::local::is_loopback_url`]),
+/// [`READ_TIMEOUT`] for every other endpoint.
+fn read_timeout_for(base_url: &str) -> Duration {
+    if crate::local::is_loopback_url(base_url) {
+        LOCAL_READ_TIMEOUT
+    } else {
+        READ_TIMEOUT
+    }
+}
 
 pub struct OpenAiProvider {
     base_url: String,
@@ -74,7 +99,8 @@ impl OpenAiProvider {
     /// while this one spot alone panics. The caller (`main.rs`) handles
     /// this through the same path as other startup failures.
     pub fn new(base_url: String, api_key: String, model: String) -> Result<Self, ProviderError> {
-        Self::with_timeouts(base_url, api_key, model, CONNECT_TIMEOUT, READ_TIMEOUT)
+        let read_timeout = read_timeout_for(&base_url);
+        Self::with_timeouts(base_url, api_key, model, CONNECT_TIMEOUT, read_timeout)
     }
 
     /// Constructs with explicit timeout values. The path used to inject a
@@ -120,8 +146,8 @@ impl OpenAiProvider {
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(2))
-            .read_timeout(READ_TIMEOUT)
-            .timeout(READ_TIMEOUT + crate::RESPONSE_DEADLINE)
+            .read_timeout(LOCAL_READ_TIMEOUT)
+            .timeout(LOCAL_READ_TIMEOUT + crate::RESPONSE_DEADLINE)
             .build()
             .map_err(|_| ProviderError::Http("could not build local client".into()))?;
         Ok(Self {
@@ -947,6 +973,34 @@ mod tests {
             msg.contains("timed out"),
             "wording identifying this as a timeout is missing: {msg}"
         );
+    }
+
+    #[test]
+    fn a_loopback_endpoint_is_given_an_hour_to_answer_and_any_other_five_minutes() {
+        // A local 27B model writes about 7 tokens per second, and this client
+        // does not stream: the answer is one response, sent once it is complete.
+        let hour = Duration::from_secs(3600);
+        let five_minutes = Duration::from_secs(300);
+        let cases = [
+            ("http://127.0.0.1:8080/v1", hour),
+            ("http://localhost:8080/v1", hour),
+            ("http://[::1]:8080/v1", hour),
+            ("https://api.openai.com/v1", five_minutes),
+            ("http://192.0.2.1:8080/v1", five_minutes),
+            // A name that merely begins with the address is not this machine.
+            ("http://127.0.0.1.example.com/v1", five_minutes),
+        ];
+        for (base_url, expected) in cases {
+            assert_eq!(read_timeout_for(base_url), expected, "{base_url}");
+            // `new` is the path every caller takes: the client carries the value.
+            let provider = OpenAiProvider::new(base_url.into(), "k".into(), "m".into())
+                .expect("client should be constructible");
+            let client = format!("{:?}", provider.client);
+            assert!(
+                client.contains(&format!("read_timeout: {expected:?}")),
+                "{base_url}: {client}"
+            );
+        }
     }
 
     #[tokio::test]

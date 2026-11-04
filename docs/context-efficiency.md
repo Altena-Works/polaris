@@ -132,7 +132,7 @@ crateの依存と外部との接続点については[アーキテクチャ](arc
 |分かる|その70%（端数は切り捨て）。400,000なら280,000、8,192なら5,734|
 |分からない|200,000|
 
-文脈の長さは、モデル名で表（`crates/polaris-core/src/effort_plan.rs`の`WINDOWS`）を引いて求める。表に載せるのは公表値を確かめたモデルだけで、今は1件も載せていない。手元のモデル（Ollama・LM Studio・llama.cpp）では、表になければ設定の`context_window`を使う。`config.toml`の先頭（最初の`[...]`見出しより前）に、実際に使う文脈の長さをトークン数で書く。
+文脈の長さは、モデル名で表（`crates/polaris-core/src/effort_plan.rs`の`WINDOWS`）を引いて求める。表に載せるのは公表値を確かめたモデルだけで、今は1件も載せていない。手元のモデル（Ollama・LM Studio・llama.cpp、および`POLARIS_BASE_URL`がループバック（127.0.0.1・localhost・::1）を指すopenaiのprovider）では、表になければ設定の`context_window`を使う。`config.toml`の先頭（最初の`[...]`見出しより前）に、実際に使う文脈の長さをトークン数で書く。
 
 ```toml
 context_window = 8192

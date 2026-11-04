@@ -140,12 +140,12 @@ crate 14件、依存 46件。名前の`polaris-`は省いた。開発用の依�
 - `crates/polaris-provider/src/lib.rs:105`
 - `crates/polaris-provider/src/lib.rs:625`
 - `crates/polaris-provider/src/local.rs:6`
-- `crates/polaris-provider/src/local.rs:254`
-- `crates/polaris-provider/src/local.rs:465`
+- `crates/polaris-provider/src/local.rs:273`
+- `crates/polaris-provider/src/local.rs:484`
 - `crates/polaris-provider/src/model_memory.rs:5`
-- `crates/polaris-provider/src/openai.rs:61`
-- `crates/polaris-provider/src/openai.rs:119`
-- `crates/polaris-provider/src/openai.rs:121`
+- `crates/polaris-provider/src/openai.rs:86`
+- `crates/polaris-provider/src/openai.rs:145`
+- `crates/polaris-provider/src/openai.rs:147`
 - `crates/polaris-provider/src/turn_affinity.rs:15`
 - `crates/polaris-tui/src/tool_memory.rs:872`
 - `crates/polaris-tui/src/tool_memory.rs:907`
@@ -162,8 +162,8 @@ processが動く。
 - `crates/polaris-cli/src/main.rs:2659`
 - `crates/polaris-cli/src/main.rs:2712`
 - `crates/polaris-cli/src/main.rs:2715`
-- `crates/polaris-cli/src/main.rs:4221`
-- `crates/polaris-cli/src/main.rs:4231`
+- `crates/polaris-cli/src/main.rs:4224`
+- `crates/polaris-cli/src/main.rs:4234`
 - `crates/polaris-core/src/desktop_execution.rs:5`
 - `crates/polaris-core/src/environment/native.rs:246`
 - `crates/polaris-core/src/execution_owner.rs:442`
@@ -265,4 +265,4 @@ processが動く。
 - `crates/polaris-core/src/sync/repository.rs:50`
 - `crates/polaris-core/src/sync/repository/c10.rs:1551`
 - `crates/polaris-desktop-service/src/workspace_view.rs:470`
-- `crates/polaris-tui/src/lib.rs:10745`
+- `crates/polaris-tui/src/lib.rs:10758`

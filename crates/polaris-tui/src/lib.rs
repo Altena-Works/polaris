@@ -2180,10 +2180,19 @@ fn is_local_provider(provider_name: &str) -> bool {
 }
 
 /// The `context_window` setting describes a local model, so only a local
-/// provider is given it. A cloud model keeps its published window, or the
-/// default threshold while it has none.
-pub fn context_window_for(provider_name: &str, setting: Option<usize>) -> Option<usize> {
-    setting.filter(|_| is_local_provider(provider_name))
+/// provider is given it: `ollama`, `lmstudio` and `llamacpp`, and `openai`
+/// while `base_url` (`POLARIS_BASE_URL`) addresses this machine, as a
+/// `llama-server` started by hand does. A cloud model keeps its published
+/// window, or the default threshold while it has none.
+pub fn context_window_for(
+    provider_name: &str,
+    base_url: Option<&str>,
+    setting: Option<usize>,
+) -> Option<usize> {
+    let local = is_local_provider(provider_name)
+        || (provider_name == "openai"
+            && base_url.is_some_and(polaris_provider::local::is_loopback_url));
+    setting.filter(|_| local)
 }
 
 /// The phase the footer shows as the workflow stage: only an enabled
@@ -6539,7 +6548,11 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
             let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
             // Set per turn: `/model` can move between a cloud and a local
             // provider without rebuilding the session.
-            session.context_window = context_window_for(&provider_name, args.context_window);
+            session.context_window = context_window_for(
+                &provider_name,
+                std::env::var("POLARIS_BASE_URL").ok().as_deref(),
+                args.context_window,
+            );
             let agent_future = agent::run_with_mcp(
                 args.provider.as_ref(),
                 &mut session,
