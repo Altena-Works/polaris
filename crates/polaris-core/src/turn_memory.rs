@@ -34,6 +34,18 @@
 //! writer and the embedder do not: the host chooses them once and a session
 //! makes every memory it starts through a [`Factory`].
 //!
+//! **Intake.** A turn goes in in two steps. Once per iteration of the agent
+//! loop, before the tool results are cut down (`ingest`), the messages that are
+//! new go through the screen into a pending buffer, whole: a long tool result
+//! is taken as it came, and the history may shorten it a moment later. When
+//! the turn completes (`close`), the buffer becomes the log's chunks, the
+//! ledger's line and the facts, built first and put in place at once, so that a
+//! close cut short at an await has changed nothing and the turn is counted
+//! once. A run that fails, or that the person stops, drops the buffer
+//! (`discard`), and so does the start of every run; the finished turns that are
+//! in the history and were never closed are then taken in from the history, as
+//! it stands.
+//!
 //! **Secrets.** Each message is screened once, whole, before it is cut into
 //! chunks (`secret_screen::screen_for_memory`). The verdict (kept, redacted,
 //! dropped) goes on its chunks, and only the screened text is used from then
@@ -68,7 +80,7 @@ const FACT_TOKENS: usize = 256;
 const LOG_BYTES: usize = 1024 * 1024;
 /// A chunk stays well under the embedder's 512 tokenizer tokens.
 const CHUNK_CHARS: usize = 400;
-const CHUNKS_RECALLED: usize = 3;
+const CHUNKS_RECALLED: usize = 8;
 /// What the line writer is sent: the head of the input and of the answer,
 /// each within these sentences and characters, and the whole request within
 /// the last.
@@ -203,11 +215,15 @@ pub struct TurnMemory {
     /// By topic: a later decision on the same topic replaces the earlier one.
     facts: BTreeMap<String, Fact>,
     last_answer: String,
-    /// The ordinal of the last turn taken in, so a turn is never read twice.
+    /// The ordinal of the last turn closed, so a turn is never read twice.
     /// The conversation's turns are counted from its first message, so this
     /// is not a position in the messages: a history cut back after a failed
     /// turn moves positions and leaves the count where it was.
     turns: usize,
+    /// The messages of the turn in progress, one entry for each from the
+    /// turn's first, as the screen left them. Taken in before the tool results
+    /// are cut down, and not part of the log until the turn is closed.
+    pending: Vec<Option<Taken>>,
 }
 
 impl Default for TurnMemory {
@@ -229,8 +245,42 @@ impl Default for TurnMemory {
             facts: BTreeMap::new(),
             last_answer: String::new(),
             turns: 0,
+            pending: Vec::new(),
         }
     }
+}
+
+/// A chunk made ready for the log. The log numbers it when it goes in.
+struct NewChunk {
+    offset: Option<usize>,
+    text: String,
+    vector: Option<Vec<f32>>,
+    origin: Origin,
+    verdict: Verdict,
+}
+
+/// A ledger line on its way out of the ten, with what is made of it: the terms
+/// the decider found specific, its embedding and the direction it was folded
+/// into.
+struct Evicted {
+    turn: usize,
+    line: String,
+    specific: Vec<String>,
+    vector: Option<Vec<f32>>,
+    direction: String,
+}
+
+/// A turn built from the pending messages and not yet in place. It holds
+/// everything `close` makes, so putting it in place waits for nothing.
+struct Closing {
+    turn: usize,
+    chunks: Vec<NewChunk>,
+    cites: std::ops::Range<usize>,
+    line: String,
+    input: String,
+    answer: String,
+    text: String,
+    evicted: Option<Evicted>,
 }
 
 /// Where the current user turn starts: the last user message the harness did
@@ -243,11 +293,13 @@ pub fn turn_start(messages: &[Message]) -> usize {
 }
 
 impl TurnMemory {
-    /// Takes in every finished turn not yet taken in: the turns before the
-    /// current turn's start, past the `turns` already taken in. A turn cut
-    /// short (the person pressed Esc while its line was being written) was
-    /// not counted, so the next call takes it in again under the same number.
+    /// The start of a run. What an earlier run left pending is dropped, and
+    /// every finished turn that was never closed — the turns before the
+    /// current turn's start, past the `turns` already closed — is taken in
+    /// from `messages`, as they stand, and closed. A close that was cut short
+    /// counted nothing, so its turn is closed again here under the same number.
     pub async fn absorb(&mut self, messages: &[Message], decider: Option<&dyn Decider>) {
+        self.discard();
         let end = turn_start(messages);
         // One finished turn at a time: a resumed conversation may hold several.
         let mut bounds: Vec<usize> = (0..end)
@@ -261,20 +313,48 @@ impl TurnMemory {
         }
         bounds.push(end);
         for pair in bounds.windows(2) {
-            self.absorb_turn(&messages[pair[0]..pair[1]], decider).await;
+            self.ingest(&messages[pair[0]..pair[1]]);
+            self.close(decider).await;
         }
     }
 
-    async fn absorb_turn(&mut self, finished: &[Message], decider: Option<&dyn Decider>) {
+    /// Takes the new messages of the turn in progress into the pending buffer:
+    /// those of `messages`, from the turn's start, past the ones already taken.
+    /// Each is screened once, whole, before it is cut into chunks, and nothing
+    /// after this sees the original text.
+    pub fn ingest(&mut self, messages: &[Message]) {
+        let turn = &messages[turn_start(messages)..];
+        if self.pending.len() < turn.len() {
+            let new = take_in(turn, self.pending.len());
+            self.pending.extend(new);
+        }
+    }
+
+    /// Drops the pending buffer: the run that filled it did not complete.
+    pub fn discard(&mut self) {
+        self.pending.clear();
+    }
+
+    /// The turn in progress is complete: its pending messages go into the log,
+    /// a line into the ledger and, if the check holds, a fact. Everything is
+    /// built before anything is changed, and put in place in one step without
+    /// an await, so a call cut short before that has changed nothing (the
+    /// buffer is still there, and nothing is counted twice or lost).
+    pub async fn close(&mut self, decider: Option<&dyn Decider>) {
+        if self.pending.is_empty() {
+            return;
+        }
+        let closing = self.prepare(decider).await;
+        self.apply(closing);
+    }
+
+    /// Builds what closing the pending turn will put in place. Changes
+    /// nothing, and so is the only part that waits.
+    async fn prepare(&self, decider: Option<&dyn Decider>) -> Closing {
         let turn = self.turns + 1;
-        // Each message is screened once, whole, before it is cut into chunks.
-        // Nothing below sees the original text.
-        let taken = take_in(finished);
-        let answer_at = finished.iter().rposition(|m| {
-            m.role == Role::Assistant && m.tool_calls.is_empty() && !m.content.is_empty()
-        });
+        let taken = &self.pending;
         let input = taken.first().and_then(|t| t.as_ref());
-        let answer = answer_at.and_then(|at| taken[at].as_ref());
+        let answer = taken.iter().rev().flatten().find(|t| t.answer);
         // Only what the writer is sent counts. A tool result never goes to
         // it, so what the screen said of one does not matter here.
         let writer_ok = [input, answer]
@@ -291,22 +371,21 @@ impl TurnMemory {
             .map(|t| t.text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        let first = self.next_chunk;
         let mut at = self.log_end;
+        let mut chunks = Vec::new();
         for part in taken.iter().flatten() {
             for (offset, piece) in pieces(&part.text) {
-                self.push_chunk(
-                    turn,
-                    Some(at + offset),
-                    piece.to_owned(),
-                    part.origin,
-                    part.verdict,
-                )
-                .await;
+                chunks.push(NewChunk {
+                    offset: Some(at + offset),
+                    text: piece.to_owned(),
+                    vector: self.embed(piece, part.verdict).await,
+                    origin: part.origin,
+                    verdict: part.verdict,
+                });
             }
             at += part.text.len() + 1;
         }
-        let cites = first..self.next_chunk;
+        let cites = self.next_chunk..self.next_chunk + chunks.len();
 
         // Layer 3: the line, citing its chunks and the files it names. The
         // writer is asked only for a turn the screen left as it was.
@@ -321,30 +400,49 @@ impl TurnMemory {
             &text,
         );
 
-        // The turn is taken in from here. A call cut short before this point
-        // leaves `turns` as it was, and the next call takes the turn in again
-        // under the same number.
-        self.settle(turn, &line, input, &text, cites);
-        self.last_answer = answer.to_owned();
+        // The line that the new one pushes out of the ten.
+        let evicted = match self.ledger.front() {
+            Some((old, gone)) if self.ledger.len() >= LEDGER_TURNS => {
+                Some(self.prepare_eviction(*old, gone, decider).await)
+            }
+            _ => None,
+        };
+        Closing {
+            turn,
+            chunks,
+            cites,
+            line,
+            input: input.to_owned(),
+            answer: answer.to_owned(),
+            text,
+            evicted,
+        }
+    }
+
+    /// Puts a closed turn in place. Nothing here waits.
+    fn apply(&mut self, closing: Closing) {
+        let Closing {
+            turn,
+            chunks,
+            cites,
+            line,
+            input,
+            answer,
+            text,
+            evicted,
+        } = closing;
+        for chunk in chunks {
+            self.push_chunk(turn, chunk);
+        }
+        self.settle(turn, &line, &input, &text, cites);
+        self.last_answer = answer;
         self.ledger.push_back((turn, line));
         self.log_end += text.len() + 1;
         self.turns = turn;
-
-        if self.ledger.len() > LEDGER_TURNS {
-            let (old, evicted) = self.ledger.pop_front().unwrap_or_default();
-            self.remember(old, &evicted, decider).await;
-            let source = format!("DIRECTION: {}\nOLDER: {evicted}", self.direction);
-            self.direction = match write(
-                self.writer.as_deref(),
-                FOLD_SYSTEM,
-                &source,
-                DIRECTION_TOKENS,
-            )
-            .await
-            {
-                Some(line) => line,
-                None => keep_tail(&format!("{}; {evicted}", self.direction), DIRECTION_TOKENS),
-            };
+        self.pending.clear();
+        if let Some(gone) = evicted {
+            self.ledger.pop_front();
+            self.remember(gone);
         }
     }
 
@@ -409,29 +507,26 @@ impl TurnMemory {
         said || approved
     }
 
-    /// `text` is what the screen left, so what the embedder is sent is too. A
-    /// withheld line has nothing to find, and is not embedded.
-    async fn push_chunk(
-        &mut self,
-        turn: usize,
-        offset: Option<usize>,
-        text: String,
-        origin: Origin,
-        verdict: Verdict,
-    ) {
-        let vector = match &self.embedder {
-            Some(embedder) if verdict != Verdict::Drop => embedder.embed_passage(&text).await.ok(),
+    /// What the embedder makes of `text`. `text` is what the screen left, so
+    /// what the embedder is sent is too. A withheld line has nothing to find,
+    /// and is not embedded.
+    async fn embed(&self, text: &str, verdict: Verdict) -> Option<Vec<f32>> {
+        match &self.embedder {
+            Some(embedder) if verdict != Verdict::Drop => embedder.embed_passage(text).await.ok(),
             _ => None,
-        };
-        self.log_bytes += text.len();
+        }
+    }
+
+    fn push_chunk(&mut self, turn: usize, new: NewChunk) {
+        self.log_bytes += new.text.len();
         self.log.push_back(Chunk {
             id: self.next_chunk,
             turn,
-            offset,
-            text,
-            vector,
-            origin,
-            verdict,
+            offset: new.offset,
+            text: new.text,
+            vector: new.vector,
+            origin: new.origin,
+            verdict: new.verdict,
         });
         self.next_chunk += 1;
         while self.log_bytes > self.log_limit && self.log.len() > 1 {
@@ -440,21 +535,61 @@ impl TurnMemory {
         }
     }
 
-    /// A line leaving the ten: its specific terms into the dictionary, the
-    /// line itself into the index.
-    async fn remember(&mut self, turn: usize, line: &str, decider: Option<&dyn Decider>) {
+    /// What a line leaving the ten comes to: the terms the decider finds
+    /// specific, the embedding of the line, and the direction with the line
+    /// folded into it. Changes nothing.
+    async fn prepare_eviction(
+        &self,
+        turn: usize,
+        line: &str,
+        decider: Option<&dyn Decider>,
+    ) -> Evicted {
         let candidates: Vec<(String, Kind)> = candidates(line)
             .into_iter()
             .filter_map(|(term, kind)| nameable(term, kind).map(|term| (term, kind)))
             .filter(|(term, _)| !self.dictionary.contains_key(term))
             .take(MAX_CANDIDATES)
             .collect();
-        let specific = judge(&candidates, line, decider).await;
-        for (term, _) in candidates
-            .iter()
-            .filter(|(term, _)| specific.contains(term))
+        let judged = judge(&candidates, line, decider).await;
+        let specific = candidates
+            .into_iter()
+            .map(|(term, _)| term)
+            .filter(|term| judged.contains(term))
+            .collect();
+        let vector = self.embed(line, Verdict::Keep).await;
+        let source = format!("DIRECTION: {}\nOLDER: {line}", self.direction);
+        let direction = match write(
+            self.writer.as_deref(),
+            FOLD_SYSTEM,
+            &source,
+            DIRECTION_TOKENS,
+        )
+        .await
         {
-            self.note(term, turn, line);
+            Some(folded) => folded,
+            None => keep_tail(&format!("{}; {line}", self.direction), DIRECTION_TOKENS),
+        };
+        Evicted {
+            turn,
+            line: line.to_owned(),
+            specific,
+            vector,
+            direction,
+        }
+    }
+
+    /// A line leaving the ten: its specific terms into the dictionary, the
+    /// line itself into the index, and the direction it was folded into.
+    fn remember(&mut self, gone: Evicted) {
+        let Evicted {
+            turn,
+            line,
+            specific,
+            vector,
+            direction,
+        } = gone;
+        for term in &specific {
+            self.note(term, turn, &line);
         }
         // Terms already known gain this line's occurrence too.
         let known: Vec<String> = self
@@ -464,10 +599,19 @@ impl TurnMemory {
             .cloned()
             .collect();
         for term in known {
-            self.note(&term, turn, line);
+            self.note(&term, turn, &line);
         }
-        self.push_chunk(turn, None, line.to_owned(), Origin::Line, Verdict::Keep)
-            .await;
+        self.push_chunk(
+            turn,
+            NewChunk {
+                offset: None,
+                text: line,
+                vector,
+                origin: Origin::Line,
+                verdict: Verdict::Keep,
+            },
+        );
+        self.direction = direction;
     }
 
     /// `line` is a whole ledger line: short enough to keep as the context.
@@ -608,11 +752,13 @@ impl TurnMemory {
 }
 
 /// A message after the screen: where it came from, what the screen said, and
-/// the text kept in its place.
+/// the text kept in its place. `answer` marks what the model said without a
+/// tool call; the last of those is the turn's answer.
 struct Taken {
     origin: Origin,
     verdict: Verdict,
     text: String,
+    answer: bool,
 }
 
 /// The screen's verdict on `text`, and what stands for it from here on: the
@@ -640,16 +786,17 @@ fn clean(text: &str) -> Option<String> {
     }
 }
 
-/// Each message of a finished turn through the screen, in order (`None` for
-/// one with no text). A tool result that read a path reading is denied on
-/// becomes one line without a body.
-fn take_in(finished: &[Message]) -> Vec<Option<Taken>> {
-    let calls: HashMap<&str, &ToolCall> = finished
+/// The messages of `turn` from the `seen`th on through the screen, in order
+/// (`None` for one with no text). A tool result that read a path reading is
+/// denied on becomes one line without a body. The calls a result answers are
+/// looked for in the whole turn.
+fn take_in(turn: &[Message], seen: usize) -> Vec<Option<Taken>> {
+    let calls: HashMap<&str, &ToolCall> = turn
         .iter()
         .flat_map(|m| &m.tool_calls)
         .map(|call| (call.id.as_str(), call))
         .collect();
-    finished
+    turn[seen..]
         .iter()
         .map(|m| {
             if m.content.is_empty() {
@@ -667,11 +814,13 @@ fn take_in(finished: &[Message]) -> Vec<Option<Taken>> {
                     .and_then(|id| calls.get(id))
                     .is_some_and(|call| names_denied_path(call))
                     || lists_denied_path(&m.content));
+            let answer = origin == Origin::Assistant && m.tool_calls.is_empty();
             if read_denied {
                 return Some(Taken {
                     origin,
                     verdict: Verdict::Drop,
                     text: WITHHELD_PATH.to_owned(),
+                    answer,
                 });
             }
             let (verdict, text) = screened(&m.content);
@@ -679,6 +828,7 @@ fn take_in(finished: &[Message]) -> Vec<Option<Taken>> {
                 origin,
                 verdict,
                 text,
+                answer,
             })
         })
         .collect()
@@ -1659,6 +1809,280 @@ mod tests {
         assert_eq!(numbers, [1, 2, 3]);
         assert!(memory.ledger[1].1.starts_with("asked=question 2;"));
         assert!(memory.ledger[2].1.starts_with("asked=question 3;"));
+    }
+
+    /// The texts of the chunks that came from the person or the model, in
+    /// order, and the ledger's numbers: what a turn put into the memory.
+    fn held(memory: &TurnMemory) -> (Vec<String>, Vec<usize>) {
+        (
+            memory
+                .log
+                .iter()
+                .filter(|chunk| chunk.offset.is_some())
+                .map(|chunk| chunk.text.clone())
+                .collect(),
+            memory.ledger.iter().map(|(turn, _)| *turn).collect(),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_close_cut_short_at_the_writer_has_changed_nothing_and_the_turn_is_taken_in_once() {
+        // The only turn's line is being written when the person presses Esc.
+        let writer = Counting::new(polaris_provider::NetworkBoundary::Unknown, 1);
+        let mut memory = factory(false, Some(writer.clone()), None)();
+        let messages = turns("first", "answer", 0);
+        tokio::select! {
+            _ = memory.absorb(&messages, None) => panic!("the line was not waiting"),
+            _ = writer.reached.notified() => {}
+        }
+        // Not its chunks, not a number: the log and the ledger are as they were.
+        assert_eq!(memory.turns, 0);
+        assert_eq!((memory.next_chunk, memory.log.len()), (0, 0));
+        assert!(memory.ledger.is_empty());
+
+        // The next run takes it in, once.
+        memory.absorb(&messages, None).await;
+        assert_eq!(memory.turns, 1);
+        let once = (vec!["first".to_owned(), "answer".to_owned()], vec![1]);
+        assert_eq!(held(&memory), once);
+        assert_eq!(
+            memory.ledger[0].1,
+            "asked=first; answered=answer; src=c0-c1"
+        );
+        // And a third time finds nothing to take.
+        memory.absorb(&messages, None).await;
+        assert_eq!(held(&memory), once);
+    }
+
+    #[tokio::test]
+    async fn a_close_cut_short_at_the_fold_has_not_lost_the_line_it_was_pushing_out() {
+        // The eleventh turn pushes the first out of the ten: its line is the
+        // writer's 11th call, and the fold of the first line into the
+        // direction is the 12th, where the person presses Esc.
+        let writer = Counting::new(polaris_provider::NetworkBoundary::Unknown, 12);
+        let mut memory = factory(false, Some(writer.clone()), None)();
+        let mut messages = turns("Pin `aurora-rc2` for the release.", "Pinned.", 9);
+        messages.pop();
+        messages.push(Message::user("question 11"));
+        messages.push(Message::assistant("answer 11"));
+        messages.push(Message::user("now"));
+        tokio::select! {
+            _ = memory.absorb(&messages, None) => panic!("the fold was not waiting"),
+            _ = writer.reached.notified() => {}
+        }
+        // Ten turns are closed, and the first line is still the first.
+        assert_eq!(memory.turns, 10);
+        let numbers: Vec<usize> = memory.ledger.iter().map(|(turn, _)| *turn).collect();
+        assert_eq!(numbers, (1..=10).collect::<Vec<_>>());
+        assert!(memory.dictionary.is_empty());
+        assert!(memory.direction.is_empty());
+        assert!(memory.log.iter().all(|chunk| chunk.offset.is_some()));
+
+        // The next run closes the eleventh once, and the first line goes where
+        // it was going: the dictionary, the index and the direction.
+        memory.absorb(&messages, None).await;
+        assert_eq!(memory.turns, 11);
+        let numbers: Vec<usize> = memory.ledger.iter().map(|(turn, _)| *turn).collect();
+        assert_eq!(numbers, (2..=11).collect::<Vec<_>>());
+        assert!(memory.dictionary.contains_key("aurora-rc2"));
+        assert_eq!(
+            memory
+                .log
+                .iter()
+                .filter(|chunk| chunk.offset.is_none())
+                .map(|chunk| chunk.turn)
+                .collect::<Vec<_>>(),
+            [1]
+        );
+        assert!(
+            memory.direction.contains("aurora-rc2"),
+            "{}",
+            memory.direction
+        );
+    }
+
+    #[tokio::test]
+    async fn the_messages_come_in_as_they_arrive_and_a_discarded_turn_is_not_closed() {
+        let tail = "the last words of the result are quartz-heron-umbra-7731";
+        let long = format!("{}\n{tail}", "an ordinary line of output\n".repeat(400));
+        let mut messages = vec![
+            Message::user("Read it."),
+            Message::assistant_with_tool_calls(
+                String::new(),
+                vec![ToolCall {
+                    id: "c1".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({ "path": "report.txt" }),
+                }],
+            ),
+            Message::tool_result("c1", long),
+        ];
+        let mut memory = TurnMemory::default();
+        memory.ingest(&messages);
+        assert_eq!(memory.pending.len(), 3);
+
+        // The history cuts the result down; the memory has it whole already.
+        messages[2].content =
+            "[Stored tool result abc: 11000 UTF-8 bytes; original preserved.]".into();
+        messages.push(Message::assistant("Read."));
+        memory.ingest(&messages);
+        assert_eq!(memory.pending.len(), 4);
+        // What is not new is not taken twice.
+        memory.ingest(&messages);
+        assert_eq!(memory.pending.len(), 4);
+        // Nothing is in the log or the ledger until the turn is closed.
+        assert!(memory.log.is_empty() && memory.ledger.is_empty());
+
+        memory.close(None).await;
+        assert!(memory.pending.is_empty());
+        assert_eq!(memory.turns, 1);
+        assert!(memory.log.iter().any(|chunk| chunk.text.contains(tail)));
+        assert!(
+            memory
+                .log
+                .iter()
+                .all(|chunk| !chunk.text.contains("Stored tool result"))
+        );
+
+        // A turn that is dropped leaves no trace, and closing again takes in
+        // nothing.
+        messages.push(Message::user("Next."));
+        memory.ingest(&messages);
+        assert_eq!(memory.pending.len(), 1);
+        let before = held(&memory);
+        memory.discard();
+        memory.close(None).await;
+        assert_eq!((memory.turns, held(&memory)), (1, before));
+    }
+
+    #[tokio::test]
+    async fn absorb_drops_what_a_run_left_pending_before_it_takes_turns_in() {
+        let marker = "quartz-heron-umbra-7731";
+        let mut messages = vec![
+            Message::user("Read it."),
+            Message::assistant_with_tool_calls(
+                String::new(),
+                vec![ToolCall {
+                    id: "c1".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({ "path": "report.txt" }),
+                }],
+            ),
+            Message::tool_result("c1", format!("the report ends with {marker}")),
+        ];
+        let mut memory = TurnMemory::default();
+        memory.ingest(&messages);
+        assert_eq!(memory.pending.len(), 3, "the result is pending, not closed");
+
+        // The run did not complete: the history is cut back to the input, and
+        // the person asks something else.
+        messages.truncate(1);
+        messages.push(Message::user("Something else."));
+        memory.absorb(&messages, None).await;
+
+        // Only the input the history still holds was taken in.
+        assert_eq!(held(&memory), (vec!["Read it.".to_owned()], vec![1]));
+        let quote = memory
+            .recall(&format!("what did the report end with, {marker}?"))
+            .await
+            .expect("recalled")
+            .content;
+        assert!(quote.contains("T1: asked=Read it."), "{quote}");
+        assert!(!quote.contains(marker), "{quote}");
+    }
+
+    /// The measurement's first document, shortened: records, the approved
+    /// decision, notes, and a proposal that is not approved.
+    fn proposal_document() -> String {
+        let mut text = String::from("# 資料1\nこの資料は台帳Aの取得時点の記録。\n");
+        for i in 0..60 {
+            text.push_str(&format!("記録{i:04}: 正常動作を確認。決定変更なし。\n"));
+        }
+        text.push_str("決定R017: 承認済み。台帳Aのretention_days=37。\n");
+        for i in 0..10 {
+            text.push_str(&format!("補足{i:04}: 運用状態に変更なし。\n"));
+        }
+        text.push_str("提案P018: 未承認。台帳Aのretention_days=91。適用禁止。\n");
+        text
+    }
+
+    #[tokio::test]
+    async fn a_value_read_long_ago_is_quoted_though_the_last_questions_share_the_inputs_wording() {
+        // The shape of the measurement: a long document read in turn 1 and an
+        // announcement in turn 2, both pushed out of the ten lines by ten
+        // lookups, then questions that ask for JSON in the same words. The
+        // earlier ones rank above the chunk that holds the proposal's value,
+        // which comes sixth here, as late as in the measurement.
+        let mut messages = vec![
+            Message::user(
+                "docs/doc1.md を read で読み、承認済みの決定と未承認の提案を区別して要点を3行で述べてください。変更は禁止。",
+            ),
+            Message::assistant_with_tool_calls(
+                String::new(),
+                vec![ToolCall {
+                    id: "c1".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({ "path": "docs/doc1.md" }),
+                }],
+            ),
+            Message::tool_result("c1", proposal_document()),
+            Message::assistant(
+                "承認済み：決定R017は、台帳Aの `retention_days=37`。\n未承認：提案P018の `retention_days=91` は適用禁止。",
+            ),
+            Message::user(
+                "連絡です。台帳Aのretention_daysは、決定R021で45に変更されました。この内容を覚えておき、「了解」とだけ答えてください。",
+            ),
+            Message::assistant("了解"),
+        ];
+        for i in 0..10 {
+            let line = 100 + 37 * i;
+            messages.push(Message::user(format!(
+                "docs/doc2.md の監査{line:04} の行を read で確かめ、その行だけを1行で答えてください。変更は禁止。"
+            )));
+            messages.push(Message::assistant(format!(
+                "監査{line:04}: 台帳Bを確認。設定変更なし。"
+            )));
+        }
+        let first = "最初の資料（docs/doc1.md）に記録された台帳Aの承認済みの決定について、retention_daysとdecision_idを、ファイルを読み直さずに、JSONだけで回答してください。";
+        let questions: [(&str, Option<&str>, &[&str]); 5] = [
+            (
+                first,
+                Some(r#"{"retention_days":37,"decision_id":"R017"}"#),
+                &["R017", "retention_days=37"],
+            ),
+            (
+                "会話の途中の連絡も含めて、現時点で有効な台帳Aのretention_daysと、その根拠のdecision_idを、ファイルを読み直さずに、JSONだけで回答してください。",
+                Some(r#"{"retention_days":45,"decision_id":"R021"}"#),
+                &["R021", "45に変更"],
+            ),
+            // Two more in the same words, only to rank above the value.
+            (
+                "docs/doc2.md の監査0174 の行にあった照合コードを、ファイルを読み直さずに、JSONだけで回答してください（キーは code）。",
+                Some(r#"{"code":"T8N-5V"}"#),
+                &[],
+            ),
+            (
+                first,
+                Some(r#"{"retention_days":37,"decision_id":"R017"}"#),
+                &[],
+            ),
+            (
+                "提案P018について、承認済みかどうか（キーは approved、真偽値）とretention_daysを、ファイルを読み直さずに、JSONだけで回答してください。",
+                None,
+                &["P018", "retention_days=91"],
+            ),
+        ];
+        for (question, answer, wanted) in questions {
+            messages.push(Message::user(question));
+            // A run of `-p` makes its memory afresh from the history.
+            let mut memory = TurnMemory::default();
+            memory.absorb(&messages, None).await;
+            let quote = memory.recall(question).await.expect("recalled").content;
+            for want in wanted {
+                assert!(quote.contains(want), "{want} is not in {quote}");
+            }
+            messages.extend(answer.map(Message::assistant));
+        }
     }
 }
 

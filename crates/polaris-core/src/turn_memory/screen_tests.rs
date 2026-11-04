@@ -975,7 +975,7 @@ async fn each_chunk_records_its_origin_and_verdict_and_a_dropped_message_keeps_i
                 tool_call("c2", "bash", serde_json::json!({ "command": "echo key" })),
             ],
         ),
-        Message::tool_result("c1", "API_TOKEN=abc123xyz789 and the rest is fine"),
+        Message::tool_result("c1", "API_TOKEN=abc123xyz789\nand the rest is fine"),
         Message::tool_result("c2", GITHUB),
         Message::assistant("Both checked."),
         Message::user("Next."),
@@ -997,7 +997,7 @@ async fn each_chunk_records_its_origin_and_verdict_and_a_dropped_message_keeps_i
                 1,
                 Origin::Tool,
                 Verdict::Redacted,
-                "API_TOKEN=[REDACTED] and the rest is fine"
+                "API_TOKEN=[REDACTED]\nand the rest is fine"
             ),
             // The number is taken and the line says there was something.
             (2, Origin::Tool, Verdict::Drop, "withheld"),

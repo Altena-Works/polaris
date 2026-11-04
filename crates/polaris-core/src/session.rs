@@ -1240,6 +1240,18 @@ impl Session {
         self.reported_input = None;
     }
 
+    /// Drops what the turn-only memory took in of a run the host stopped by
+    /// dropping its future (Esc, shutdown): the turn did not complete, and the
+    /// history it leaves is taken in at the next run. The memory is free once
+    /// the future is dropped. If it is not, the next run drops the turn too.
+    pub fn discard_turn_memory(&self) {
+        if let Some(memory) = &self.turn_memory
+            && let Ok(mut memory) = memory.try_lock()
+        {
+            memory.discard();
+        }
+    }
+
     pub fn uses_strict_history(&self) -> std::io::Result<bool> {
         if self.desktop_memory.is_some() {
             return Ok(true);
