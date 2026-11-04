@@ -2895,7 +2895,7 @@ async fn run_native_turn(args: Args, tool_memory_embedding: Option<(String, Stri
     let tier_weights = prepared_providers.tier_weights.clone();
     // The weight that makes the AGENTS.md copies, taken before `tier_weights` is handed on.
     let wrap_maker = tier_weights.get("giant").cloned();
-    // `turn-only` (experiment): the lightest weight writes its ledger lines;
+    // `turn-only`: the lightest weight writes its ledger lines;
     // the session's own model never does.
     let turn_writer = tier_weights.get("dwarf").cloned();
     let provider = prepared_providers.provider.clone();
@@ -3165,7 +3165,7 @@ async fn run_native_turn(args: Args, tool_memory_embedding: Option<(String, Stri
     } else {
         None
     };
-    // `turn-only` (experiment): the local embedder for its index. Without
+    // `turn-only`: the local embedder for its index. Without
     // one the index is BM25 alone, which is said once here.
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut turn_embedder: Option<

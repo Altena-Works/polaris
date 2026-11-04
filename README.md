@@ -10,6 +10,8 @@
   <img alt="Platform macOS arm64" src="https://img.shields.io/badge/macOS-arm64-35505B?style=for-the-badge&labelColor=182D36&logo=apple&logoColor=white">
   <img alt="Rust 1.96+" src="https://img.shields.io/badge/Rust-1.96%2B-35505B?style=for-the-badge&labelColor=182D36&logo=rust&logoColor=white">
   <img alt="License MIT" src="https://img.shields.io/github/license/Altena-Works/polaris?style=for-the-badge&labelColor=182D36&color=35505B">
+  <a href="docs/README.md"><img alt="Docs" src="https://img.shields.io/badge/Docs-Guide-35505B?style=for-the-badge&labelColor=182D36&logo=readthedocs&logoColor=white"></a>
+  <img alt="Last commit" src="https://img.shields.io/github/last-commit/Altena-Works/polaris/rc%2Fv0.3.0?style=for-the-badge&labelColor=182D36&color=35505B">
   <a href="https://github.com/sponsors/4ltena"><img alt="Sponsor 4ltena" src="https://img.shields.io/badge/Sponsor-4ltena-35505B?style=for-the-badge&labelColor=182D36&logo=githubsponsors&logoColor=white"></a>
 </p>
 
@@ -25,7 +27,9 @@ polarisは、作業に必要な文脈を選んでモデルへ渡すRust製のコ
 
 v0.3.0-rcはmacOS arm64のTUIを配布対象とする。GUI・他OSのソースは保持するが、この版の配布対象には含めない。会話・巻戻し・MCP・subagentの操作は[利用ガイド](docs/usage.md)と[コマンド参照](docs/command-reference.md)、構成と今回の提供範囲は[システム構成図](docs/system-overview.md)と[リリース資料](docs/releases/v0.3.0.md)を参照。RCパッケージは未公開である。
 
-## 暫定版の利用方法
+<p><a href="docs/releases/v0.3.0.md"><img src="docs/assets/versions/polaris-v0.3.0-starchart.gif" alt="v0.3.0 Castor の星図" width="100%"></a></p>
+
+<h2><img src="docs/assets/readme/get-started.svg" alt="暫定版の利用方法" width="100%"></h2>
 
 起動前に作業対象のプロジェクトへ移動する。ホームディレクトリからの起動は、現在`RuntimeDenied`で停止する。[起動時のトラブル](docs/usage.md#起動時のトラブル)を参照。
 
@@ -49,7 +53,7 @@ POLARIS_PROVIDER=codex target/release/polaris --phase specify -p "機材貸出�
 
 APIキー用の`openai`プロバイダはChat Completions形式のため、Responses APIが必要なAstraのtool callingには未対応である。認証・設定・会話の再開方法は[利用ガイド](docs/usage.md)にまとめる。
 
-## 主な機能
+<h2><img src="docs/assets/readme/features.svg" alt="主な機能" width="100%"></h2>
 
 - **状態で管理するworkflow**：段階、作業、必要なskillを記録し、毎ターンの文脈を組み立てる。
 - **会話の保存と分岐**：Sidechatで別文脈を分け、保存済み会話を再開・分岐できる。TUIでは対象のユーザー入力より前へ会話と作業ファイルを巻き戻せる。
@@ -59,7 +63,7 @@ APIキー用の`openai`プロバイダはChat Completions形式のため、Respo
 
 macOSのCLI専用プレビューパッケージには追加資源を含めない。GUIインストーラには固定manifestからllama.cpp、埋め込み実行環境、multilingual-e5-small/baseを検証して`~/.polaris`へ取得する経路があり、Rustは任意選択である。Qwen系はSemIf用のQwen3.5-4Bを候補としているが、固定資源の登録と受入が未完了で、自動取得しない。署名済み配布資源と実機受入も未完了である。検証済み範囲は[macOSデスクトップ](apps/macos/README.md)に記載する。
 
-## Terminal-Bench v4.0での純正Codexとの比較
+<h2><img src="docs/assets/readme/benchmark.svg" alt="Terminal-Bench v4.0での純正Codexとの比較" width="100%"></h2>
 
 2026-11-04に、Terminal-Bench v4.0の7課題を各1回、`gpt-6.1-sol`・`xhigh`で測った。polaris（turn-only）とCodex 0.160.0の比較である。
 
@@ -80,7 +84,7 @@ macOSのCLI専用プレビューパッケージには追加資源を含めない
 
 v0.2.0の測定は[測定条件と結果](docs/preimplementation-evaluation.md#v0120とcodex-01540の途中結果)を参照。
 
-## 文書
+<h2><img src="docs/assets/readme/docs.svg" alt="文書" width="100%"></h2>
 
 目的別の入口は[文書一覧](docs/README.md)を参照。以下の実測文書は対象版と測定条件を確認して読む。
 
@@ -93,7 +97,7 @@ v0.2.0の測定は[測定条件と結果](docs/preimplementation-evaluation.md#v
 | [v0.3.0-rc](docs/releases/v0.3.0.md) | 配布範囲、候補checksum、検証結果と限界。 |
 
 
-## 開発と検証
+<h2><img src="docs/assets/readme/development.svg" alt="開発と検証" width="100%"></h2>
 
 ```sh
 cargo test --locked --offline --workspace
@@ -101,11 +105,11 @@ cargo clippy --locked --offline --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-## 参考にしているリポジトリ
+<h2><img src="docs/assets/readme/references.svg" alt="参考にしているリポジトリ" width="100%"></h2>
 
 - [openai/codex](https://github.com/openai/codex)：CLI・TUIの操作と挙動を比べる基準であり、一部の設計の参考にしている。
 
-## 取り入れた研究
+<h2><img src="docs/assets/readme/research.svg" alt="取り入れた研究" width="100%"></h2>
 
 polarisが設計に取り入れた論文の要素を、状態ごとに示す。「計画」と「候補」は、まだコードに無い。論文の結果は、polarisでは測り直していない。turn-onlyの設計の根拠として確かめた論文は、節の末尾にまとめる。
 
@@ -155,6 +159,6 @@ turn-onlyの5つの設計判断ごとに、支持する研究と、限定また�
 
 </details>
 
-## ライセンス
+<h2><img src="docs/assets/readme/license.svg" alt="ライセンス" width="100%"></h2>
 
 [MIT License](LICENSE)で公開する。TLSテスト素材の出典と許諾は[fixtureの説明](crates/polaris-http/src/fixtures/README.md)を参照。

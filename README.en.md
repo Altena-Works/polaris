@@ -10,6 +10,8 @@
   <img alt="Platform macOS arm64" src="https://img.shields.io/badge/macOS-arm64-35505B?style=for-the-badge&labelColor=182D36&logo=apple&logoColor=white">
   <img alt="Rust 1.96+" src="https://img.shields.io/badge/Rust-1.96%2B-35505B?style=for-the-badge&labelColor=182D36&logo=rust&logoColor=white">
   <img alt="License MIT" src="https://img.shields.io/github/license/Altena-Works/polaris?style=for-the-badge&labelColor=182D36&color=35505B">
+  <a href="docs/README.md"><img alt="Docs" src="https://img.shields.io/badge/Docs-Guide-35505B?style=for-the-badge&labelColor=182D36&logo=readthedocs&logoColor=white"></a>
+  <img alt="Last commit" src="https://img.shields.io/github/last-commit/Altena-Works/polaris/rc%2Fv0.3.0?style=for-the-badge&labelColor=182D36&color=35505B">
   <a href="https://github.com/sponsors/4ltena"><img alt="Sponsor 4ltena" src="https://img.shields.io/badge/Sponsor-4ltena-35505B?style=for-the-badge&labelColor=182D36&logo=githubsponsors&logoColor=white"></a>
 </p>
 
@@ -25,7 +27,9 @@ polaris is a Rust coding agent that selects the context needed for the current t
 
 v0.3.0-rc targets the macOS arm64 TUI. GUI and other-platform sources remain in the repository. See the [system overview](docs/system-overview.md), [release scope](docs/releases/v0.3.0.md), and [command reference](docs/command-reference.md) (Japanese). No RC tag, release, or package has been published.
 
-## Using this development checkout
+<p><a href="docs/releases/v0.3.0.md"><img src="docs/assets/versions/polaris-v0.3.0-starchart.gif" alt="v0.3.0 Castor star chart" width="100%"></a></p>
+
+<h2><img src="docs/assets/readme/get-started.svg" alt="Using this development checkout" width="100%"></h2>
 
 Start from a project directory. Starting from your home directory currently fails helper preparation with `RuntimeDenied`; see [startup troubleshooting](docs/usage.md#起動時のトラブル).
 
@@ -49,7 +53,7 @@ POLARIS_PROVIDER=codex target/release/polaris --phase specify -p "Define accepta
 
 The API-key `openai` provider currently uses Chat Completions and does not support Astra tool calling, which requires the Responses API. See the [usage guide](docs/usage.md) for authentication, configuration, and resuming conversations.
 
-## Core features
+<h2><img src="docs/assets/readme/features.svg" alt="Core features" width="100%"></h2>
 
 - **Stateful workflow:** Persist the phase and active task, then assemble the instructions and skills needed for each turn.
 - **Conversation continuity:** Separate unrelated work into Sidechats; resume, fork, or rewind a conversation and its workspace files from the TUI.
@@ -59,7 +63,7 @@ The API-key `openai` provider currently uses Chat Completions and does not suppo
 
 The macOS CLI preview package contains no optional resources. The GUI installer has a manifest-verified download path for llama.cpp, the embedding runtime, and multilingual-e5-small/base under `~/.polaris`; Rust is optional. Qwen3.5-4B is a candidate for the SemIf classifier, but its pinned distribution artifacts and acceptance checks are incomplete, so it is not automatically downloaded. Signed distribution assets and real-device acceptance are still missing. See the [macOS guide](apps/macos/README.md) for the verified scope.
 
-## Terminal-Bench v4.0 comparison with stock Codex
+<h2><img src="docs/assets/readme/benchmark.svg" alt="Terminal-Bench v4.0 comparison with stock Codex" width="100%"></h2>
 
 On 2026-11-04 we ran 7 Terminal-Bench v4.0 tasks once each at `gpt-6.1-sol` with `xhigh` effort, comparing polaris (turn-only) with Codex 0.160.0.
 
@@ -80,7 +84,7 @@ Limits to read it by:
 
 For the v0.2.0 result, see the [method and results](docs/preimplementation-evaluation.md#v0120とcodex-01540の途中結果) (Japanese).
 
-## Documentation
+<h2><img src="docs/assets/readme/docs.svg" alt="Documentation" width="100%"></h2>
 
 Start with the [documentation index](docs/README.md). Detailed documents below are in Japanese.
 
@@ -93,7 +97,7 @@ Start with the [documentation index](docs/README.md). Detailed documents below a
 | [v0.3.0-rc](docs/releases/v0.3.0.md) | Distribution scope, candidate checksums, verification, and limits. |
 
 
-## Development and verification
+<h2><img src="docs/assets/readme/development.svg" alt="Development and verification" width="100%"></h2>
 
 ```sh
 cargo test --locked --offline --workspace
@@ -101,11 +105,11 @@ cargo clippy --locked --offline --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-## Reference repository
+<h2><img src="docs/assets/readme/references.svg" alt="Reference repository" width="100%"></h2>
 
 - [openai/codex](https://github.com/openai/codex): the baseline for comparing CLI and TUI behavior, and a reference for parts of the design.
 
-## Research incorporated
+<h2><img src="docs/assets/readme/research.svg" alt="Research incorporated" width="100%"></h2>
 
 This section lists the elements polaris takes from research papers, grouped by status. Planned and candidate items are not in the code yet. polaris has not re-measured the papers' results. Papers checked as evidence for the turn-only design are collected at the end of this section.
 
@@ -155,6 +159,6 @@ For each of the five turn-only design decisions, the papers below support it, or
 
 </details>
 
-## License
+<h2><img src="docs/assets/readme/license.svg" alt="License" width="100%"></h2>
 
 Released under the [MIT License](LICENSE). See the [TLS fixture notes](crates/polaris-http/src/fixtures/README.md) for the test material's source and license.
