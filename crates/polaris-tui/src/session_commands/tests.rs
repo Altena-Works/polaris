@@ -315,6 +315,142 @@ async fn a_conversation_saved_with_the_hosted_model_opens_on_it_in_a_hosted_proc
     assert_eq!(process.provider.model().as_deref(), Some("gpt-6-astra"));
 }
 
+/// What `/model` and every send do: save the binding in use as the one the
+/// chat is held with. No settings command is involved.
+fn record(
+    fixture: &Fixture,
+    (provider, model): (&str, &str),
+    endpoint: Option<&polaris_core::session_settings::SavedEndpointV1>,
+) {
+    crate::binding_record::record(
+        (
+            &fixture.session,
+            &fixture.initial,
+            &fixture.workspace,
+            &fixture.effects,
+        ),
+        provider,
+        model,
+        None,
+        endpoint,
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_chat_held_with_a_model_chosen_by_model_is_reopened_on_it_or_sends_nothing() {
+    use crate::session_activation::fixtures::{Process, closed_endpoint, fake_ollama};
+    let fixture = Fixture::new();
+    record(&fixture, ("ollama", "qwen3:8b"), None);
+    // No settings were ever saved; the record is all the chat has.
+    assert_eq!(fixture.snapshot().state.session_settings, None);
+
+    // A hosted process that can reach the server opens it on the local model.
+    let endpoint = fake_ollama(&["qwen3:8b"], true).await;
+    let mut process = Process::started_on("codex", "gpt-6.1-sol");
+    let (needs, _) = reopen(&fixture, &mut process, &endpoint).await;
+    assert_eq!(needs, None);
+    assert_eq!(process.provider_name, "ollama");
+    assert_eq!(process.model_name, "qwen3:8b");
+    assert_eq!(process.provider.model().as_deref(), Some("qwen3:8b"));
+
+    // One that cannot keeps its hosted provider, and the send gate then sends
+    // nothing: the input is back in the box and the line is shown.
+    let closed = closed_endpoint().await;
+    let mut process = Process::started_on("codex", "gpt-6.1-sol");
+    let (needs, _) = reopen(&fixture, &mut process, &closed).await;
+    let line = needs.expect("the chat cannot be served here");
+    assert!(
+        line.contains("ollama") && line.contains("qwen3:8b"),
+        "{line}"
+    );
+    assert_eq!(process.provider_name, "codex");
+    assert!(Arc::ptr_eq(&process.provider, &process.startup));
+    let mut buffer = String::new();
+    let mut cursor = 0;
+    let mut status = crate::render::Status::Idle;
+    crate::refuse_before_send(
+        &line,
+        "fix the parser".into(),
+        14,
+        false,
+        &mut buffer,
+        &mut cursor,
+        &mut VecDeque::new(),
+        &mut false,
+        &mut status,
+    );
+    assert_eq!((buffer.as_str(), cursor), ("fix the parser", 14));
+    assert!(matches!(status, crate::render::Status::Error(shown) if shown == line));
+}
+
+#[tokio::test]
+async fn a_chat_with_saved_settings_and_a_record_opens_on_the_record() {
+    use crate::session_activation::fixtures::{Process, fake_ollama};
+    let mut fixture = Fixture::new();
+    // The settings were confirmed while the hosted model was in use ...
+    fixture
+        .call(
+            "session configure codex gpt-6-astra auto",
+            KeyCode::Char('y'),
+            false,
+            None,
+        )
+        .unwrap();
+    // ... and `/model` moved the chat to a local model afterwards.
+    record(&fixture, ("ollama", "qwen3:8b"), None);
+    let state = fixture.snapshot().state;
+    assert_eq!(state.session_settings.unwrap().model, "gpt-6-astra");
+    assert_eq!(state.held_with.unwrap().model, "qwen3:8b");
+
+    let endpoint = fake_ollama(&["qwen3:8b"], true).await;
+    let mut process = Process::started_on("codex", "gpt-6.1-sol");
+    assert_eq!(reopen(&fixture, &mut process, &endpoint).await.0, None);
+    assert_eq!(process.provider_name, "ollama");
+    assert_eq!(process.model_name, "qwen3:8b");
+}
+
+#[tokio::test]
+async fn the_record_follows_a_later_model_choice_when_the_chat_is_reopened() {
+    use crate::session_activation::fixtures::{Process, fake_ollama};
+    let fixture = Fixture::new();
+    let endpoint = fake_ollama(&["qwen3:8b"], true).await;
+    record(&fixture, ("ollama", "qwen3:8b"), None);
+    let mut process = Process::started_on("codex", "gpt-6.1-sol");
+    assert_eq!(reopen(&fixture, &mut process, &endpoint).await.0, None);
+    assert_eq!(process.provider_name, "ollama");
+
+    // `/model` moved the chat back to a hosted model. The server is still up,
+    // but the chat is no longer held with it.
+    record(&fixture, ("codex", "gpt-6-astra"), None);
+    let mut process = Process::started_on("codex", "gpt-6.1-sol");
+    assert_eq!(reopen(&fixture, &mut process, &endpoint).await.0, None);
+    assert_eq!(process.provider_name, "codex");
+    assert_eq!(process.model_name, "gpt-6-astra");
+    assert!(!process.bound_local_endpoint());
+}
+
+#[tokio::test]
+async fn a_chat_held_through_a_local_openai_compatible_endpoint_is_not_served_by_the_default_one() {
+    use crate::session_activation::fixtures::{Process, closed_endpoint};
+    use polaris_core::session_settings::SavedEndpointV1;
+    let fixture = Fixture::new();
+    let local = SavedEndpointV1::from_base_url(Some("http://127.0.0.1:8080/v1"));
+    record(&fixture, ("openai", "local-model"), Some(&local));
+    let closed = closed_endpoint().await;
+
+    let mut process =
+        Process::started_on("openai", "local-model").sending_to(SavedEndpointV1::Default);
+    let line = reopen(&fixture, &mut process, &closed)
+        .await
+        .0
+        .expect("api.openai.com is not where this chat was held");
+    assert!(line.contains("http://127.0.0.1:8080/v1"), "{line}");
+
+    let mut process = Process::started_on("openai", "local-model").sending_to(local);
+    assert_eq!(reopen(&fixture, &mut process, &closed).await.0, None);
+}
+
 #[test]
 fn m3c_helper_cancel_records_denial_and_persistence_error_refuses_changes() {
     let mut fixture = Fixture::new();

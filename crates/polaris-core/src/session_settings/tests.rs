@@ -5,6 +5,7 @@ use crate::{
     conversation_state::{RewindEffectStatusV1, RewindEligibilityV1},
     management_effect::{
         ManagementEffectStateV1, ManagementEffectStoreV1, ManagementOperationIdV1,
+        ManagementRewindDispositionV1,
     },
     project_mutation::{ProjectMutationLeaseV1, ProjectMutationOwnerV1},
 };
@@ -423,6 +424,9 @@ fn m3c_goal_uses_exact_revision_and_preserves_stop_until_resume() {
 fn m3c_rewind_restores_captured_goal_and_starts_with_independent_blank_draft() {
     let fixture = Fixture::new();
     fixture.apply(SessionSettingsCommandV1::Remember { enabled: true });
+    fixture.apply(SessionSettingsCommandV1::Binding {
+        binding: binding("ollama", "qwen3:8b", ""),
+    });
     fixture.apply(SessionSettingsCommandV1::Goal {
         expected_revision: 0,
         operation: GoalOperationV1::Set {
@@ -460,6 +464,9 @@ fn m3c_rewind_restores_captured_goal_and_starts_with_independent_blank_draft() {
             text: "later goal".into(),
         },
     });
+    fixture.apply(SessionSettingsCommandV1::Binding {
+        binding: binding("codex", "gpt-6-astra", "auto"),
+    });
     let lock = fixture.session.store.lock().unwrap();
     let branch = lock
         .prepare_rewind_branch(
@@ -470,6 +477,11 @@ fn m3c_rewind_restores_captured_goal_and_starts_with_independent_blank_draft() {
         .unwrap();
     let restored = branch.lock().unwrap().snapshot().unwrap();
     assert_eq!(restored.state.goal.unwrap().text, "captured goal");
+    // The child is held with what the conversation was held with at the boundary.
+    assert_eq!(
+        restored.state.held_with,
+        Some(binding("ollama", "qwen3:8b", ""))
+    );
     assert_eq!(restored.state.draft, SavedSessionDraftV1::default());
     assert!(restored.state.session_settings.unwrap().remember);
     assert!(restored.events.is_empty());
@@ -501,4 +513,227 @@ fn m3c_publication_refuses_non_session_fields_and_full_preimage_mismatch() {
             .is_err()
     );
     assert_eq!(fixture.session.snapshot().unwrap().state, before.state);
+}
+
+fn binding(provider: &str, model: &str, effort: &str) -> SavedBindingV1 {
+    SavedBindingV1::new(provider.into(), model.into(), effort.into(), None).unwrap()
+}
+
+#[test]
+fn the_binding_is_saved_apart_from_settings_and_follows_each_change() {
+    let fixture = Fixture::new();
+    let local = binding("ollama", "qwen3:8b", "");
+    let operation = ManagementOperationIdV1::random().unwrap();
+    let snapshot = fixture
+        .owner()
+        .apply(
+            &fixture.session,
+            &fixture.initial,
+            SessionSettingsCommandV1::Binding {
+                binding: local.clone(),
+            },
+            operation,
+        )
+        .unwrap();
+    assert_eq!(snapshot.state.held_with, Some(local.clone()));
+    // Not a settings change: no settings are created from the launch's, so its
+    // flags are not pinned, and nothing else in the marker moves.
+    assert_eq!(snapshot.state.session_settings, None);
+    assert!(snapshot.events.is_empty());
+    // Restorable, so saving it never makes the history before it impossible to
+    // rewind across.
+    let effect = fixture.effects.effect(operation).unwrap().unwrap();
+    assert!(matches!(
+        effect.state,
+        ManagementEffectStateV1::Completed { .. }
+    ));
+    assert_eq!(
+        effect.request.rewind,
+        ManagementRewindDispositionV1::CapturedRestorable
+    );
+
+    // The binding it already has is no change.
+    fixture.refuse(SessionSettingsCommandV1::Binding {
+        binding: local.clone(),
+    });
+
+    // A later `/model` replaces it; a settings command does not touch it, and it
+    // does not touch the settings the command creates.
+    let hosted = binding("codex", "gpt-6-astra", "auto");
+    let snapshot = fixture.apply(SessionSettingsCommandV1::Binding {
+        binding: hosted.clone(),
+    });
+    assert_eq!(snapshot.state.held_with, Some(hosted.clone()));
+    let snapshot = fixture.apply(SessionSettingsCommandV1::Remember { enabled: true });
+    assert_eq!(snapshot.state.held_with, Some(hosted.clone()));
+    assert_eq!(snapshot.state.session_settings.unwrap().provider, "fake");
+
+    // It is read back after a restart.
+    let resumed = PersistedSession::open(
+        &fixture.session.data_root,
+        &fixture.session.database,
+        &snapshot.state.project_id,
+        &snapshot.state.session_id,
+    )
+    .unwrap();
+    assert_eq!(resumed.snapshot().unwrap().state.held_with, Some(hosted));
+}
+
+#[test]
+fn a_binding_that_could_leak_or_is_malformed_is_refused() {
+    let fixture = Fixture::new();
+    let good = binding("openai", "m", "auto");
+    for bad in [
+        SavedBindingV1 {
+            provider: String::new(),
+            ..good.clone()
+        },
+        SavedBindingV1 {
+            model: " ".into(),
+            ..good.clone()
+        },
+        SavedBindingV1 {
+            effort: "loud".into(),
+            ..good.clone()
+        },
+        SavedBindingV1 {
+            endpoint: Some(SavedEndpointV1::Custom(
+                "https://user:secret@host.example/v1".into(),
+            )),
+            ..good.clone()
+        },
+        SavedBindingV1 {
+            endpoint: Some(SavedEndpointV1::Custom(
+                "http://host.example/v1?key=1".into(),
+            )),
+            ..good.clone()
+        },
+        SavedBindingV1 {
+            endpoint: Some(SavedEndpointV1::Custom(String::new())),
+            ..good.clone()
+        },
+    ] {
+        fixture.refuse(SessionSettingsCommandV1::Binding { binding: bad });
+    }
+    assert_eq!(fixture.session.snapshot().unwrap().state.held_with, None);
+}
+
+#[test]
+fn a_state_file_from_before_the_binding_loads_and_one_without_it_is_written_without_the_key() {
+    let fixture = Fixture::new();
+    fixture.apply(SessionSettingsCommandV1::Remember { enabled: true });
+    let path = fixture.session.store.directory().join("state.json");
+    let written = |path: &std::path::Path| -> serde_json::Value {
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    };
+    // What an older version wrote is what a conversation without the record still
+    // is: the key is absent, so an older reader (which refuses unknown keys) can
+    // keep reading it.
+    assert!(written(&path).get("held_with").is_none());
+    let loaded = fixture.session.snapshot().unwrap();
+    assert_eq!(loaded.state.held_with, None);
+    assert!(loaded.state.session_settings.unwrap().remember);
+
+    // Once recorded, the file has the key; removing it gives the old file back.
+    fixture.apply(SessionSettingsCommandV1::Binding {
+        binding: binding("ollama", "qwen3:8b", ""),
+    });
+    let mut state = written(&path);
+    assert_eq!(
+        state["held_with"],
+        serde_json::json!({"provider": "ollama", "model": "qwen3:8b", "effort": ""})
+    );
+    state.as_object_mut().unwrap().remove("held_with");
+    fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+    assert_eq!(fixture.session.snapshot().unwrap().state.held_with, None);
+
+    // The key holds the record and nothing else: an unknown member is refused.
+    let mut state = written(&path);
+    state["held_with"] =
+        serde_json::json!({"provider": "p", "model": "m", "effort": "", "remember": true});
+    fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+    assert!(fixture.session.snapshot().is_err());
+}
+
+#[test]
+fn an_endpoint_is_kept_without_credentials_and_only_the_providers_own_host_is_the_default() {
+    use SavedEndpointV1::{Custom, Default};
+    for base in [
+        None,
+        Some("https://api.openai.com/v1"),
+        Some("https://api.openai.com"),
+        Some("https://API.OPENAI.COM:443/v1/"),
+        Some("https://user:secret@api.openai.com/v1?key=abc#fragment"),
+    ] {
+        assert_eq!(SavedEndpointV1::from_base_url(base), Default, "{base:?}");
+    }
+    for base in [
+        "http://api.openai.com/v1",
+        "https://api.openai.com:8443/v1",
+        "https://api.openai.com.example.com/v1",
+        "https://example.com/v1",
+    ] {
+        assert!(
+            matches!(SavedEndpointV1::from_base_url(Some(base)), Custom(_)),
+            "{base}"
+        );
+    }
+    // The same server is the same endpoint, however the URL is spelled.
+    let local = Custom("http://127.0.0.1:8080/v1".into());
+    for base in [
+        "http://127.0.0.1:8080/v1",
+        "http://127.0.0.1:8080/v1/",
+        "HTTP://127.0.0.1:8080/v1",
+    ] {
+        assert_eq!(SavedEndpointV1::from_base_url(Some(base)), local, "{base}");
+    }
+    assert_ne!(
+        SavedEndpointV1::from_base_url(Some("http://127.0.0.1:8081/v1")),
+        local
+    );
+    // A key written into the URL never reaches the file.
+    let kept = SavedEndpointV1::from_base_url(Some(
+        "https://user:secret@llm.example.com:8443/v1/?api-key=abc#frag",
+    ));
+    assert_eq!(kept, Custom("https://llm.example.com:8443/v1".into()));
+    assert!(
+        !serde_json::to_string(&kept)
+            .unwrap()
+            .contains(['@', '?', '#'])
+    );
+    // A base URL nothing can be sent to still differs from every real one.
+    let unreadable = SavedEndpointV1::from_base_url(Some("not a url"));
+    assert_eq!(unreadable, Custom("invalid".into()));
+    assert!(
+        SavedBindingV1::new("openai".into(), "m".into(), "auto".into(), Some(unreadable)).is_ok()
+    );
+}
+
+#[test]
+fn the_endpoint_is_part_of_the_saved_format() {
+    let with = |endpoint| {
+        serde_json::to_value(
+            SavedBindingV1::new("openai".into(), "m".into(), "auto".into(), endpoint).unwrap(),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        with(Some(SavedEndpointV1::Default)),
+        serde_json::json!({"provider": "openai", "model": "m", "effort": "auto", "endpoint": "default"})
+    );
+    assert_eq!(
+        with(Some(SavedEndpointV1::Custom(
+            "http://127.0.0.1:8080/v1".into()
+        ))),
+        serde_json::json!({
+            "provider": "openai", "model": "m", "effort": "auto",
+            "endpoint": {"custom": "http://127.0.0.1:8080/v1"}
+        })
+    );
+    // A provider with one place to go has no endpoint key at all.
+    assert!(with(None).get("endpoint").is_none());
+    let read: SavedBindingV1 =
+        serde_json::from_value(serde_json::json!({"provider": "p", "model": "m", "effort": ""}))
+            .unwrap();
+    assert_eq!(read.endpoint, None);
 }

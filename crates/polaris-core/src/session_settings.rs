@@ -117,15 +117,7 @@ impl SavedSessionSettingsV1 {
     }
 
     pub fn validate(&self) -> io::Result<()> {
-        if self.provider.trim().is_empty()
-            || self.provider.len() > 128
-            || self.provider.chars().any(char::is_control)
-            || self.model.trim().is_empty()
-            || self.model.len() > 1024
-            || self.model.chars().any(char::is_control)
-            || (!matches!(self.effort.as_str(), "" | "auto")
-                && !crate::desktop_store::EFFORTS.contains(&self.effort.as_str()))
-        {
+        if !valid_binding(&self.provider, &self.model, &self.effort) {
             return Err(invalid("Invalid session settings"));
         }
         if let Some(embedding) = &self.tool_memory_embedding {
@@ -147,6 +139,119 @@ impl SavedSessionSettingsV1 {
             return Err(invalid(
                 "Specify at most 32 role bindings using role names and dwarf|subgiant|giant|supergiant",
             ));
+        }
+        Ok(())
+    }
+}
+
+fn valid_binding(provider: &str, model: &str, effort: &str) -> bool {
+    !provider.trim().is_empty()
+        && provider.len() <= 128
+        && !provider.chars().any(char::is_control)
+        && !model.trim().is_empty()
+        && model.len() <= 1024
+        && !model.chars().any(char::is_control)
+        && (matches!(effort, "" | "auto") || crate::desktop_store::EFFORTS.contains(&effort))
+}
+
+/// Where an OpenAI-compatible provider sends, kept without credentials. The
+/// provider and model alone cannot tell a conversation held with a server on
+/// this machine from one held with `api.openai.com`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SavedEndpointV1 {
+    /// The provider's own host.
+    Default,
+    /// The base URL the person pointed it at, as `scheme://host[:port][/path]`.
+    Custom(String),
+}
+
+/// What `Custom` holds for a base URL that cannot be read. Nothing can be sent
+/// to it, so it only has to differ from every endpoint that can.
+const UNREADABLE_ENDPOINT: &str = "invalid";
+
+impl SavedEndpointV1 {
+    /// The endpoint for the base URL a launch gave the provider; `None` is the
+    /// provider's default. User information, query and fragment are dropped, so
+    /// a key written into the URL never reaches the conversation file.
+    pub fn from_base_url(base_url: Option<&str>) -> Self {
+        let Some(base_url) = base_url else {
+            return Self::Default;
+        };
+        let Ok(mut url) = url::Url::parse(base_url) else {
+            return Self::Custom(UNREADABLE_ENDPOINT.into());
+        };
+        // A URL that cannot carry credentials refuses these and has none to drop.
+        let _ = url.set_username("");
+        let _ = url.set_password(None);
+        url.set_query(None);
+        url.set_fragment(None);
+        if url.scheme() == "https"
+            && url.host_str() == Some("api.openai.com")
+            && url.port_or_known_default() == Some(443)
+        {
+            return Self::Default;
+        }
+        Self::Custom(url.as_str().trim_end_matches('/').to_owned())
+    }
+
+    fn validate(&self) -> io::Result<()> {
+        let Self::Custom(url) = self else {
+            return Ok(());
+        };
+        let credentials = url::Url::parse(url)
+            .is_ok_and(|parsed| !parsed.username().is_empty() || parsed.password().is_some());
+        if url.is_empty()
+            || url.len() > 4096
+            || url.chars().any(|c| c.is_whitespace() || c.is_control())
+            || url.contains(['?', '#'])
+            || credentials
+        {
+            return Err(invalid("Invalid endpoint"));
+        }
+        Ok(())
+    }
+}
+
+/// The provider, model and effort a conversation is held with, and where an
+/// OpenAI-compatible provider was reached. Apart from `SavedSessionSettingsV1`:
+/// only a confirmed settings command writes that, together with launch flags
+/// such as `--remember`, while the host writes this itself whenever the binding
+/// it runs on changes, so recording it pins nothing but the binding.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SavedBindingV1 {
+    pub provider: String,
+    pub model: String,
+    pub effort: String,
+    /// Set for an OpenAI-compatible provider only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<SavedEndpointV1>,
+}
+
+impl SavedBindingV1 {
+    pub fn new(
+        provider: String,
+        model: String,
+        effort: String,
+        endpoint: Option<SavedEndpointV1>,
+    ) -> io::Result<Self> {
+        let saved = Self {
+            provider,
+            model,
+            effort,
+            endpoint,
+        };
+        saved.validate()?;
+        Ok(saved)
+    }
+
+    pub fn validate(&self) -> io::Result<()> {
+        if !valid_binding(&self.provider, &self.model, &self.effort) {
+            return Err(invalid("Invalid conversation binding"));
+        }
+        if let Some(endpoint) = &self.endpoint {
+            endpoint.validate()?;
         }
         Ok(())
     }
@@ -216,6 +321,11 @@ pub enum SessionSettingsCommandV1 {
         expected_revision: u64,
         text: String,
     },
+    /// The binding the host runs the conversation on. Written without a
+    /// confirmation, as a draft is, and it leaves `session_settings` alone.
+    Binding {
+        binding: SavedBindingV1,
+    },
     Goal {
         expected_revision: u64,
         operation: GoalOperationV1,
@@ -232,7 +342,11 @@ impl SessionSettingsCommandV1 {
             Self::EmbeddingModel { .. } => "F09",
             Self::Configure { .. } => "D18",
             Self::History { .. } => "F16",
-            Self::Draft { .. } => "D17",
+            // The approved inventory has no row of its own for the binding. It
+            // shares the draft's: local to the session, automatic, and it must
+            // stay restorable, or every send would make the history before it
+            // impossible to rewind across.
+            Self::Draft { .. } | Self::Binding { .. } => "D17",
             Self::Goal { .. } => "D20",
         }
     }
@@ -265,6 +379,7 @@ pub(crate) fn session_only_change(
     permitted.session_settings = candidate.session_settings.clone();
     permitted.draft = candidate.draft.clone();
     permitted.goal = candidate.goal.clone();
+    permitted.held_with = candidate.held_with.clone();
     permitted == *candidate
 }
 

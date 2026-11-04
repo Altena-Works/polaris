@@ -32,7 +32,7 @@ TUIでは`/`で候補を出し、入力で絞り込み、↑↓とEnterで選ぶ
 
 | コマンド | 役割 | 主な出力・反映時期 |
 | --- | --- | --- |
-| `/model` | 次のターンで使うモデルを選ぶ。保存したモデルを選べず送信が止まった会話も、ここで選べば続けられる。 | `gpt-6-astra`、`gpt-6.1-sol`、`gpt-6.1-terra`、`gpt-6-luna`、`Local model`の選択画面。成功時`model set to <model>`。 |
+| `/model` | 次のターンで使うモデルを選ぶ。保存したモデルを選べず送信が止まった会話も、ここで選べば続けられる。選び終えると、その会話を行うproviderとモデルとして会話に記録する。 | `gpt-6-astra`、`gpt-6.1-sol`、`gpt-6.1-terra`、`gpt-6-luna`、`Local model`の選択画面。成功時`model set to <model>`。 |
 | `/permissions` | 起動時に許された範囲で承認方針を選ぶ。 | Never / OnRequest / Alwaysの選択画面と`permissions set to <policy>`。起動時の境界を超える選択は拒否し、再起動用の引数を案内する。 |
 
 `/model`の`Local model`はloopbackのOllama/LM Studioへモデル在庫を問い合わせる。ツール対応を確認できたモデルを選び、成功時に`local model set to Ollama · <model>`等を表示する。候補がなければ`no connected local models`。推論強度を選ぶ画面ではない。
@@ -71,20 +71,21 @@ macOSでは、会話に表示された実在するファイル名やローカル
 | --- | --- | --- |
 | `/new` | 元会話を残し、空の会話を始める。 | 会話画面をresetして待機状態へ戻る。新しいIDは`/status`の`Session ID`で確認できる。 |
 | `/new fork` | 現在の履歴を別の会話IDへ複製して分岐する。`/model`で選んだproviderは引き継ぐ。 | `v2セッションへ分岐しました: <ID>`。 |
-| `/resume` | 保存会話を選んで開く。保存したprovider・モデルが選べるときは、それを最初から選ぶ。 | `resume a conversation`と、経過時間・message数・previewの一覧。↑↓で移動、Enterで選択、Escで取消。候補1件なら選択位置は変わらない。 |
+| `/resume` | 保存会話を選んで開く。会話に記録したprovider・モデルが選べるときは、それを最初から選ぶ。 | `resume a conversation`と、経過時間・message数・previewの一覧。↑↓で移動、Enterで選択、Escで取消。候補1件なら選択位置は変わらない。 |
 | `/export [path]` | 確認後、会話原文のeventをMarkdownへ新規保存する。 | `T17 完了: <path>`。省略時は`polaris-export-<時刻>.md`。既存ファイルは上書きせず、上限16MiB。 |
 | `/init` | 確認後、project rootに`AGENTS.md`の雛形を新規作成する。 | `T10 完了: <path>`。既存ファイルは上書きしない。 |
 | `/quit`、`/exit`、`/q` | TUIを終了する。 | 保存会話があれば`Resume this session with: polaris --resume <ID>`。未処理入力や下書きがあれば終了を拒否する場合がある。 |
 
 `/resume`で会話を開いても、現在の作業ファイルと保存状態が一致しない場合は閲覧のみになる。`/new`・`/new fork`・`/resume`は別の操作であり、IDは`/status`の`Session ID`で確認できる。
 
-別の会話を開く操作（`--resume`での起動、`/resume`）は、その会話に保存したproviderとモデルを、このプロセスが提供できるとき最初から選ぶ。`/new fork`と巻き戻しは、今開いている会話の子を作る操作なので、保存したproviderを選び直さず、今使っているproviderを引き継ぐ。子は親の保存設定を複製するが、`/model`はその設定を書き換えないため、選び直すと、人が選んでいないのに`/model`で選んだ先から親の保存したproviderへ戻ってしまう。
+別の会話を開く操作（`--resume`での起動、`/resume`）は、その会話に記録したproviderとモデルを、このプロセスが提供できるとき最初から選ぶ。記録が無い会話は、保存した設定（`/memory configure`などで保存したもの）のproviderとモデルを選ぶ。`/new fork`と巻き戻しは、今開いている会話の子を作る操作なので、保存したproviderを選び直さず、今使っているproviderを引き継ぐ。子は親の保存設定を複製するが、`/model`はその設定を書き換えないため、選び直すと、人が選んでいないのに`/model`で選んだ先から親の保存したproviderへ戻ってしまう。子は親の記録も複製し、今使っているものと違えば、最初に送る前に書き直す。
 
 - 保存したローカルモデル（`ollama`・`lmstudio`）は、`/model`の`Local model`と同じ経路で選ぶ。loopbackのサーバーから在庫を取得し、保存したモデルがあってツール対応を確認できたものを、ローカルの実行枠へ束縛する。現在のモデルは置き換わり、推論強度の表示は空になる。
-- 保存したホスト型のモデル（`codex`・`openai`）は、起動したproviderが同じときに選ぶ。`/model`でローカルモデルへ移っていても、`/resume`でホスト型の会話を開けば起動したproviderへ戻る。
-- 設定を保存していない会話（`/memory configure`などで設定を一度も保存していない会話）は保存先が無く、現在の選択のまま動く。会話を開いた後に`/model`で別のproviderへ移った場合、その選択は設定を保存しても変わらない。
+- 保存したホスト型のモデル（`codex`・`openai`）は、起動したproviderが同じときに選ぶ。`openai`は接続先も記録と同じときに限る。`/model`でローカルモデルへ移っていても、`/resume`でホスト型の会話を開けば起動したproviderへ戻る。
+- 会話に記録する内容は、provider、モデル、推論強度と、`openai`の接続先である。接続先は既定のOpenAIのホスト（`default`）か、`POLARIS_BASE_URL`で指したURL（ユーザー情報・クエリ・フラグメントを除く）で、ほかのproviderには付かない。TUIが確認なしで書き、書くのは`/model`で選び終えたときと、入力を送る前に記録が無いか今の選択と違うときである。入力が自動で新しい会話（sidechat）へ回るときは、その会話を作る時点で今の選択を入れ、最初の要求の前から記録がある。`/memory configure`などの設定の保存とは別の項目で、`--remember`・`--tool-memory`などの起動オプションは入らない。推論強度は、開くときには選び直さない。
+- 記録が無い会話は、保存した設定があればそのproviderとモデルを選ぶ。接続先の記録は無く、providerとモデルだけで比べる。記録も設定も無い会話（この記録を書く前に始めて設定も保存していない会話、まだ一度も送らず`/model`も使っていない会話、保存先を持たないlegacy会話）は、現在の選択のまま動く。会話を開いた後に`/model`で別のproviderへ移った場合、その選択は設定を保存しても変わらず、会話に記録される。
 
-保存したproviderを提供できないときは、会話を開いて履歴を表示するが、何も送らない。送ろうとした入力（キューの入力を含む）は入力欄へ戻り、ステータス行に1行を示す。コマンドは使える。提供できない会話から`/new fork`や巻き戻しで作った会話も、同じく何も送れない。
+保存したproviderを提供できないときは、会話を開いて履歴を表示するが、何も送らない。送ろうとした入力は入力欄へ戻り、ステータス行に1行を示す。待ち行列から出した入力は待ち行列の先頭へ戻り、実行中に入力して保存した文章も先頭へ戻る。どちらも待ち行列は止まる。次の入力を送ると再開し、同じものが先頭から送られる。コマンドは使える。提供できない会話から`/new fork`や巻き戻しで作った会話も、同じく何も送れない。記録を保存できないとき（別の操作がprojectを使用中、未解決の管理操作がある、など）は、`Cannot save the model this chat is held with: ...`を示して同じように何も送らない。
 
 | 提供できない理由 | 示す1行（例） |
 | --- | --- |
@@ -92,8 +93,9 @@ macOSでは、会話に表示された実在するファイル名やローカル
 | サーバーに保存したモデルが無い | `This chat needs ollama (qwen3:8b), but its server does not list that model. Add it, then choose it with /model (Local model).` |
 | ツール対応を確認できないなど、束縛できない | `This chat needs ollama (qwen3:8b), but it cannot be used here (...). Choose another model with /model.` |
 | 起動したproviderが違う、または`llamacpp`の別モデル | `This chat needs codex (gpt-6-astra). Restart with POLARIS_PROVIDER=codex, or choose a model with /model.`（`llamacpp`は`POLARIS_PROVIDER=llamacpp and --model <モデル>`） |
+| `openai`の接続先が違う | `This chat needs openai (local-model) on http://127.0.0.1:8080/v1. Restart with POLARIS_PROVIDER=openai and POLARIS_BASE_URL=http://127.0.0.1:8080/v1, or choose a model with /model.`（既定の接続先で行った会話は`on the default OpenAI endpoint`と`POLARIS_BASE_URL unset`） |
 
-`/model`でモデルを選ぶと、その会話は選んだモデルで送れる。ローカルモデルで行った会話は、人が`/model`で選ばない限りホスト型へ送られない。保存設定の無い会話は、保存先が無いため比較できず、この確認の対象外である。
+`/model`でモデルを選ぶと、その会話は選んだモデルで送れる。ローカルモデルで行った会話は、人が`/model`で選ばない限りホスト型へ送られない。記録も保存設定も無い会話は、比べる対象が無く、この確認の対象外である。
 
 会話に保存したroleの束縛（旧版が保存したもの）が解決できなくなったとき（roleが`agents/`に無い、束縛先のtierにproviderが無い、tierのモデルを確認できない、など）は、TUIを終了しない。そのターンは委任を止めて実行し、どのroleへのspawnも拒否する。履歴に`Delegation is off in this chat: role <名前> ...`の1行を、会話ごとに1回だけ示す。解決できる束縛は、これまでどおりroleごとのtierへ振り分ける。
 
