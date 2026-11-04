@@ -339,12 +339,13 @@ fn secret_named(name: &str) -> bool {
 /// A value that only points at a secret: empty, the mark of one already
 /// redacted, a variable, a template, a placeholder, a YAML alias, anchor or tag
 /// with a name, or a word for nothing. The whole value has the form, up to a
-/// blank, a quote or the end: a secret that merely starts like one
-/// (`!Passw0rd`, `@dm1nSecret99`, `*secret*`, `<abc>def`) is still a secret.
+/// blank, a quote or the end, and `,`, `;`, `)` or `]` only close it at the end
+/// of the value: a secret that merely starts like one (`!Passw0rd`,
+/// `@dm1nSecret99`, `*secret*`, `<abc>def`, `$X,hunter2`) is still a secret.
 fn is_reference(value: &str) -> bool {
     static FORM: LazyLock<Regex> = LazyLock::new(|| {
         rule(
-            r#"^(?:\$\{[^}\n]*\}\}?|\$[A-Za-z_][A-Za-z0-9_]*|<[^>\n]*>|\{\{.*?\}\}|%\([^)\n]*\)s|%[A-Za-z_][A-Za-z0-9_]*%|[*&][A-Za-z0-9_][A-Za-z0-9_.-]*|![A-Za-z0-9_.-]*[ \t]+[A-Za-z_][A-Za-z0-9_.-]*|[|>])(?:[\s"'`,;)\]]|$)"#,
+            r#"^(?:\$\{[^}\n]*\}\}?|\$[A-Za-z_][A-Za-z0-9_]*|<[^>\n]*>|\{\{.*?\}\}|%\([^)\n]*\)s|%[A-Za-z_][A-Za-z0-9_]*%|[*&][A-Za-z0-9_][A-Za-z0-9_.-]*|![A-Za-z0-9_.-]*[ \t]+[A-Za-z_][A-Za-z0-9_.-]*|[|>])(?:[\s"'`]|[,;)\]]+(?:\s|$)|$)"#,
         )
     });
     let value = value.trim();
@@ -368,12 +369,16 @@ fn refers_to(value: &str, rest: &str) -> bool {
 }
 
 /// How much of `rest`, the text after `value`, goes with the value when it is
-/// a secret's, or `None` if it only refers to one. A bare value that blanks and
-/// words follow takes them to the end of the line (`correct horse battery
-/// staple`), unless they are code (`mysql -e "select version()"` after
-/// `MYSQL_PWD=hunter2`): then it is the value alone, as before.
+/// a secret's, or `None` if it only refers to one or has no letter or digit in
+/// it (the `&` of `&'a str`, `****`). A bare value that blanks and words follow
+/// takes them to the end of the line (`correct horse battery staple`), unless
+/// they are code (`mysql -e "select version()"` after `MYSQL_PWD=hunter2`):
+/// then it is the value alone, as before.
 fn takes(value: &str, rest: &str) -> Option<usize> {
     let (quote, inner) = unquote(value);
+    if !inner.chars().any(char::is_alphanumeric) {
+        return None;
+    }
     if !quote.is_empty() {
         return (!is_reference(inner)).then_some(0);
     }
@@ -646,6 +651,12 @@ mod tests {
         ("api_key: *realsecretvalue*", "realsecretvalue"),
         ("TOKEN=%s3cretValue99", "s3cretValue99"),
         ("PASSWORD=(hunter2hunter2)", "hunter2hunter2"),
+        // A reference that a second value follows, after `,` or `;`, is not one.
+        ("TOKEN=$X,hunter2value", "hunter2value"),
+        ("PASSWORD=*alias,hunter2value", "hunter2value"),
+        ("TOKEN=${X};hunter2value", "hunter2value"),
+        ("PASSWORD=<abc>,hunter2value", "hunter2value"),
+        ("PASSWORD=%NAME%;hunter2value", "hunter2value"),
         // A bare value with words after it takes them to the end of the line.
         (
             "password: correct horse battery staple",
@@ -801,6 +812,10 @@ mod tests {
             ">",
             "null",
             "~",
+            // Closing punctuation at the end of the value.
+            "$X,",
+            "${X});",
+            "<abc>]",
         ] {
             assert!(is_reference(reference), "{reference:?}");
         }
@@ -818,6 +833,12 @@ mod tests {
             "<abc>def",
             "|hunter2",
             ">hunter2",
+            // A second value after the closing punctuation.
+            "$X,hunter2value",
+            "*alias,hunter2value",
+            "${X};hunter2value",
+            "<abc>,hunter2value",
+            "%NAME%;hunter2value",
         ] {
             assert!(!is_reference(secret), "{secret:?}");
         }
@@ -854,7 +875,11 @@ mod tests {
         "password: ${DB_PASSWORD}",
         "password: <your-password>",
         "token: \"\"",
+        // A value with no letter or digit in it hides nothing.
+        "token: &'a str,",
+        "password: ********",
         "TOKEN=$OTHER",
+        "TOKEN=$OTHER;",
         "GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}",
         "the bearer token is required",
         "docker run -u 1000:1000 img",

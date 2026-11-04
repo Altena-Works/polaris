@@ -80,7 +80,7 @@ const FACT_TOKENS: usize = 256;
 const LOG_BYTES: usize = 1024 * 1024;
 /// A chunk stays well under the embedder's 512 tokenizer tokens.
 const CHUNK_CHARS: usize = 400;
-const CHUNKS_RECALLED: usize = 3;
+const CHUNKS_RECALLED: usize = 8;
 /// What the line writer is sent: the head of the input and of the answer,
 /// each within these sentences and characters, and the whole request within
 /// the last.
@@ -1953,6 +1953,136 @@ mod tests {
         memory.discard();
         memory.close(None).await;
         assert_eq!((memory.turns, held(&memory)), (1, before));
+    }
+
+    #[tokio::test]
+    async fn absorb_drops_what_a_run_left_pending_before_it_takes_turns_in() {
+        let marker = "quartz-heron-umbra-7731";
+        let mut messages = vec![
+            Message::user("Read it."),
+            Message::assistant_with_tool_calls(
+                String::new(),
+                vec![ToolCall {
+                    id: "c1".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({ "path": "report.txt" }),
+                }],
+            ),
+            Message::tool_result("c1", format!("the report ends with {marker}")),
+        ];
+        let mut memory = TurnMemory::default();
+        memory.ingest(&messages);
+        assert_eq!(memory.pending.len(), 3, "the result is pending, not closed");
+
+        // The run did not complete: the history is cut back to the input, and
+        // the person asks something else.
+        messages.truncate(1);
+        messages.push(Message::user("Something else."));
+        memory.absorb(&messages, None).await;
+
+        // Only the input the history still holds was taken in.
+        assert_eq!(held(&memory), (vec!["Read it.".to_owned()], vec![1]));
+        let quote = memory
+            .recall(&format!("what did the report end with, {marker}?"))
+            .await
+            .expect("recalled")
+            .content;
+        assert!(quote.contains("T1: asked=Read it."), "{quote}");
+        assert!(!quote.contains(marker), "{quote}");
+    }
+
+    /// The measurement's first document, shortened: records, the approved
+    /// decision, notes, and a proposal that is not approved.
+    fn proposal_document() -> String {
+        let mut text = String::from("# 資料1\nこの資料は台帳Aの取得時点の記録。\n");
+        for i in 0..60 {
+            text.push_str(&format!("記録{i:04}: 正常動作を確認。決定変更なし。\n"));
+        }
+        text.push_str("決定R017: 承認済み。台帳Aのretention_days=37。\n");
+        for i in 0..10 {
+            text.push_str(&format!("補足{i:04}: 運用状態に変更なし。\n"));
+        }
+        text.push_str("提案P018: 未承認。台帳Aのretention_days=91。適用禁止。\n");
+        text
+    }
+
+    #[tokio::test]
+    async fn a_value_read_long_ago_is_quoted_though_the_last_questions_share_the_inputs_wording() {
+        // The shape of the measurement: a long document read in turn 1 and an
+        // announcement in turn 2, both pushed out of the ten lines by ten
+        // lookups, then questions that ask for JSON in the same words. The
+        // earlier ones rank above the chunk that holds the proposal's value,
+        // which comes sixth here, as late as in the measurement.
+        let mut messages = vec![
+            Message::user(
+                "docs/doc1.md を read で読み、承認済みの決定と未承認の提案を区別して要点を3行で述べてください。変更は禁止。",
+            ),
+            Message::assistant_with_tool_calls(
+                String::new(),
+                vec![ToolCall {
+                    id: "c1".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({ "path": "docs/doc1.md" }),
+                }],
+            ),
+            Message::tool_result("c1", proposal_document()),
+            Message::assistant(
+                "承認済み：決定R017は、台帳Aの `retention_days=37`。\n未承認：提案P018の `retention_days=91` は適用禁止。",
+            ),
+            Message::user(
+                "連絡です。台帳Aのretention_daysは、決定R021で45に変更されました。この内容を覚えておき、「了解」とだけ答えてください。",
+            ),
+            Message::assistant("了解"),
+        ];
+        for i in 0..10 {
+            let line = 100 + 37 * i;
+            messages.push(Message::user(format!(
+                "docs/doc2.md の監査{line:04} の行を read で確かめ、その行だけを1行で答えてください。変更は禁止。"
+            )));
+            messages.push(Message::assistant(format!(
+                "監査{line:04}: 台帳Bを確認。設定変更なし。"
+            )));
+        }
+        let first = "最初の資料（docs/doc1.md）に記録された台帳Aの承認済みの決定について、retention_daysとdecision_idを、ファイルを読み直さずに、JSONだけで回答してください。";
+        let questions: [(&str, Option<&str>, &[&str]); 5] = [
+            (
+                first,
+                Some(r#"{"retention_days":37,"decision_id":"R017"}"#),
+                &["R017", "retention_days=37"],
+            ),
+            (
+                "会話の途中の連絡も含めて、現時点で有効な台帳Aのretention_daysと、その根拠のdecision_idを、ファイルを読み直さずに、JSONだけで回答してください。",
+                Some(r#"{"retention_days":45,"decision_id":"R021"}"#),
+                &["R021", "45に変更"],
+            ),
+            // Two more in the same words, only to rank above the value.
+            (
+                "docs/doc2.md の監査0174 の行にあった照合コードを、ファイルを読み直さずに、JSONだけで回答してください（キーは code）。",
+                Some(r#"{"code":"T8N-5V"}"#),
+                &[],
+            ),
+            (
+                first,
+                Some(r#"{"retention_days":37,"decision_id":"R017"}"#),
+                &[],
+            ),
+            (
+                "提案P018について、承認済みかどうか（キーは approved、真偽値）とretention_daysを、ファイルを読み直さずに、JSONだけで回答してください。",
+                None,
+                &["P018", "retention_days=91"],
+            ),
+        ];
+        for (question, answer, wanted) in questions {
+            messages.push(Message::user(question));
+            // A run of `-p` makes its memory afresh from the history.
+            let mut memory = TurnMemory::default();
+            memory.absorb(&messages, None).await;
+            let quote = memory.recall(question).await.expect("recalled").content;
+            for want in wanted {
+                assert!(quote.contains(want), "{want} is not in {quote}");
+            }
+            messages.extend(answer.map(Message::assistant));
+        }
     }
 }
 
