@@ -173,7 +173,10 @@ const REMOVED: &[(&str, &str)] = &[
         "instruction",
         "/instruction was removed. Text typed during a run is queued for the next turn.",
     ),
-    ("input", "/input was removed. Esc stops the running turn."),
+    (
+        "input",
+        "/input was removed. Press Esc twice to stop the running turn.",
+    ),
     (
         "roles",
         "/roles was removed. Role definitions live in agents/<name>/SKILL.md.",
@@ -522,7 +525,7 @@ mod tests {
         (
             "input",
             "/input cancel input-id",
-            "Esc stops the running turn",
+            "Press Esc twice to stop the running turn",
         ),
         (
             "roles",

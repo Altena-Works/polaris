@@ -1327,7 +1327,7 @@ pub(crate) fn render_footer_with_mode(
         Status::Thinking { elapsed } => {
             let mut spans = shimmer_spans("Working", *elapsed);
             spans.push(Span::styled(
-                format!(" ({}s \u{b7} esc to interrupt)", elapsed.as_secs()),
+                format!(" ({}s \u{b7} esc twice to interrupt)", elapsed.as_secs()),
                 Style::default().add_modifier(Modifier::DIM),
             ));
             Line::from(spans)

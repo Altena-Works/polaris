@@ -6684,7 +6684,7 @@ pub async fn run(mut args: RunArgs<'_>) -> ExitCode {
             // `agent_future` is only ever polled here, in one place, so
             // dropping it on interrupt is real cancellation: Rust futures
             // stop making progress the moment nothing polls them again,
-            // which is what "esc to interrupt" means in practice — this
+            // which is what "esc twice to interrupt" means in practice — this
             // doesn't kill an already-spawned OS subprocess a tool call
             // may have started, only stops *waiting* on the turn.
             // The tick-redraw branch below only redraws the footer
