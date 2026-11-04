@@ -202,12 +202,12 @@ TUIの`/account`は廃止し、上記の入口へ集約した。CLIの`polaris a
 | `/pwd` | `/status`の`Project root`行で、project rootを見る。 | `/pwd was removed. /status shows the project root.` |
 | `/review` | レビューを通常の文章で依頼する。 | `/review was removed. Ask polaris in plain words to review your changes.` |
 | `/roles` | TUIにはrole定義を表示しない。role定義は`agents/<型名>/SKILL.md`にあり、探す場所は[subagent](subagents.md)に書いてある。 | `/roles was removed. Role definitions live in agents/<name>/SKILL.md.` |
-| `/run` | `Esc`で実行を止める。turn上限は起動時の`--max-turns <n>`で指定する。 | `/run was removed. Esc stops a run; set --max-turns at launch.` |
+| `/run` | `Esc`を2回押して実行を止める。turn上限は起動時の`--max-turns <n>`で指定する。 | `/run was removed. Press Esc twice to stop a run; set --max-turns at launch.` |
 | `/sandbox` | `/status`の`sandbox`・`Writable roots`・`Approval`の各行で、sandboxと承認方針を見る。sandboxの変更は、新しい起動の`--sandbox`で行う。エージェントを介さずsandbox内で実行する操作は、CLIの`polaris sandbox -- <実行物>`に残っている。 | `/sandbox was removed. /status shows the sandbox and the approval policy.` |
 | `/session` | `/status`で対話ID・モデル・providerを見る。モデルは`/model`で選ぶ。履歴方式は`/memory configure <方式>`か起動時の`--history-mode`で指定する。保存したprovider・モデルの表示と`/session configure`はなくなった。 | `/session was removed. /status shows the session; /model sets the model.` |
 | `/setting` | シェルで`polaris setting git`を使う（Linuxだけで使えた`/setting git`の代わり）。 | `/setting was removed. In a shell: polaris setting git.` |
 | `/skills` | `/status`の`skills`行で、いまの段階が使うskillを見る。 | `/skills was removed. /status lists the skills in use for this phase.` |
-| `/subagents` | `Esc`で実行を止める。実行中の子にも停止を要求する。 | `/subagents was removed. Esc stops the run and asks its subagents to stop.` |
+| `/subagents` | `Esc`を2回押して実行を止める。実行中の子にも停止を要求する。 | `/subagents was removed. Press Esc twice to stop the run and its subagents.` |
 | `/tool-memory` | 起動時の`--tool-memory off\|history\|retrieval`で選び、埋め込みは`--tool-memory-embedding-url`と`--tool-memory-embedding-model`を組で指定する。`/memory configure`などで設定を保存した会話では、保存した設定が優先する。 | `/tool-memory was removed. Start polaris with --tool-memory <mode>.` |
 | `/workflow` | 保存済みの会話は`polaris --resume <ID> --workflow-mode manual\|adaptive\|off`で変える。新しい会話の既定は設定の`[workflow] enabled`・`mode`。 | `/workflow was removed. Use polaris --resume <ID> --workflow-mode <mode>.` |
 | `/mcp configure` | `/mcp setup`を使う。Unityの固定配置は、シェルの`polaris mcp configure`で行う。 | `/mcp configure was removed. Use /mcp setup, or polaris mcp configure.` |

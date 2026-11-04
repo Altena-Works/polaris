@@ -126,7 +126,7 @@ const REMOVED: &[(&str, &str)] = &[
     ),
     (
         "run",
-        "/run was removed. Esc stops a run; set --max-turns at launch.",
+        "/run was removed. Press Esc twice to stop a run; set --max-turns at launch.",
     ),
     (
         "history",
@@ -151,7 +151,7 @@ const REMOVED: &[(&str, &str)] = &[
     ),
     (
         "subagents",
-        "/subagents was removed. Esc stops the run and asks its subagents to stop.",
+        "/subagents was removed. Press Esc twice to stop the run and its subagents.",
     ),
     ("doctor", "/doctor was removed. In a shell: polaris doctor."),
     (
@@ -527,7 +527,7 @@ mod tests {
         (
             "run",
             "/run settings max-turns 5",
-            "Esc stops a run; set --max-turns at launch",
+            "Press Esc twice to stop a run; set --max-turns at launch",
         ),
         ("history", "/history 20", "save it with /export"),
         ("env", "/env set node --path app", "polaris env"),
@@ -550,7 +550,7 @@ mod tests {
         (
             "subagents",
             "/subagents cancel child attempt",
-            "Esc stops the run and asks its subagents to stop",
+            "Press Esc twice to stop the run and its subagents",
         ),
         ("doctor", "/doctor now", "polaris doctor"),
         ("decided", "/decided add keep the ledger", "polaris decided"),
