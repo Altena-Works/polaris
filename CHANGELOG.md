@@ -32,6 +32,7 @@ macOS arm64のTUIを配布対象として準備する。GUIと他OSのソース�
 - macOSのTUIの一覧と`/help`から、macOSでは動かない`/setting`を外す。`/sync`の説明から、TUIでは参加を確定できない`join`を外す。
 - TUIの`/pwd`・`/sandbox`・`/instruction`・`/input`・`/roles`・`/compare`・`/run`・`/history`を廃止する。入力しても何も実行せず、廃止した旨と代わりの操作を1行で答える。代わりは、`/pwd`と`/sandbox`が`/status`（`Project root`行を追加）、`/instruction`が実行中に入力した文章の待ち行列、`/input`がEsc、`/roles`が`agents/<型名>/SKILL.md`、`/compare`が`polaris compare`、`/run`が`/subagents`と起動時の`--max-turns`、`/history`が画面のスクロールと`/export`である。CLIの`polaris compare`・`polaris sandbox`・`--max-turns`は保持する。
 - TUIの入力欄の灰色の背景をやめ、入力行の上下を灰色の罫線にする。会話履歴の自分の発言の灰色の背景は変えない。モデルの行の右端にworkflowの段階（`workflow: implement`）、その下の行にsubagentの集計（`subagents 2/4 done · 1 running · 1 failed`）を表示する。幅が足りないときは段階を省き、subagentのないrunでは集計の行を出さない。
+- TUIで実行中の中断を、Escの2回押しにする。1回目は入力欄の下書きに触れず、`Press Esc again to interrupt`と表示するだけで、約2秒以内の2回目で従来どおり中断する。2秒を過ぎると1回目は数えない。待機中・選択画面・確認画面でのEscと、Ctrl-Cの動作は変えない。
 
 ### 修正
 
@@ -44,6 +45,7 @@ macOS arm64のTUIを配布対象として準備する。GUIと他OSのソース�
 - 入力履歴の上下移動、working中の補完、session管理、directory読取、MCP catalog検索引数を修正した。
 - 日本語入力後の入力欄背景と、管理コマンドの実行経路を整理した。
 - ログアウト状態での対話起動をログイン画面へ接続した。解除済み登録からのログインは既存の登録経路を使い、認証待機中のEsc・Ctrl-Cで登録を取り消す。
+- TUIの承認確認（`y/n`）が、表示の前に打たれて端末に残っていた`y`で承認されてしまう不具合を修正した。表示した時点で端末に残っているキー入力を捨て、表示から約300ミリ秒は`y`と`n`を受け付けない。画面の描画、入力の破棄、キーの読み取りのどれかが失敗したときは、承認せず拒否する。
 
 ### 検証・備考
 

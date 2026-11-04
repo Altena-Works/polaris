@@ -225,7 +225,7 @@ TUIの`/account`は廃止し、上記の3入口へ集約した。CLIの`polaris 
 | `/pwd` | `/status`の`Project root`行で、canonicalize済みのproject rootを見る。 |
 | `/sandbox` | `/status`の`sandbox`・`Writable roots`・`Approval`の各行で、sandboxと承認方針を見る。sandboxの変更は、新しい起動の`--sandbox`で行う。エージェントを介さずsandbox内で実行する操作は、CLIの`polaris sandbox -- <実行物>`に残っている。 |
 | `/instruction` | 実行中に入力した文章は待ち行列へ入り、実行終了後の次のturnで処理される。 |
-| `/input` | 実行中はEscで停止を要求する。 |
+| `/input` | 実行中はEscを約2秒以内に2回押して停止を要求する。1回目は`Press Esc again to interrupt`と表示するだけで、入力欄は変わらない。 |
 | `/roles` | TUIにはrole定義を表示しない。role定義は`agents/<型名>/SKILL.md`にあり、探す場所は[subagent](subagents.md)に書いてある。 |
 | `/compare` | シェルで`polaris compare <folderA> <folderB> [folder...]`を実行する。 |
 | `/run` | 子の一覧は`/subagents`で見る。turn上限は起動時の`--max-turns <n>`で指定する。 |
