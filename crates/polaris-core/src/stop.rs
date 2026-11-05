@@ -2,9 +2,11 @@
 //! while broken is the most expensive outcome, so the decision is handed
 //! back to the caller.
 
+use std::collections::HashSet;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopReason {
-    /// The same error occurred 3 times in a row.
+    /// The same error occurred on 3 model turns in a row.
     RepeatedError(String),
     /// The turn limit was reached.
     MaxTurns,
@@ -17,6 +19,7 @@ pub enum StopReason {
 pub struct StopTracker {
     last_error: Option<String>,
     streak: u32,
+    turn_errors: HashSet<String>,
     turns: u32,
     max_turns: u32,
     wall_seconds: Option<u32>,
@@ -29,6 +32,7 @@ impl StopTracker {
         Self {
             last_error: None,
             streak: 0,
+            turn_errors: HashSet::new(),
             turns: 0,
             max_turns,
             wall_seconds: None,
@@ -46,7 +50,12 @@ impl StopTracker {
         }
     }
 
+    /// Calls in one model response run as a batch, so an error they share
+    /// counts once: three parallel reads refused alike are not a loop.
     pub fn observe_error(&mut self, msg: &str) -> Option<StopReason> {
+        if !self.turn_errors.insert(msg.to_string()) {
+            return None;
+        }
         if self.last_error.as_deref() == Some(msg) {
             self.streak += 1;
         } else {
@@ -77,6 +86,7 @@ impl StopTracker {
 
     pub fn observe_turn(&mut self) -> Option<StopReason> {
         self.turns += 1;
+        self.turn_errors.clear();
         if self.turns >= self.max_turns {
             return Some(StopReason::MaxTurns);
         }
@@ -113,7 +123,9 @@ mod tests {
     fn stops_after_three_identical_errors() {
         let mut t = StopTracker::new(100);
         assert!(t.observe_error("boom").is_none());
+        t.observe_turn();
         assert!(t.observe_error("boom").is_none());
+        t.observe_turn();
         assert!(matches!(
             t.observe_error("boom"),
             Some(StopReason::RepeatedError(_))
@@ -121,12 +133,27 @@ mod tests {
     }
 
     #[test]
+    fn identical_errors_in_one_response_count_once() {
+        let mut t = StopTracker::new(100);
+        for _ in 0..5 {
+            assert!(t.observe_error("boom").is_none());
+        }
+        t.observe_turn();
+        assert!(t.observe_error("boom").is_none());
+        t.observe_turn();
+        assert!(t.observe_error("boom").is_some());
+    }
+
+    #[test]
     fn different_errors_reset_the_streak() {
         let mut t = StopTracker::new(100);
         t.observe_error("boom");
+        t.observe_turn();
         t.observe_error("boom");
         assert!(t.observe_error("other").is_none());
+        t.observe_turn();
         assert!(t.observe_error("other").is_none());
+        t.observe_turn();
         assert!(matches!(
             t.observe_error("other"),
             Some(StopReason::RepeatedError(_))

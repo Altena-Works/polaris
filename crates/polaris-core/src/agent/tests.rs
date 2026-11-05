@@ -9418,6 +9418,14 @@ async fn a_turn_that_edited_nothing_is_not_sent_back() {
 /// Three identical `read` failures in a row, then a final answer.
 #[cfg(unix)]
 async fn failing_turn(gates: crate::quality::Gates) -> Result<Session, AgentError> {
+    failing_batches(gates, &[1, 1, 1]).await
+}
+
+#[cfg(unix)]
+async fn failing_batches(
+    gates: crate::quality::Gates,
+    batches: &[usize],
+) -> Result<Session, AgentError> {
     let root = tempfile::tempdir().expect("temp directory");
     let helper_dir = tempfile::tempdir().expect("temp directory");
     let helper = write_helper(helper_dir.path());
@@ -9430,13 +9438,17 @@ async fn failing_turn(gates: crate::quality::Gates) -> Result<Session, AgentErro
         .join("missing.txt")
         .display()
         .to_string();
-    let mut replies: Vec<CompletionResponse> = (0..3)
-        .map(|n| CompletionResponse {
-            tool_calls: vec![ToolCall {
-                id: format!("r{n}"),
-                name: "read".into(),
-                arguments: serde_json::json!({"path": missing}),
-            }],
+    let mut replies: Vec<CompletionResponse> = batches
+        .iter()
+        .enumerate()
+        .map(|(n, calls)| CompletionResponse {
+            tool_calls: (0..*calls)
+                .map(|call| ToolCall {
+                    id: format!("r{n}-{call}"),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": missing}),
+                })
+                .collect(),
             ..Default::default()
         })
         .collect();
@@ -9499,6 +9511,15 @@ async fn the_loop_gate_gives_a_third_repeated_error_one_chance_to_change_course(
             .count(),
         1
     );
+    assert_eq!(session.messages.last().unwrap().content, "changed course");
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn one_response_with_three_identical_errors_does_not_end_the_turn() {
+    let session = failing_batches(crate::quality::Gates::default(), &[3])
+        .await
+        .expect("a single batch is not a loop");
     assert_eq!(session.messages.last().unwrap().content, "changed course");
 }
 
