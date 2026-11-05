@@ -29,6 +29,11 @@ const ARTIFACTS_DIRECTORY: &str = "workflow-artifacts-v1";
 const OBJECTS_DIRECTORY: &str = "objects";
 const TEMP_ATTEMPTS: usize = 32;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+/// Between `link_no_replace` and the temporary's unlink an object has two
+/// links, which the owner check rejects as corrupt. Serialising puts keeps a
+/// concurrent put of the same body from reading it in that window.
+// ponytail: process-wide lock; per-directory if put throughput ever matters.
+static PUT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// A project-scoped immutable body store below a verified desktop root.
 ///
@@ -229,6 +234,7 @@ impl WorkflowArtifactStore {
         validate_reference(&reference)?;
         let bytes = canonical_body_bytes(artifact)?;
         let name = object_name(&reference.content_hash)?;
+        let _put = PUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         match self.read_typed_exact(&name, &reference, &validate, &reference_of) {
             Ok(existing) => {
@@ -605,6 +611,33 @@ mod tests {
         let left = left.join().unwrap().unwrap();
         let right = right.join().unwrap().unwrap();
         assert_eq!(left, right);
+    }
+
+    /// A reader must never see the object while the publisher's temporary
+    /// link still makes its link count 2. Many rounds, many threads, a fresh
+    /// store each round so every round starts from "not yet published".
+    #[test]
+    fn concurrent_same_content_stress_never_sees_a_transient_link() {
+        for _ in 0..150 {
+            let (_root, store, _project) = store();
+            let contract = contract();
+            let barrier = Arc::new(std::sync::Barrier::new(6));
+            let threads: Vec<_> = (0..6)
+                .map(|_| {
+                    let (store, contract, barrier) =
+                        (store.clone(), contract.clone(), barrier.clone());
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        store.put_change_contract(&contract)
+                    })
+                })
+                .collect();
+            let refs: Vec<_> = threads
+                .into_iter()
+                .map(|t| t.join().unwrap().unwrap())
+                .collect();
+            assert!(refs.windows(2).all(|w| w[0] == w[1]));
+        }
     }
 
     #[test]
