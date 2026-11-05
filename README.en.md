@@ -127,9 +127,10 @@ cargo fmt --all -- --check
 
 <h2><img src="docs/assets/readme/research.svg" alt="Research incorporated" width="100%"></h2>
 
-This section lists the elements polaris takes from research papers, grouped by implementation status. "Planned" and "Candidate" items are not in the code yet. polaris has not re-measured the papers' experimental results. Papers checked as evidence for the turn-only design are collected at the end of this section.
+This section lists the elements polaris takes from research papers, grouped by implementation status. "Planned" and "Candidate" items are not in the code yet. polaris has not re-measured the papers' experimental results. Papers checked as evidence for the turn-only design are collected at the end of the Implemented items.
 
-### Implemented
+<details>
+<summary><strong>Implemented</strong></summary>
 
 - **Fact admission check:** Turn-only memory (the [default](docs/usage.md#1-polaris_turn_onlyturn-only-記憶方式), Japanese) keeps a ledger that compresses each turn into one line. Of the decisions written in ledger lines, only those whose checkable terms all appear in that turn's source text, and that the user stated or approved, are carried with every request as facts. No model makes this judgment. Each recall checks that the supporting source text is still in the log and marks the fact unsupported if it is gone.
   - Source: [Assay](https://arjmandi.github.io/assay/) (Arjmandi, 2026)
@@ -137,31 +138,6 @@ This section lists the elements polaris takes from research papers, grouped by i
   - Source: BM25 (Robertson et al., Okapi at TREC-3, 1994)
 - **Rank fusion:** Merge the two rankings from terms (BM25) and embeddings into one by summing `1/(60+rank)`. Used by memory search and the turn-only index.
   - Source: [RRF](https://doi.org/10.1145/1571941.1572114) (Cormack et al., 2009)
-
-### Planned: next stages of turn-only memory
-
-- **Topic segments and gists:** Split the conversation where the topic changes, and keep a gist and the source position for each segment. Retrieve gists first and open the source text only when needed.
-  - Sources: [SeCom](https://arxiv.org/abs/2502.05589) (Pan et al., 2025), [ReadAgent](https://arxiv.org/abs/2402.09727) (Lee et al., 2024)
-- **Facts with validity periods:** Store one claim per fact, with when it became valid and which fact replaced it. Old facts are never deleted.
-  - Sources: [Zep](https://arxiv.org/abs/2501.13956) (Rasmussen et al., 2025), [Chronos](https://arxiv.org/abs/2603.16862) (Sen et al., 2026)
-- **Incremental synopsis:** Grow the short synopsis carried with every request by deltas instead of rewriting it whole. This rests on the report that repeated rewrites erode details (context collapse).
-  - Source: [ACE](https://arxiv.org/abs/2510.04618) (Zhang et al., 2025)
-- **Links between memories** (optional stage): Connect memories with links that carry the relation's type and a reason.
-  - Source: [A-MEM](https://arxiv.org/abs/2502.12110) (Xu et al., 2025)
-- **Update and temporal measurement:** Measure each stage with tasks about fact updates and time. The question types follow the paper's taxonomy.
-  - Source: [LongMemEval](https://arxiv.org/abs/2410.10813) (Wu et al., 2024)
-
-### Planned: v2.0.0 and later
-
-- **Self-improving harness:** polaris itself runs the measure-diagnose-fix loop that people run today. It mines failure patterns from execution traces, proposes a small fix for each pattern, and keeps only proposals that pass regression tests without degrading tasks held out from the improvement.
-  - Source: [Self-Harness](https://arxiv.org/abs/2606.09498) (Zhang et al., 2026)
-- **Model for proposals:** Generate improvement proposals with a cheaper model and spend the budget on the task-solving side. This rests on the report that the ability to propose useful updates depends little on model strength.
-  - Source: [Harness Updating Is Not Harness Benefit](https://arxiv.org/abs/2605.30621) (Lin et al., 2026)
-
-### Candidate
-
-- **Suppressing repeatedly retrieved chunks:** Lower a chunk's rank from the next turn according to how often it has been quoted, so that chunks matching every query give way to the evidence hidden behind them (no model is called). Whether to adopt it will be decided by measuring it against no suppression.
-  - Source: [AMIE](https://arxiv.org/abs/2610.34977) (Hu et al., 2026)
 
 <details>
 <summary><strong>Papers checked as evidence for the turn-only design (29)</strong></summary>
@@ -229,6 +205,41 @@ For each of the five turn-only design decisions, we list the studies that suppor
   - MemGPT's gap is against summaries alone, not the full context.
   - When a conversation fits the context window, passing it whole scored about the same (Zep).
   - Simple truncation sometimes matched summarization (Context Rot).
+
+</details>
+
+</details>
+
+<details>
+<summary><strong>Planned</strong></summary>
+
+#### Next stages of turn-only memory
+
+- **Topic segments and gists:** Split the conversation where the topic changes, and keep a gist and the source position for each segment. Retrieve gists first and open the source text only when needed.
+  - Sources: [SeCom](https://arxiv.org/abs/2502.05589) (Pan et al., 2025), [ReadAgent](https://arxiv.org/abs/2402.09727) (Lee et al., 2024)
+- **Facts with validity periods:** Store one claim per fact, with when it became valid and which fact replaced it. Old facts are never deleted.
+  - Sources: [Zep](https://arxiv.org/abs/2501.13956) (Rasmussen et al., 2025), [Chronos](https://arxiv.org/abs/2603.16862) (Sen et al., 2026)
+- **Incremental synopsis:** Grow the short synopsis carried with every request by deltas instead of rewriting it whole. This rests on the report that repeated rewrites erode details (context collapse).
+  - Source: [ACE](https://arxiv.org/abs/2510.04618) (Zhang et al., 2025)
+- **Links between memories** (optional stage): Connect memories with links that carry the relation's type and a reason.
+  - Source: [A-MEM](https://arxiv.org/abs/2502.12110) (Xu et al., 2025)
+- **Update and temporal measurement:** Measure each stage with tasks about fact updates and time. The question types follow the paper's taxonomy.
+  - Source: [LongMemEval](https://arxiv.org/abs/2410.10813) (Wu et al., 2024)
+
+#### v0.4.0 and later
+
+- **Self-improving harness:** polaris itself runs the measure-diagnose-fix loop that people run today. It mines failure patterns from execution traces, proposes a small fix for each pattern, and keeps only proposals that pass regression tests without degrading tasks held out from the improvement.
+  - Source: [Self-Harness](https://arxiv.org/abs/2606.09498) (Zhang et al., 2026)
+- **Model for proposals:** Generate improvement proposals with a cheaper model and spend the budget on the task-solving side. This rests on the report that the ability to propose useful updates depends little on model strength.
+  - Source: [Harness Updating Is Not Harness Benefit](https://arxiv.org/abs/2605.30621) (Lin et al., 2026)
+
+</details>
+
+<details>
+<summary><strong>Candidate</strong></summary>
+
+- **Suppressing repeatedly retrieved chunks:** Lower a chunk's rank from the next turn according to how often it has been quoted, so that chunks matching every query give way to the evidence hidden behind them (no model is called). Whether to adopt it will be decided by measuring it against no suppression.
+  - Source: [AMIE](https://arxiv.org/abs/2610.34977) (Hu et al., 2026)
 
 </details>
 
