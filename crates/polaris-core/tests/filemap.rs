@@ -65,14 +65,34 @@ fn rust_summary(root: &Path, path: &str) -> Option<String> {
         .find(|s| !s.is_empty())
 }
 
-/// A `.md` file's summary. The text of the first `# ` heading. Falls back
-/// to the file name if there isn't one.
+/// A `.md` file's summary. The text of the first `# ` heading outside a
+/// fenced code block (a `# comment` in a shell block is not a title). Falls
+/// back to the file name if there isn't one.
 fn markdown_summary(root: &Path, path: &str) -> String {
     let body = std::fs::read_to_string(root.join(path))
         .unwrap_or_else(|e| panic!("cannot read {path}: {e}"));
-    body.lines()
-        .find_map(|line| line.strip_prefix("# ").map(|rest| rest.trim().to_string()))
-        .unwrap_or_else(|| file_name_of(path).to_string())
+    let mut fence: Option<&str> = None;
+    for line in body.lines() {
+        let t = line.trim_start();
+        let marker = if t.starts_with("```") {
+            Some("```")
+        } else if t.starts_with("~~~") {
+            Some("~~~")
+        } else {
+            None
+        };
+        match (fence, marker) {
+            (None, Some(m)) => fence = Some(m),
+            (Some(open), Some(m)) if open == m => fence = None,
+            (None, None) => {
+                if let Some(rest) = line.strip_prefix("# ") {
+                    return rest.trim().to_string();
+                }
+            }
+            _ => {}
+        }
+    }
+    file_name_of(path).to_string()
 }
 
 /// A `.toml` file's summary. A fixed label determined by the path. An
@@ -262,5 +282,24 @@ mod rust_summary_tests {
             rust_summary(dir.path(), "normal.rs"),
             Some("an ordinary description.".to_string())
         );
+    }
+}
+
+#[cfg(test)]
+mod markdown_summary_tests {
+    use super::*;
+
+    #[test]
+    fn heading_inside_a_fenced_code_block_is_not_the_title() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        std::fs::write(
+            dir.path().join("a.md"),
+            "intro\n\n```sh\n# build and log in\ncargo build\n```\n\n~~~\n# also code\n~~~\n",
+        )
+        .expect("cannot write");
+        assert_eq!(markdown_summary(dir.path(), "a.md"), "a.md");
+        std::fs::write(dir.path().join("b.md"), "```\n# code\n```\n# Real title\n")
+            .expect("cannot write");
+        assert_eq!(markdown_summary(dir.path(), "b.md"), "Real title");
     }
 }
