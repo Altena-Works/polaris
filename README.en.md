@@ -25,7 +25,8 @@
 
 **polaris** is a Rust coding agent that selects the context needed for the current task and passes it to the model. Its main interfaces are a CLI and TUI, and it also has a macOS workspace app. It stores the workflow phase as state and assembles the instructions and skills that phase needs. By default, each turn's request carries only that turn's input and the recalled memory (the turn-only approach).
 
-- **Scope of v0.3.0-rc:** The distribution target is the macOS arm64 TUI (the RC package is currently unpublished). GUI and other-platform sources remain in the repository but are not part of this version's distribution.
+- **Scope of v0.3.0:** The distribution target is the macOS arm64 TUI (the package is currently unpublished). GUI and other-platform sources remain in the repository but are not part of this version's distribution.
+- **Contents and status of v0.3.0:** v0.3.0 is made up of finished items plus items in progress and planned items. In-progress and planned items cannot be used today. Each item's status is shown under Core features.
 - **Documentation:** For conversations, rewind, MCP, and subagents, see the [usage guide](docs/usage.md) and the [command reference](docs/command-reference.md). For the system structure and the details of the release scope, see the [system overview](docs/system-overview.md) and the [release notes](docs/releases/v0.3.0.md). These documents are in Japanese.
 
 <p><a href="docs/releases/v0.3.0.md"><img src="docs/assets/versions/polaris-v0.3.0-starchart.gif" alt="v0.3.0 Castor star chart" width="100%"></a></p>
@@ -69,16 +70,29 @@ Note: The package is currently unsigned and unpublished, and a real-machine inst
 
 <h2><img src="docs/assets/readme/features.svg" alt="Core features" width="100%"></h2>
 
+Status marks: an item with no mark is in the current code. **[In progress]** is being worked on and cannot be used yet. **[Planned]** has not been started.
+
 - **Stateful workflow:** Record the phase, the active task, and the skills needed, then assemble the context for each turn.
-- **Conversation saving and branching:** Separate unrelated work into Sidechats, and resume or fork saved conversations. In the TUI, you can rewind the conversation and workspace files to before a chosen user input.
+- **Conversation saving and branching:** Separate unrelated work into Sidechats, and resume or fork saved conversations. In the TUI, you can rewind the conversation and workspace files to before a chosen user input. A conversation opens with its saved provider and model, and the program no longer exits when a saved role binding cannot be resolved.
 - **Tools and delegation:** Handle file, Git, and MCP operations and delegation to subagents through a shared execution core. MCP connection conditions and permissions are checked in advance.
-- **Memory and retrieval:** Preserve the source text, and retrieve recent turns and older relevant context as needed. Large tool results can be fetched again from a reference.
-- **Selectable typed decision backends:** Retain Jev and SemIf, and handle fixed Clef/Clef-flash profiles and System One compatible connections under one decision contract (disabled by default; capacity tiers are recommendations and never change the selected backend automatically).
+- **Memory and retrieval:** Preserve the source text, and retrieve recent turns and older relevant context as needed. Large tool results can be fetched again from a reference. The turn-only approach (four layers) is the default, and filtering at ingestion, two-step ingestion, and a fix for shifted ingestion positions are included. **[Planned]** The next stages of memory, including saving, are listed under the planned items in "Research incorporated" below.
+- **Interaction during inference:** Pressing Esc twice during inference and typing ahead on the approval screen are supported. **[Planned]** A summary on interruption and parallel sidechats (including a recommended count) are waiting on design decisions.
+- **Command cleanup:** The TUI commands were reorganized and eight, such as `/pwd`, were removed. `/fork` became `/new fork`, and `/decider` became `/login decider`. **[Planned]** The rest of the consolidation into `/status`, and the cleanup of config keys and CLI `--help`, have not been started.
+- **Selectable typed decision backends [In progress]:** In the current code you can select Jev and a System One compatible connection (disabled by default; capacity tiers are recommendations and never change the selected backend automatically). The work under way gives these a shared catalog, stores keys per route, and adds a guard that rejects answers that have not been calibrated. There will be four routes.
+  - **Jev:** It works in the current code. Save the API key with `/login decider`.
+  - **Clef:** The Cloudflare API route is **[Planned]** and not started. Connecting needs an API token and an account ID, not a key alone. The local route cannot run because no Clef/Clef-flash profile has production acceptance yet.
+  - **Liquid AI models [In progress]:** Adding them to the catalog is under way, and no communication with a real key has been tried. Models under license terms stay unavailable until those terms are checked.
+  - **Local System One [Planned]:** The plan is to run it through llama.cpp or a localhost API. Not started.
+  - **SemIf [In progress]:** It is being removed. `backend="semif"` stays as a setting name that marks it as removed.
+- **Sandbox and approval presets (manual, auto) [Planned]:** The design is done; the code has not been started.
+- **Web search [Planned]:** The plan implements a foundation with Exa search, RustXNG as an external dependency, and later stages. None has been started. `--web-search` currently accepts only `disabled`; `cached` and `live` are rejected before a run starts.
+- **Experimental settings (shipping undecided):** Not in the current code. Two settings that check answer quality, a setting that batches edits, and a shell-only notation for operations are being measured. No result exists, so no cost or quality effect can be claimed. They may not ship. The shell-only notation is off by default and bypasses the read tool's secret refusal.
 
 > [!NOTE]
 > **Current availability and limits**
-> - **Typed decision backends:** No Clef profile has production acceptance yet, so normal Clef execution is not available (see [configuration and current limits](docs/usage.md#型付き判断器の設定), Japanese).
-> - **Resources bundled with the macOS package:** The CLI preview package contains no additional resources. The GUI installer has a path that verifies a fixed manifest and downloads llama.cpp, the embedding runtime, and `multilingual-e5-small/base` under `~/.polaris` (Rust is optional). `Qwen3.5-4B` for SemIf is a candidate; its pinned resource and acceptance are not finished, so it is not downloaded automatically. Signed distribution assets and real-device acceptance are still missing (see the [macOS guide](apps/macos/README.md) for details).
+> - **Typed decision backends:** No Clef profile has production acceptance yet, so normal Clef execution is not available. Models under license terms stay unavailable until those terms are checked. External routes other than Jev have not been checked against a real service (see [configuration and current limits](docs/usage.md#型付き判断器の設定), Japanese).
+> - **File writes in plain conversation:** In the workflow's `general` phase (plain conversation), the TUI cannot write files. A fix is planned for v0.3.0 (**[Planned]**). The `-p` case is deferred to the next version.
+> - **Resources bundled with the macOS package:** The CLI preview package contains no additional resources. The GUI installer has a path that verifies a fixed manifest and downloads llama.cpp, the embedding runtime, and `multilingual-e5-small/base` under `~/.polaris` (Rust is optional). Signed distribution assets and real-device acceptance are still missing (see the [macOS guide](apps/macos/README.md) for details).
 
 <h2><img src="docs/assets/readme/benchmark.svg" alt="Terminal-Bench v4.0 comparison with stock Codex" width="100%"></h2>
 
