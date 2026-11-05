@@ -131,7 +131,7 @@ This section lists the elements polaris takes from research papers, grouped by i
 
 ### Implemented
 
-- **Fact admission check:** Turn-only memory (the [default](docs/usage.md#ビルドと一発実行), Japanese) keeps a ledger that compresses each turn into one line. Of the decisions written in ledger lines, only those whose checkable terms all appear in that turn's source text, and that the user stated or approved, are carried with every request as facts. No model makes this judgment. Each recall checks that the supporting source text is still in the log and marks the fact unsupported if it is gone.
+- **Fact admission check:** Turn-only memory (the [default](docs/usage.md#1-polaris_turn_onlyturn-only-記憶方式), Japanese) keeps a ledger that compresses each turn into one line. Of the decisions written in ledger lines, only those whose checkable terms all appear in that turn's source text, and that the user stated or approved, are carried with every request as facts. No model makes this judgment. Each recall checks that the supporting source text is still in the log and marks the fact unsupported if it is gone.
   - Source: [Assay](https://arjmandi.github.io/assay/) (Arjmandi, 2026)
 - **Lexical search:** Skill search, MCP tool preselection, and the turn-only index pick the entries closest to the input by term matching.
   - Source: BM25 (Robertson et al., Okapi at TREC-3, 1994)
