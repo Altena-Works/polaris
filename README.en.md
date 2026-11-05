@@ -6,12 +6,12 @@
 </p>
 
 <p align="center">
-  <img alt="Version v0.3.0-rc Castor" src="https://img.shields.io/badge/v0.3.0--rc-Castor-35505B?style=for-the-badge&labelColor=182D36">
+  <a href="https://github.com/Altena-Works/polaris/blob/rc/v0.3.0/CHANGELOG.md"><img alt="Version v0.3.0-rc Castor" src="https://img.shields.io/badge/v0.3.0--rc-Castor-35505B?style=for-the-badge&labelColor=182D36"></a>
   <img alt="Platform macOS arm64" src="https://img.shields.io/badge/macOS-arm64-35505B?style=for-the-badge&labelColor=182D36&logo=apple&logoColor=white">
   <img alt="Rust 1.96+" src="https://img.shields.io/badge/Rust-1.96%2B-35505B?style=for-the-badge&labelColor=182D36&logo=rust&logoColor=white">
-  <img alt="License MIT" src="https://img.shields.io/github/license/Altena-Works/polaris?style=for-the-badge&labelColor=182D36&color=35505B">
+  <a href="LICENSE"><img alt="License MIT" src="https://img.shields.io/github/license/Altena-Works/polaris?style=for-the-badge&labelColor=182D36&color=35505B"></a>
   <a href="docs/README.md"><img alt="Docs" src="https://img.shields.io/badge/Docs-Guide-35505B?style=for-the-badge&labelColor=182D36&logo=readthedocs&logoColor=white"></a>
-  <img alt="Last commit" src="https://img.shields.io/github/last-commit/Altena-Works/polaris/rc%2Fv0.3.0?style=for-the-badge&labelColor=182D36&color=35505B">
+  <a href="https://github.com/Altena-Works/polaris/commits/rc/v0.3.0/"><img alt="Last commit" src="https://img.shields.io/github/last-commit/Altena-Works/polaris/rc%2Fv0.3.0?style=for-the-badge&labelColor=182D36&color=35505B"></a>
   <a href="https://github.com/sponsors/4ltena"><img alt="Sponsor 4ltena" src="https://img.shields.io/badge/Sponsor-4ltena-35505B?style=for-the-badge&labelColor=182D36&logo=githubsponsors&logoColor=white"></a>
 </p>
 
