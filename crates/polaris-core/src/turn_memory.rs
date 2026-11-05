@@ -334,6 +334,32 @@ pub fn turn_start(messages: &[Message]) -> usize {
         .unwrap_or(0)
 }
 
+/// What a turn-only request must still carry from before `from`: each result
+/// that says a tool's outcome is unknown, with the assistant message that made
+/// the call and the results that follow it, so the wire stays valid. Without
+/// it the model cannot tell that an earlier call may have run.
+pub fn unresolved_outcomes(messages: &[Message], from: usize) -> Vec<Message> {
+    let from = from.min(messages.len());
+    let mut keep = std::collections::BTreeSet::new();
+    for (i, m) in messages[..from].iter().enumerate() {
+        if m.role != Role::Tool || m.content != crate::session::UNKNOWN_OUTCOME {
+            continue;
+        }
+        let Some(id) = m.tool_call_id.as_deref() else {
+            continue;
+        };
+        let Some(call) = messages[..i]
+            .iter()
+            .rposition(|a| a.role == Role::Assistant && a.tool_calls.iter().any(|c| c.id == id))
+        else {
+            continue;
+        };
+        keep.insert(call);
+        keep.extend((call + 1..from).take_while(|&j| messages[j].role == Role::Tool));
+    }
+    keep.into_iter().map(|i| messages[i].clone()).collect()
+}
+
 impl TurnMemory {
     /// The start of a run. What an earlier run left pending is dropped, and
     /// every finished turn that was never closed — the turns before the
@@ -1712,6 +1738,30 @@ mod tests {
         );
         assert!(!checked("a\nb", source, LINE_TOKENS));
         assert!(!checked(&"word ".repeat(200), source, LINE_TOKENS));
+    }
+
+    #[test]
+    fn unknown_outcomes_keep_their_call_and_sibling_results_only() {
+        let call = |id: &str| polaris_provider::ToolCall {
+            id: id.into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({}),
+        };
+        let messages = vec![
+            Message::user("old"),
+            Message::assistant_with_tool_calls("", vec![call("a"), call("b")]),
+            Message::tool_result("a", "done"),
+            Message::tool_result("b", crate::session::UNKNOWN_OUTCOME),
+            Message::assistant_with_tool_calls("", vec![call("c")]),
+            Message::tool_result("c", "fine"),
+            Message::user("now"),
+        ];
+        let kept = unresolved_outcomes(&messages, 6);
+        let ids: Vec<_> = kept.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(kept.len(), 3, "{ids:?}");
+        assert_eq!(kept[0].tool_calls.len(), 2);
+        assert_eq!(kept[2].content, crate::session::UNKNOWN_OUTCOME);
+        assert!(unresolved_outcomes(&messages[..4], 0).is_empty());
     }
 
     #[test]

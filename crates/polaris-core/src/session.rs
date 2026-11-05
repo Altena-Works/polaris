@@ -252,6 +252,10 @@ impl DesktopTranscript {
 }
 
 /// Deterministic request-only annotations for a user-authorized continuation.
+/// The result written for a tool call whose outcome was never recorded. The
+/// model must keep seeing it, or it may repeat a non-idempotent action.
+pub(crate) const UNKNOWN_OUTCOME: &str = "The outcome is unknown due to interruption. Check external effects before continuing. No automatic retry was attempted.";
+
 /// Missing tool outcomes are explicitly unknown and never trigger reexecution.
 /// The durable raw history remains unchanged, including its interrupted calls.
 pub fn desktop_request_history(raw: &[Message]) -> std::io::Result<Vec<Message>> {
@@ -269,8 +273,7 @@ pub(crate) fn desktop_request_history_bound(
     for (index, message) in raw.iter().enumerate() {
         if message.role != Role::Tool {
             for id in pending.drain(..) {
-                projected.push(Message::tool_result(&id,
-                    "The outcome is unknown due to interruption. Check external effects before continuing. No automatic retry was attempted."));
+                projected.push(Message::tool_result(&id, UNKNOWN_OUTCOME));
             }
         }
         match message.role {
@@ -312,8 +315,7 @@ pub(crate) fn desktop_request_history_bound(
         projected.push(message.clone());
     }
     for id in pending {
-        projected.push(Message::tool_result(&id,
-            "The outcome is unknown due to interruption. Check external effects before continuing. No automatic retry was attempted."));
+        projected.push(Message::tool_result(&id, UNKNOWN_OUTCOME));
     }
     Ok((projected, source))
 }
@@ -1046,7 +1048,7 @@ impl Session {
             self.reported_input = None;
         }
         for id in pending {
-            self.push_tool_result(&id, "The outcome is unknown due to interruption. Check external effects before continuing. No automatic retry was attempted.");
+            self.push_tool_result(&id, UNKNOWN_OUTCOME);
             self.check_persistence()?;
         }
         Ok(())

@@ -9819,6 +9819,79 @@ async fn turn_only_sends_this_turn_and_recalls_named_terms_without_extra_model_c
     assert_eq!(session.messages.len(), 4);
 }
 
+#[tokio::test]
+#[cfg(unix)]
+async fn turn_only_still_tells_the_model_an_earlier_tool_outcome_is_unknown() {
+    let root = tempfile::tempdir().expect("temp directory");
+    let helper_dir = tempfile::tempdir().expect("temp directory");
+    let helper = write_helper(helper_dir.path());
+    let sandbox = polaris_sandbox::SandboxPolicy::new(
+        polaris_sandbox::SandboxMode::WorkspaceWrite,
+        &[root.path().to_path_buf()],
+    )
+    .expect("policy");
+    let p = Recording {
+        replies: Mutex::new(vec![CompletionResponse::default()]),
+        sent: Mutex::new(Vec::new()),
+    };
+    let dir = tempfile::tempdir().expect("temp directory");
+    let mut session = Session::new();
+    session.quality = Some(crate::quality::Gates::default());
+    session.turn_memory = Some(Default::default());
+    session.push_user("Deploy the release.");
+    session.push_assistant_tool_calls(
+        "",
+        vec![ToolCall {
+            id: "deploy-call".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({"command": "deploy"}),
+        }],
+        Vec::new(),
+    );
+    // The run was cut off before the result: the next input closes the call.
+    session.push_user("Continue.");
+    let always_on = crate::prompt::assemble_always_on("", "", &[]);
+    let audit = shared_audit(&dir.path().join("audit.jsonl"));
+    let mut stop = StopTracker::new(20);
+    let mut gate = crate::approval::Gate::new(crate::approval::ApprovalPolicy::Never);
+    let mut approver = AlwaysAllow { asked: 0 };
+    let mut ctx = ToolContext {
+        sandbox: &sandbox,
+        helper: &helper,
+        gate: &mut gate,
+        approver: &mut approver,
+    };
+    run(
+        &p,
+        &mut session,
+        audit,
+        &mut stop,
+        &always_on,
+        &[],
+        &[],
+        unused_provider_pool(),
+        crate::spawn::DEFAULT_CONCURRENCY,
+        crate::spawn::DEFAULT_WRITE_CONCURRENCY,
+        None,
+        &mut ctx,
+    )
+    .await
+    .expect("run");
+    let sent = p.sent.lock().expect("lock");
+    let messages = &sent[0].messages;
+    let n = messages.len();
+    assert_eq!(messages[n - 1].content, "Continue.");
+    let marker = &messages[n - 2];
+    assert_eq!(marker.role, polaris_provider::Role::Tool);
+    assert_eq!(marker.tool_call_id.as_deref(), Some("deploy-call"));
+    assert!(marker.content.contains("outcome is unknown"));
+    assert_eq!(messages[n - 3].tool_calls[0].id, "deploy-call");
+    assert!(
+        !messages.iter().any(|m| m.content == "Deploy the release."),
+        "the earlier turn itself is still not sent"
+    );
+}
+
 /// The memory quoted in the last request, if that request carried one.
 fn quoted(sent: &[CompletionRequest]) -> Option<String> {
     sent.last()?

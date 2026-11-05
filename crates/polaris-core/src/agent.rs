@@ -1792,8 +1792,12 @@ pub(crate) async fn run_loop(
             // Earlier turns stay saved but are not sent. Projections above
             // insert at or after this turn's input, so cutting before it
             // keeps them.
+            // An unknown tool outcome is not history to forget: it warns the
+            // model that the call may have run.
+            let kept = crate::turn_memory::unresolved_outcomes(&sending_messages, *from);
             sending_messages.drain(..(*from).min(sending_messages.len()));
             request_messages.extend(recalled.clone());
+            request_messages.extend(kept);
         }
         request_messages.extend_from_slice(&sending_messages);
         check_event_delivery(events.as_ref())?;
